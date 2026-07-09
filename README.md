@@ -27,6 +27,17 @@ python3 -m http.server 8123
 - ダークモード（自動 / ライト / ダーク切替）
 - Cmd/Ctrl + Enter で生成
 - スマホ対応（iPhone 16 想定・下部固定の生成バー・ライトボックスのスワイプ切替）
+- 端末間の同期（任意・Cloudflare Workers でホストしている場合。API キー / LoRA ライブラリ / 生成履歴）
+
+## 端末間の同期（任意）
+
+Cloudflare Workers（Git 連携デプロイ）でホストしている場合、API キー・LoRA ライブラリ・生成履歴を端末間で同期できます。データは Worker の Durable Object（無料枠内）に保存されます。
+
+1. Cloudflare ダッシュボード → 対象の Worker → **Settings** → **Variables and Secrets** → **Add**
+   - Type: **Secret**、Variable name: `SYNC_TOKEN`、Value: 推測されにくい長いランダム文字列（半角英数記号）
+2. 各端末でアプリを開き、「API キー」ダイアログの**同期トークン**欄に同じ値を入力して保存
+
+トークンを設定した端末は、起動時・タブ復帰時・変更の数秒後に自動で同期されます。トークン未設定なら従来どおりローカルのみで動作します。
 
 ## 注意
 

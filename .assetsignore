@@ -2,4 +2,5 @@
 README.md
 docs/
 wrangler.jsonc
+worker.js
 .assetsignore
