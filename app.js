@@ -83,6 +83,7 @@ const els = {
   steps: $('#steps'),
   guidance: $('#guidance'),
   generateBtn: $('#generateBtn'),
+  cancelBtn: $('#cancelBtn'),
   status: $('#status'),
   error: $('#error'),
   detail: $('#detail'),
@@ -680,6 +681,30 @@ function buildInput({ loras, seed, numImages } = {}) {
 
 let generating = false;
 let selectedId = null;
+let cancelRequested = false;
+
+// 生成中フラグと生成/キャンセルボタンの表示をまとめて切り替える
+function setGenerating(on) {
+  generating = on;
+  els.generateBtn.disabled = on;
+  els.cancelBtn.hidden = !on;
+  if (on) cancelRequested = false;
+}
+
+// 実行中ジョブの中断。fal 側のキャンセル（待機中のみ有効）も試みるが、
+// 失敗してもローカルでは必ずポーリングを打ち切って操作可能な状態に戻す
+async function cancelGeneration() {
+  cancelRequested = true;
+  const job = loadActiveJob();
+  const submitted = job?.kind === 'single' ? job.submitted : job?.current?.submitted;
+  if (submitted?.cancel_url) {
+    try {
+      await falFetch(submitted.cancel_url, { method: 'PUT' });
+    } catch {
+      // 生成開始済みなどでキャンセルできなくても、ローカルの打ち切りは行う
+    }
+  }
+}
 
 function setStatus(text) {
   els.status.hidden = !text;
@@ -741,6 +766,7 @@ async function awaitJob(submitted, onProgress) {
   let status;
   do {
     await sleep(POLL_INTERVAL_MS);
+    if (cancelRequested) throw new Error('キャンセルされました');
     status = await falFetch(submitted.status_url);
     if (onProgress) onProgress(status);
   } while (status.status !== 'COMPLETED');
@@ -776,8 +802,7 @@ async function generate() {
 
   if (compareMode) { await generateCompare(modelId, prompt); return; }
 
-  generating = true;
-  els.generateBtn.disabled = true;
+  setGenerating(true);
   setError('');
 
   try {
@@ -797,8 +822,7 @@ async function generate() {
     setError(`エラー: ${err.message}`);
     clearActiveJob();
   } finally {
-    generating = false;
-    els.generateBtn.disabled = false;
+    setGenerating(false);
     setStatus('');
   }
 }
@@ -859,8 +883,7 @@ async function generateCompare(modelId, prompt) {
     startedAt: Date.now(),
   };
 
-  generating = true;
-  els.generateBtn.disabled = true;
+  setGenerating(true);
   setError('');
 
   try {
@@ -869,8 +892,7 @@ async function generateCompare(modelId, prompt) {
     setError(`エラー: ${err.message}`);
     clearActiveJob();
   } finally {
-    generating = false;
-    els.generateBtn.disabled = false;
+    setGenerating(false);
     setStatus('');
   }
 }
@@ -897,6 +919,8 @@ async function runCompareFrom(job) {
       const r = await awaitJob(submitted, (status) => pollStatusText(status, job.startedAt, `試行 ${i + 1}/${total} `));
       job.results.push({ ownLoras: own, loras, images: r.images, seed: r.seed, elapsed: null, error: null });
     } catch (err) {
+      // キャンセルは試行の失敗としてではなく比較全体の中断として扱う
+      if (cancelRequested) throw err;
       job.results.push({ ownLoras: own, loras, images: [], seed: null, elapsed: null, error: err.message });
     }
     job.current = null;
@@ -926,8 +950,7 @@ async function resumeActiveJob() {
   const job = loadActiveJob();
   if (!job) return;
 
-  generating = true;
-  els.generateBtn.disabled = true;
+  setGenerating(true);
   setError('');
   setStatus('前回の生成を再開中…');
 
@@ -944,8 +967,7 @@ async function resumeActiveJob() {
     setError(`前回の生成の再開に失敗しました: ${err.message}`);
     clearActiveJob();
   } finally {
-    generating = false;
-    els.generateBtn.disabled = false;
+    setGenerating(false);
     setStatus('');
   }
 }
@@ -1530,6 +1552,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 els.generateBtn.addEventListener('click', generate);
+els.cancelBtn.addEventListener('click', cancelGeneration);
 els.addLoraBtn.addEventListener('click', () => addLoraRow());
 els.compareToggle.addEventListener('change', () => setCompareMode(els.compareToggle.checked));
 els.addVariantBtn.addEventListener('click', () => addVariant());
