@@ -50,6 +50,8 @@
 
 body {
   margin: 0;
+  /* viewport-fit=cover で Dynamic Island の下に潜らないようにする */
+  padding-top: env(safe-area-inset-top);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     "Hiragino Sans", "Noto Sans JP", sans-serif;
   font-size: 14px;
@@ -114,6 +116,7 @@ a { color: var(--accent); }
   top: 24px;
   /* パネルが縦長でも生成ボタンに届くよう、はみ出し分は内部スクロール */
   max-height: calc(100vh - 48px);
+  max-height: calc(100svh - 48px);
   overflow-y: auto;
 }
 
@@ -144,6 +147,8 @@ a { color: var(--accent); }
 
 input, select, textarea {
   font: inherit;
+  /* 16px 未満だと iOS Safari がフォーカス時に自動ズームする */
+  font-size: 16px;
   color: var(--text);
   background: var(--bg);
   border: 1px solid var(--border);
@@ -187,6 +192,19 @@ textarea { resize: vertical; min-height: 80px; }
 }
 
 /* ---------- lora ---------- */
+/* PC ではアコーディオンとして振る舞わせない（常時展開・従来のラベル見た目） */
+details.lora-accordion { display: block; }
+
+.lora-accordion > summary {
+  list-style: none;
+  pointer-events: none;
+  user-select: none;
+}
+
+.lora-accordion > summary::-webkit-details-marker { display: none; }
+
+.lora-accordion > :not(summary) { margin-top: 8px; }
+
 .lora-list {
   display: flex;
   flex-direction: column;
@@ -399,6 +417,13 @@ button { font: inherit; cursor: pointer; }
 .ghost-btn:hover { border-color: var(--muted); }
 .ghost-btn.small { font-size: 12px; padding: 4px 10px; }
 
+/* ---------- generate area ---------- */
+.generate-area {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 /* ---------- status / error ---------- */
 .status {
   font-size: 13px;
@@ -462,6 +487,7 @@ button { font: inherit; cursor: pointer; }
   height: auto;
   max-width: 100%;
   max-height: 70vh;
+  max-height: 70svh;
   margin-inline: auto;
   border-radius: 8px;
   border: 1px solid var(--border);
@@ -529,6 +555,7 @@ button { font: inherit; cursor: pointer; }
   gap: 8px;
   /* 履歴が伸びてもページが無限に長くならないよう独立スクロールにする */
   max-height: 60vh;
+  max-height: 60svh;
   overflow-y: auto;
   padding: 2px;
 }
@@ -611,6 +638,33 @@ button { font: inherit; cursor: pointer; }
   border-radius: 8px;
 }
 
+.lightbox-close {
+  position: absolute;
+  top: calc(12px + env(safe-area-inset-top));
+  right: 12px;
+  width: 44px;
+  height: 44px;
+  border: none;
+  border-radius: 22px;
+  background: rgb(0 0 0 / 0.5);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.lightbox-counter {
+  position: absolute;
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgb(0 0 0 / 0.5);
+  color: #fff;
+  font-size: 13px;
+  padding: 4px 12px;
+  border-radius: 12px;
+  pointer-events: none;
+}
+
 /* ---------- dialog ---------- */
 .key-dialog {
   border: 1px solid var(--border);
@@ -646,4 +700,88 @@ button { font: inherit; cursor: pointer; }
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* ---------- mobile (iPhone 16: 393pt / Plus・Pro Max: 430pt) ---------- */
+.mobile-only { display: none; }
+
+@media (max-width: 430px) {
+  body { font-size: 15px; }
+
+  .topbar {
+    padding: 12px calc(16px + env(safe-area-inset-right))
+             12px calc(16px + env(safe-area-inset-left));
+  }
+
+  .layout {
+    /* 下部固定の生成バーに隠れないぶんの余白を確保する */
+    padding: 16px 16px calc(110px + env(safe-area-inset-bottom));
+    gap: 16px;
+  }
+
+  .controls { padding: 16px; }
+
+  /* 最も触るプロンプトをフォーム先頭へ */
+  .prompt-field { order: -1; }
+
+  /* LoRA はアコーディオンとして畳めるようにする */
+  .lora-accordion > summary {
+    pointer-events: auto;
+    cursor: pointer;
+    padding: 6px 0;
+  }
+
+  .lora-accordion > summary::before { content: "▸ "; }
+  .lora-accordion[open] > summary::before { content: "▾ "; }
+
+  .advanced summary { padding: 12px; }
+
+  /* 生成ボタンを常時タップできる下部固定バーにする */
+  .generate-area {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 50;
+    gap: 8px;
+    padding: 10px calc(16px + env(safe-area-inset-right))
+             calc(10px + env(safe-area-inset-bottom))
+             calc(16px + env(safe-area-inset-left));
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+  }
+
+  /* ステータス / エラーはボタンの上に出す */
+  .generate-area .status,
+  .generate-area .error { order: -1; }
+
+  /* タッチターゲット（44pt）とタップ時のフィードバック */
+  button { -webkit-tap-highlight-color: transparent; }
+
+  .primary-btn { padding: 14px 16px; font-size: 17px; }
+  .primary-btn:active:not(:disabled) { background: var(--accent-hover); }
+
+  .ghost-btn { padding: 10px 14px; min-height: 44px; }
+  .ghost-btn.small { font-size: 14px; }
+  .ghost-btn:active { border-color: var(--muted); }
+
+  .icon-btn { width: 44px; height: 44px; }
+
+  /* ギャラリー: 3 列固定・内部スクロール廃止（ページスクロールに統一） */
+  .gallery {
+    grid-template-columns: repeat(3, 1fr);
+    max-height: none;
+    overflow-y: visible;
+  }
+
+  /* カード上の小さい削除ボタンは誤タップの元なので詳細側に移す */
+  .gallery-item .actions { display: none; }
+  .gallery-item:active { border-color: var(--muted); }
+
+  .mobile-only { display: inline-block; }
+
+  .lightbox {
+    padding: calc(16px + env(safe-area-inset-top)) 16px
+             calc(16px + env(safe-area-inset-bottom));
+  }
 }

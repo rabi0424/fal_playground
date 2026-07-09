@@ -2,7 +2,7 @@
 <html lang="ja" data-theme="auto">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>fal playground</title>
 <link rel="stylesheet" href="style.css">
 </head>
@@ -28,25 +28,25 @@
       <input id="customModel" type="text" placeholder="fal-ai/..." spellcheck="false">
     </label>
 
-    <label class="field">
+    <label class="field prompt-field">
       <span class="label">プロンプト</span>
       <textarea id="prompt" rows="6" placeholder="生成したい画像を英語で記述..." spellcheck="false"></textarea>
     </label>
 
-    <div class="field" id="loraField" hidden>
-      <span class="label" id="loraLabel">LoRA</span>
+    <details class="field lora-accordion" id="loraField" hidden open>
+      <summary class="label" id="loraLabel">LoRA</summary>
       <div id="loraList" class="lora-list"></div>
       <button id="addLoraBtn" class="ghost-btn small" type="button">＋ LoRA を追加</button>
       <label class="compare-toggle">
         <input type="checkbox" id="compareToggle"> LoRA 比較モード
       </label>
-    </div>
 
-    <div class="field compare-field" id="compareField" hidden>
-      <span class="label">比較する LoRA（試行ごと・共通 LoRA に追加されます）</span>
-      <div id="variantList"></div>
-      <button id="addVariantBtn" class="ghost-btn small" type="button">＋ 試行を追加</button>
-    </div>
+      <div class="field compare-field" id="compareField" hidden>
+        <span class="label">比較する LoRA（試行ごと・共通 LoRA に追加されます）</span>
+        <div id="variantList"></div>
+        <button id="addVariantBtn" class="ghost-btn small" type="button">＋ 試行を追加</button>
+      </div>
+    </details>
 
     <div class="row">
       <label class="field">
@@ -102,9 +102,11 @@
       </div>
     </details>
 
-    <button id="generateBtn" class="primary-btn">生成する</button>
-    <div id="status" class="status" hidden></div>
-    <div id="error" class="error" role="alert" hidden></div>
+    <div class="generate-area">
+      <button id="generateBtn" class="primary-btn">生成する</button>
+      <div id="status" class="status" hidden></div>
+      <div id="error" class="error" role="alert" hidden></div>
+    </div>
   </aside>
 
  <section class="results">
@@ -137,7 +139,11 @@
   </form>
 </dialog>
 
-<div id="lightbox" class="lightbox" hidden><img alt=""></div>
+<div id="lightbox" class="lightbox" hidden>
+  <button id="lightboxClose" class="lightbox-close mobile-only" type="button" aria-label="閉じる">✕</button>
+  <img alt="">
+  <div id="lightboxCounter" class="lightbox-counter mobile-only" hidden></div>
+</div>
 
 <script src="app.js"></script>
 </body>
