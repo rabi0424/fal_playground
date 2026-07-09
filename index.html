@@ -36,7 +36,10 @@
     <details class="field lora-accordion" id="loraField" hidden open>
       <summary class="label" id="loraLabel">LoRA</summary>
       <div id="loraList" class="lora-list"></div>
-      <button id="addLoraBtn" class="ghost-btn small" type="button">＋ LoRA を追加</button>
+      <div class="lora-actions">
+        <button id="addLoraBtn" class="ghost-btn small" type="button">＋ LoRA を追加</button>
+        <button id="hfOpenBtn" class="ghost-btn small" type="button">Hugging Face から一括登録</button>
+      </div>
       <label class="compare-toggle">
         <input type="checkbox" id="compareToggle"> LoRA 比較モード
       </label>
@@ -140,6 +143,27 @@
     <div class="key-actions">
       <button value="cancel" class="ghost-btn" formnovalidate>キャンセル</button>
       <button value="save" id="keySaveBtn" class="primary-btn">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="hfDialog" class="key-dialog hf-dialog">
+  <form method="dialog" class="key-form">
+    <h2>Hugging Face から LoRA を一括登録</h2>
+    <p class="hint">
+      公開リポジトリの ID（owner/repo）または URL を入力すると、含まれる .safetensors を一覧表示します。<br>
+      選択したものは LoRA ライブラリに登録されます（現在の LoRA 設定行には追加されません）。
+    </p>
+    <div class="hf-search">
+      <input id="hfRepoInput" type="text" placeholder="owner/repo" spellcheck="false" autocomplete="off">
+      <button id="hfLoadBtn" class="ghost-btn" type="button">読み込み</button>
+    </div>
+    <div id="hfStatus" class="status" hidden></div>
+    <div id="hfError" class="error" hidden></div>
+    <div id="hfList" class="hf-list"></div>
+    <div class="key-actions">
+      <button value="cancel" class="ghost-btn" formnovalidate>閉じる</button>
+      <button value="add" id="hfAddBtn" class="primary-btn" disabled>選択した 0 件を登録</button>
     </div>
   </form>
 </dialog>

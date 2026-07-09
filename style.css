@@ -249,7 +249,11 @@ details.lora-accordion { display: block; }
 
 .lora-scale button { flex-shrink: 0; }
 
-#addLoraBtn { align-self: flex-start; }
+.lora-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 
 .lora-head {
   display: flex;
@@ -702,6 +706,59 @@ button { font: inherit; cursor: pointer; }
   gap: 8px;
 }
 
+/* ---------- Hugging Face bulk import ---------- */
+.hf-dialog { width: min(560px, 92vw); }
+
+.hf-search {
+  display: flex;
+  gap: 8px;
+}
+
+.hf-search input { flex: 1; min-width: 0; }
+
+.hf-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 45vh;
+  max-height: 45svh;
+  overflow-y: auto;
+}
+
+.hf-list:empty { display: none; }
+
+.hf-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.hf-item:hover { background: var(--bg); }
+
+.hf-item input {
+  width: auto;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+
+.hf-item .hf-name {
+  flex: 1;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.hf-item .hf-meta {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.hf-item.registered { opacity: 0.55; cursor: default; }
+
 /* ---------- mobile (iPhone 16: 393pt / Plus・Pro Max: 430pt) ---------- */
 .mobile-only { display: none; }
 
@@ -773,6 +830,9 @@ button { font: inherit; cursor: pointer; }
     max-height: none;
     overflow-y: visible;
   }
+
+  /* HF 一覧の行はタップしやすい高さにする */
+  .hf-item { padding: 12px 10px; }
 
   /* カード上の小さい削除ボタンは誤タップの元なので詳細側に移す */
   .gallery-item .actions { display: none; }

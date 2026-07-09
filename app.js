@@ -12,24 +12,17 @@ const MODELS = [
   { id: '__custom__', name: 'カスタム…', sizeParam: 'image_size', lora: true },
 ];
 
+// fal のプリセット列挙（square: 512×512 など）は小さすぎるので使わず、
+// 近年のモデルで一般的な約 1MP のピクセル指定を直接送る。
+// ratio は aspect_ratio 指定のモデル（ultra 系）用
 const SIZES = [
-  { value: 'square_hd', label: '正方形（HD）' },
-  { value: 'square', label: '正方形' },
-  { value: 'landscape_4_3', label: '横長 4:3' },
-  { value: 'landscape_16_9', label: '横長 16:9' },
-  { value: 'portrait_4_3', label: '縦長 3:4' },
-  { value: 'portrait_16_9', label: '縦長 9:16' },
+  { value: 'square_1_1', label: '正方形 1:1（1024×1024）', width: 1024, height: 1024, ratio: '1:1' },
+  { value: 'landscape_4_3', label: '横長 4:3（1152×896）', width: 1152, height: 896, ratio: '4:3' },
+  { value: 'landscape_16_9', label: '横長 16:9（1344×768）', width: 1344, height: 768, ratio: '16:9' },
+  { value: 'portrait_3_4', label: '縦長 3:4（896×1152）', width: 896, height: 1152, ratio: '3:4' },
+  { value: 'portrait_2_3', label: '縦長 2:3（1024×1536）', width: 1024, height: 1536, ratio: '2:3' },
+  { value: 'portrait_9_16', label: '縦長 9:16（768×1344）', width: 768, height: 1344, ratio: '9:16' },
 ];
-
-// image_size 列挙値 → aspect_ratio 形式（ultra 系モデル用）
-const ASPECT_MAP = {
-  square_hd: '1:1',
-  square: '1:1',
-  landscape_4_3: '4:3',
-  landscape_16_9: '16:9',
-  portrait_4_3: '3:4',
-  portrait_16_9: '9:16',
-};
 
 const CUSTOM_SIZE = '__custom_size__';
 const DIM_MIN = 256;
@@ -64,6 +57,14 @@ const els = {
   loraLabel: $('#loraLabel'),
   loraList: $('#loraList'),
   addLoraBtn: $('#addLoraBtn'),
+  hfOpenBtn: $('#hfOpenBtn'),
+  hfDialog: $('#hfDialog'),
+  hfRepoInput: $('#hfRepoInput'),
+  hfLoadBtn: $('#hfLoadBtn'),
+  hfStatus: $('#hfStatus'),
+  hfError: $('#hfError'),
+  hfList: $('#hfList'),
+  hfAddBtn: $('#hfAddBtn'),
   compareToggle: $('#compareToggle'),
   compareField: $('#compareField'),
   variantList: $('#variantList'),
@@ -455,6 +456,122 @@ function collectLoras() {
   return collectLorasFrom(els.loraList);
 }
 
+/* ---------- Hugging Face bulk import ---------- */
+// 公開リポジトリの .safetensors を一覧表示し、選択したものを LoRA ライブラリに
+// 一括登録する。登録のみで、現在の LoRA 設定行には追加しない
+
+function parseHfRepo(raw) {
+  const s = raw.trim().replace(/^https?:\/\/huggingface\.co\//, '');
+  const parts = s.split('/').filter(Boolean);
+  return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null;
+}
+
+function hfSetStatus(text) {
+  els.hfStatus.hidden = !text;
+  els.hfStatus.textContent = text || '';
+}
+
+function hfSetError(text) {
+  els.hfError.hidden = !text;
+  els.hfError.textContent = text || '';
+}
+
+function hfUpdateAddBtn() {
+  const n = els.hfList.querySelectorAll('input:checked:not(:disabled)').length;
+  els.hfAddBtn.disabled = n === 0;
+  els.hfAddBtn.textContent = `選択した ${n} 件を登録`;
+}
+
+async function loadHfRepo() {
+  const repo = parseHfRepo(els.hfRepoInput.value);
+  if (!repo) {
+    hfSetError('リポジトリ ID を owner/repo の形式で入力してください');
+    return;
+  }
+  hfSetError('');
+  els.hfList.innerHTML = '';
+  hfUpdateAddBtn();
+  hfSetStatus('ファイル一覧を取得中…');
+
+  let entries;
+  try {
+    const res = await fetch(`https://huggingface.co/api/models/${repo}/tree/main?recursive=true`);
+    if (res.status === 401 || res.status === 404) {
+      throw new Error('リポジトリが見つかりません（非公開または ID の誤り）');
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    entries = await res.json();
+  } catch (err) {
+    hfSetStatus('');
+    hfSetError(`取得に失敗しました: ${err.message}`);
+    return;
+  }
+  hfSetStatus('');
+
+  const files = entries.filter((e) => e.type === 'file' && /\.safetensors$/i.test(e.path));
+  if (files.length === 0) {
+    hfSetError('このリポジトリに .safetensors ファイルは見つかりませんでした');
+    return;
+  }
+
+  const registered = new Set(loadLoraLibrary().map((l) => l.path));
+  for (const f of files) {
+    const url = `https://huggingface.co/${repo}/resolve/main/${f.path}`;
+    const done = registered.has(url);
+
+    const item = document.createElement('label');
+    item.className = 'hf-item';
+    if (done) item.classList.add('registered');
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = url;
+    cb.checked = done;
+    cb.disabled = done;
+    item.appendChild(cb);
+
+    const name = document.createElement('span');
+    name.className = 'hf-name';
+    name.textContent = f.path;
+    item.appendChild(name);
+
+    const meta = document.createElement('span');
+    meta.className = 'hf-meta';
+    meta.textContent = done ? '登録済み' : (f.size ? `${(f.size / 1024 / 1024).toFixed(0)} MB` : '');
+    item.appendChild(meta);
+
+    els.hfList.appendChild(item);
+  }
+  hfUpdateAddBtn();
+}
+
+function initHfDialog() {
+  els.hfOpenBtn.addEventListener('click', () => {
+    hfSetError('');
+    hfSetStatus('');
+    els.hfDialog.showModal();
+  });
+
+  els.hfLoadBtn.addEventListener('click', loadHfRepo);
+
+  // Enter で form が「閉じる」ボタンで submit されるのを防いで読み込みにする
+  els.hfRepoInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      loadHfRepo();
+    }
+  });
+
+  els.hfList.addEventListener('change', hfUpdateAddBtn);
+
+  els.hfDialog.addEventListener('close', () => {
+    if (els.hfDialog.returnValue !== 'add') return;
+    const urls = [...els.hfList.querySelectorAll('input:checked:not(:disabled)')]
+      .map((cb) => cb.value);
+    for (const url of urls) registerLora(url);
+  });
+}
+
 /* ---------- LoRA compare ---------- */
 
 let compareMode = false;
@@ -538,15 +655,16 @@ function buildInput({ loras, seed, numImages } = {}) {
     prompt: els.prompt.value.trim(),
     num_images: numImages ?? Number(els.numImages.value),
   };
+  const size = SIZES.find((s) => s.value === els.sizeSelect.value) || SIZES[0];
   if (model.sizeParam === 'aspect_ratio') {
-    input.aspect_ratio = ASPECT_MAP[els.sizeSelect.value];
+    input.aspect_ratio = size.ratio;
   } else if (els.sizeSelect.value === CUSTOM_SIZE) {
     input.image_size = {
       width: snapDim(els.customWidth.value),
       height: snapDim(els.customHeight.value),
     };
   } else {
-    input.image_size = els.sizeSelect.value;
+    input.image_size = { width: size.width, height: size.height };
   }
   const effSeed = seed ?? (els.seed.value !== '' ? Number(els.seed.value) : undefined);
   if (effSeed !== undefined) input.seed = effSeed;
@@ -1348,7 +1466,10 @@ function restoreFormState() {
   els.prompt.value = s.prompt || '';
   updateModelFields();
 
-  if (s.size) els.sizeSelect.value = s.size;
+  // 旧バージョンで保存された存在しないサイズ値（fal の列挙名など）は無視する
+  if (s.size && [...els.sizeSelect.options].some((o) => o.value === s.size)) {
+    els.sizeSelect.value = s.size;
+  }
   if (s.customWidth) els.customWidth.value = s.customWidth;
   if (s.customHeight) els.customHeight.value = s.customHeight;
   els.numImages.value = s.numImages || '1';
@@ -1378,6 +1499,7 @@ function scheduleSaveForm() {
 
 initTheme();
 initKeyDialog();
+initHfDialog();
 initForm();
 restoreFormState();
 renderGallery();
