@@ -89,11 +89,19 @@ const els = {
   clearHistoryBtn: $('#clearHistoryBtn'),
   keyDialog: $('#keyDialog'),
   keyInput: $('#keyInput'),
+  keyError: $('#keyError'),
   keySaveBtn: $('#keySaveBtn'),
 };
 
 function getApiKey() {
   return localStorage.getItem(LS_KEY) || '';
+}
+
+// 全角文字などが混ざると Authorization ヘッダを組めず fetch 自体が失敗する
+// （"String contains non ISO-8859-1 code point" エラー）ため事前に検出する
+function findInvalidKeyChar(key) {
+  const m = key.match(/[^\x21-\x7E]/);
+  return m ? m[0] : null;
 }
 
 function loadHistory() {
@@ -136,11 +144,26 @@ function initTheme() {
 
 function openKeyDialog() {
   els.keyInput.value = getApiKey();
+  els.keyError.hidden = true;
   els.keyDialog.showModal();
 }
 
 function initKeyDialog() {
   els.keyBtn.addEventListener('click', openKeyDialog);
+
+  // 無効な文字が含まれるキーは保存させない（ダイアログを閉じずにエラー表示）
+  els.keySaveBtn.addEventListener('click', (e) => {
+    const bad = findInvalidKeyChar(els.keyInput.value.trim());
+    if (bad !== null) {
+      e.preventDefault();
+      els.keyError.hidden = false;
+      els.keyError.textContent =
+        `使用できない文字「${bad}」が含まれています。全角文字や空白が混ざっていないか確認し、半角で key_id:key_secret の形式のまま貼り付けてください。`;
+    }
+  });
+
+  els.keyInput.addEventListener('input', () => { els.keyError.hidden = true; });
+
   els.keyDialog.addEventListener('close', () => {
     if (els.keyDialog.returnValue === 'save') {
       localStorage.setItem(LS_KEY, els.keyInput.value.trim());
@@ -606,6 +629,12 @@ async function generate() {
   const prompt = els.prompt.value.trim();
 
   if (!getApiKey()) { openKeyDialog(); return; }
+  // 過去に保存済みの無効なキー（全角文字混入など）もここで拾って再入力を促す
+  if (findInvalidKeyChar(getApiKey()) !== null) {
+    setError('保存されている API キーに使用できない文字が含まれています。「API キー」から貼り直してください。');
+    openKeyDialog();
+    return;
+  }
   if (!modelId) { setError('モデル ID を入力してください'); return; }
   if (!prompt) { setError('プロンプトを入力してください'); return; }
 
