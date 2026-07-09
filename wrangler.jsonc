@@ -4,6 +4,9 @@
   "name": "fal-playground",
   "main": "worker.js",
   "compatibility_date": "2026-07-09",
+  // ダッシュボードで設定した環境変数（Text タイプ）をデプロイ時に消さない。
+  // Secret タイプは元々保持されるが、誤って Text で登録された場合の保険
+  "keep_vars": true,
   "assets": {
     "directory": "./"
   },
