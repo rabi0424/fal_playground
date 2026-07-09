@@ -89,6 +89,7 @@ const els = {
   clearHistoryBtn: $('#clearHistoryBtn'),
   keyDialog: $('#keyDialog'),
   keyInput: $('#keyInput'),
+  syncTokenInput: $('#syncTokenInput'),
   keyError: $('#keyError'),
   keySaveBtn: $('#keySaveBtn'),
 };
@@ -114,6 +115,7 @@ function loadHistory() {
 
 function saveHistory(items) {
   localStorage.setItem(LS_HISTORY, JSON.stringify(items.slice(0, HISTORY_LIMIT)));
+  syncMarkDirty('history');
 }
 
 function sleep(ms) {
@@ -144,6 +146,7 @@ function initTheme() {
 
 function openKeyDialog() {
   els.keyInput.value = getApiKey();
+  els.syncTokenInput.value = getSyncToken();
   els.keyError.hidden = true;
   els.keyDialog.showModal();
 }
@@ -151,24 +154,37 @@ function openKeyDialog() {
 function initKeyDialog() {
   els.keyBtn.addEventListener('click', openKeyDialog);
 
-  // 無効な文字が含まれるキーは保存させない（ダイアログを閉じずにエラー表示）
+  // 無効な文字が含まれるキー / トークンは保存させない（ダイアログを閉じずにエラー表示）
   els.keySaveBtn.addEventListener('click', (e) => {
-    const bad = findInvalidKeyChar(els.keyInput.value.trim());
+    const bad = findInvalidKeyChar(els.keyInput.value.trim())
+      ?? findInvalidKeyChar(els.syncTokenInput.value.trim());
     if (bad !== null) {
       e.preventDefault();
       els.keyError.hidden = false;
       els.keyError.textContent =
-        `使用できない文字「${bad}」が含まれています。全角文字や空白が混ざっていないか確認し、半角で key_id:key_secret の形式のまま貼り付けてください。`;
+        `使用できない文字「${bad}」が含まれています。全角文字や空白が混ざっていないか確認し、半角のまま貼り付けてください。`;
     }
   });
 
   els.keyInput.addEventListener('input', () => { els.keyError.hidden = true; });
+  els.syncTokenInput.addEventListener('input', () => { els.keyError.hidden = true; });
 
   els.keyDialog.addEventListener('close', () => {
     if (els.keyDialog.returnValue === 'save') {
-      localStorage.setItem(LS_KEY, els.keyInput.value.trim());
+      const newKey = els.keyInput.value.trim();
+      if (newKey !== getApiKey()) {
+        localStorage.setItem(LS_KEY, newKey);
+        syncMarkDirty('apiKey');
+      }
+      const newToken = els.syncTokenInput.value.trim();
+      if (newToken !== getSyncToken()) {
+        localStorage.setItem(LS_SYNC_TOKEN, newToken);
+        // トークンを設定・変更したら即座に一度同期する
+        if (newToken) syncPull();
+      }
     }
     els.keyInput.value = '';
+    els.syncTokenInput.value = '';
   });
 }
 
@@ -354,6 +370,7 @@ function loadLoraLibrary() {
 
 function saveLoraLibrary(items) {
   localStorage.setItem(LS_LORAS, JSON.stringify(items));
+  syncMarkDirty('loras');
 }
 
 // URL からファイル名を取り出す（.safetensors は表示しない）
@@ -1178,6 +1195,114 @@ function reuseRecord(record) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
+/* ---------- device sync ---------- */
+// API キー・LoRA ライブラリ・生成履歴を Worker の /api/state（Durable Object）に
+// 保存して端末間で同期する。セクションごとに更新時刻を持ち、新しい方を採用する。
+// 同期トークン未設定ならすべて無効（従来どおりローカルのみで動作）。
+
+const LS_SYNC_TOKEN = 'fal_sync_token';
+const LS_SYNC_TS = 'fal_sync_ts';
+const SYNC_SECTIONS = { apiKey: LS_KEY, loras: LS_LORAS, history: LS_HISTORY };
+const SYNC_PUSH_DELAY_MS = 2000;
+
+let syncPushTimer = null;
+
+function getSyncToken() {
+  return localStorage.getItem(LS_SYNC_TOKEN) || '';
+}
+
+function loadSyncTs() {
+  try {
+    return JSON.parse(localStorage.getItem(LS_SYNC_TS)) || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveSyncTs(ts) {
+  localStorage.setItem(LS_SYNC_TS, JSON.stringify(ts));
+}
+
+// 同期対象の localStorage を書き換えたら呼ぶ。連続変更をまとめて少し後に送信する
+function syncMarkDirty(section) {
+  const ts = loadSyncTs();
+  ts[section] = Date.now();
+  saveSyncTs(ts);
+  if (!getSyncToken()) return;
+  clearTimeout(syncPushTimer);
+  syncPushTimer = setTimeout(() => {
+    syncPushTimer = null;
+    syncPull(); // 先にリモートの新しい変更を取り込んでから needPush 経由で送信される
+  }, SYNC_PUSH_DELAY_MS);
+}
+
+function syncFetch(method, body) {
+  return fetch('/api/state', {
+    method,
+    headers: {
+      Authorization: `Bearer ${getSyncToken()}`,
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body,
+    // 離脱間際の送信でも完了できるようにする
+    keepalive: method === 'PUT',
+  });
+}
+
+// リモートの方が新しいセクションを取り込み、ローカルの方が新しければ送信する
+async function syncPull() {
+  if (!getSyncToken()) return;
+  let doc;
+  try {
+    const res = await syncFetch('GET');
+    if (res.status === 401) {
+      setError('同期トークンがサーバーと一致しません。Worker の Secret（SYNC_TOKEN）とダイアログの同期トークンを確認してください。');
+      return;
+    }
+    if (!res.ok) return;
+    doc = await res.json();
+  } catch {
+    return; // オフラインなどは黙って諦める（次の機会に同期される）
+  }
+
+  const ts = loadSyncTs();
+  let changed = false;
+  let needPush = !doc; // サーバーが空（初回）ならローカルをそのまま上げる
+  for (const [section, lsKey] of Object.entries(SYNC_SECTIONS)) {
+    const remote = doc?.[section];
+    const localTs = ts[section] || 0;
+    if (remote && remote.ts > localTs) {
+      if (remote.value) localStorage.setItem(lsKey, remote.value);
+      else localStorage.removeItem(lsKey);
+      ts[section] = remote.ts;
+      changed = true;
+    } else if (localTs > (remote?.ts ?? 0)) {
+      needPush = true;
+    }
+  }
+  saveSyncTs(ts);
+
+  if (changed) {
+    renderGallery();
+    refreshLoraSelects();
+  }
+  if (needPush) syncPush();
+}
+
+async function syncPush() {
+  if (!getSyncToken()) return;
+  const ts = loadSyncTs();
+  const doc = {};
+  for (const [section, lsKey] of Object.entries(SYNC_SECTIONS)) {
+    doc[section] = { value: localStorage.getItem(lsKey) ?? '', ts: ts[section] || 0 };
+  }
+  try {
+    await syncFetch('PUT', JSON.stringify(doc));
+  } catch {
+    // 失敗しても次の変更・次回起動時に再送される
+  }
+}
+
 /* ---------- form persistence ---------- */
 
 // LoRA リストの全行を（scale 0 や未登録も含めて）そのまま書き出す
@@ -1260,12 +1385,25 @@ renderGallery();
 // モバイルでは LoRA アコーディオンを畳んだ状態で開始する（PC は常時展開）
 if (MOBILE_MQ.matches) els.loraField.open = false;
 
+// 起動時に他端末の変更を取り込む（トークン未設定なら何もしない）
+syncPull();
+
 // フォームの変更を localStorage に保存（入力のたび・離脱時）
 document.addEventListener('input', scheduleSaveForm);
 document.addEventListener('change', scheduleSaveForm);
-window.addEventListener('pagehide', saveFormState);
+window.addEventListener('pagehide', () => {
+  saveFormState();
+  // 送信待ちの同期があれば離脱前に送っておく
+  if (syncPushTimer) {
+    clearTimeout(syncPushTimer);
+    syncPushTimer = null;
+    syncPush();
+  }
+});
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') saveFormState();
+  // タブに戻ってきたら他端末の変更を取り込む
+  if (document.visibilityState === 'visible') syncPull();
 });
 
 els.generateBtn.addEventListener('click', generate);
