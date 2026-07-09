@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ja" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fal playground</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">fal <span>playground</span></div>
+  <div class="topbar-actions">
+    <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
+    <button id="keyBtn" class="ghost-btn">API キー</button>
+  </div>
+</header>
+
+<main class="layout">
+  <aside class="panel controls">
+    <label class="field">
+      <span class="label">モデル</span>
+      <select id="modelSelect"></select>
+    </label>
+
+    <label class="field" id="customModelField" hidden>
+      <span class="label">カスタムモデル ID</span>
+      <input id="customModel" type="text" placeholder="fal-ai/..." spellcheck="false">
+    </label>
+
+    <label class="field">
+      <span class="label">プロンプト</span>
+      <textarea id="prompt" rows="6" placeholder="生成したい画像を英語で記述..." spellcheck="false"></textarea>
+    </label>
+
+    <div class="field" id="loraField" hidden>
+      <span class="label" id="loraLabel">LoRA</span>
+      <div id="loraList" class="lora-list"></div>
+      <button id="addLoraBtn" class="ghost-btn small" type="button">＋ LoRA を追加</button>
+      <label class="compare-toggle">
+        <input type="checkbox" id="compareToggle"> LoRA 比較モード
+      </label>
+    </div>
+
+    <div class="field compare-field" id="compareField" hidden>
+      <span class="label">比較する LoRA（試行ごと・共通 LoRA に追加されます）</span>
+      <div id="variantList"></div>
+      <button id="addVariantBtn" class="ghost-btn small" type="button">＋ 試行を追加</button>
+    </div>
+
+    <div class="row">
+      <label class="field">
+        <span class="label">サイズ</span>
+        <select id="sizeSelect"></select>
+      </label>
+      <label class="field num-field">
+        <span class="label">枚数</span>
+        <select id="numImages">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="field custom-size" id="customSizeField" hidden>
+      <div class="size-inputs">
+        <label class="size-dim">
+          <span class="label">幅</span>
+          <input id="customWidth" type="number" min="256" max="2048" step="8" value="1280">
+        </label>
+        <button id="swapSizeBtn" class="ghost-btn icon-btn" type="button" title="幅と高さを入れ替え" aria-label="幅と高さを入れ替え">⇄</button>
+        <label class="size-dim">
+          <span class="label">高さ</span>
+          <input id="customHeight" type="number" min="256" max="2048" step="8" value="720">
+        </label>
+      </div>
+      <div class="size-hint">
+        <span>8 の倍数・256〜2048</span>
+        <span id="mpReadout"></span>
+      </div>
+    </div>
+
+    <details class="advanced">
+      <summary>詳細設定</summary>
+      <div class="advanced-body">
+        <label class="field">
+          <span class="label">シード <em>（空欄でランダム）</em></span>
+          <input id="seed" type="number" min="0" placeholder="random">
+        </label>
+        <div class="row">
+          <label class="field">
+            <span class="label">ステップ数</span>
+            <input id="steps" type="number" min="1" max="100" placeholder="デフォルト">
+          </label>
+          <label class="field">
+            <span class="label">ガイダンス</span>
+            <input id="guidance" type="number" min="0" max="30" step="0.5" placeholder="デフォルト">
+          </label>
+        </div>
+      </div>
+    </details>
+
+    <button id="generateBtn" class="primary-btn">生成する</button>
+    <div id="status" class="status" hidden></div>
+    <div id="error" class="error" role="alert" hidden></div>
+  </aside>
+
+ <section class="results">
+    <div id="detail" class="panel detail">
+      <div class="detail-empty">プロンプトを入力して「生成する」を押してください</div>
+   </div>
+
+    <section class="gallery-section">
+      <div class="gallery-head">
+        <h2>ギャラリー</h2>
+       <button id="clearHistoryBtn" class="ghost-btn small">すべて削除</button>
+     </div>
+      <div id="gallery" class="gallery"></div>
+   </section>
+  </section>
+</main>
+
+<dialog id="keyDialog" class="key-dialog">
+  <form method="dialog" class="key-form">
+    <h2>fal API キー</h2>
+    <p class="hint">
+      キーはこのブラウザの localStorage にのみ保存されます。<br>
+      <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noopener">fal.ai ダッシュボード</a>で発行できます。
+    </p>
+    <input id="keyInput" type="password" placeholder="key_id:key_secret" spellcheck="false" autocomplete="off">
+    <div class="key-actions">
+      <button value="cancel" class="ghost-btn" formnovalidate>キャンセル</button>
+      <button value="save" id="keySaveBtn" class="primary-btn">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="lightbox" class="lightbox" hidden><img alt=""></div>
+
+<script src="app.js"></script>
+</body>
+</html>
