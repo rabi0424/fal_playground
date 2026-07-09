@@ -1,0 +1,5 @@
+# 配信不要なファイル（アプリ本体は index.html / style.css / app.js のみ）
+README.md
+docs/
+wrangler.jsonc
+.assetsignore
