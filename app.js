@@ -495,7 +495,8 @@ async function loadHfRepo() {
 
   let entries;
   try {
-    const res = await fetch(`https://huggingface.co/api/models/${repo}/tree/main?recursive=true`);
+    // huggingface.co を直接叩くと CORS で失敗する環境があるため Worker 経由で取得する
+    const res = await fetch(`/api/hf/tree?repo=${encodeURIComponent(repo)}`);
     if (res.status === 401 || res.status === 404) {
       throw new Error('リポジトリが見つかりません（非公開または ID の誤り）');
     }

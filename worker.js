@@ -16,6 +16,24 @@ export class SyncState extends DurableObject {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    // Hugging Face 公開リポジトリのファイル一覧の中継。
+    // ブラウザから huggingface.co を直接叩くと CORS 等で失敗するため、
+    // 同一オリジンの API として提供する（公開データのみ・repo 形式を厳密に検証）
+    if (url.pathname === '/api/hf/tree') {
+      if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
+      const repo = url.searchParams.get('repo') || '';
+      if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return new Response('Invalid repo', { status: 400 });
+      const res = await fetch(
+        `https://huggingface.co/api/models/${repo}/tree/main?recursive=true`,
+        { headers: { 'User-Agent': 'fal-playground' } },
+      );
+      return new Response(res.body, {
+        status: res.status,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     if (url.pathname !== '/api/state') return new Response('Not found', { status: 404 });
 
     // Secret 未設定時も 401 にして、クライアント側で設定不備として案内する
