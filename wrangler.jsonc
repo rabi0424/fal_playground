@@ -1,0 +1,9 @@
+// Cloudflare Workers（静的アセット配信のみ）の設定
+// ダッシュボードの Git 連携から `npx wrangler deploy` で使われる
+{
+  "name": "fal-playground",
+  "compatibility_date": "2026-07-09",
+  "assets": {
+    "directory": "./"
+  }
+}

@@ -50,6 +50,9 @@ const POLL_INTERVAL_MS = 900;
 
 const $ = (sel) => document.querySelector(sel);
 
+// モバイルレイアウト判定（style.css のブレークポイントと合わせる）
+const MOBILE_MQ = window.matchMedia('(max-width: 430px)');
+
 const els = {
   themeBtn: $('#themeBtn'),
   keyBtn: $('#keyBtn'),
@@ -66,6 +69,8 @@ const els = {
   variantList: $('#variantList'),
   addVariantBtn: $('#addVariantBtn'),
   lightbox: $('#lightbox'),
+  lightboxClose: $('#lightboxClose'),
+  lightboxCounter: $('#lightboxCounter'),
   sizeSelect: $('#sizeSelect'),
   customSizeField: $('#customSizeField'),
   customWidth: $('#customWidth'),
@@ -645,6 +650,7 @@ function finishSingle(job, r) {
     images: r.images,
   };
   renderDetail(record);
+  scrollToDetail();
   const history = loadHistory();
   history.unshift(record);
   saveHistory(history);
@@ -743,6 +749,7 @@ async function runCompareFrom(job) {
     variants: job.results,
   };
   renderDetail(record);
+  scrollToDetail();
   const history = loadHistory();
   history.unshift(record);
   saveHistory(history);
@@ -783,6 +790,24 @@ async function resumeActiveJob() {
 function clearDetail() {
   selectedId = null;
   els.detail.innerHTML = '<div class="detail-empty">プロンプトを入力して「生成する」を押してください</div>';
+}
+
+// モバイルでは生成完了時に結果まで自動スクロールする（フォームが長く結果が画面外のため）
+function scrollToDetail() {
+  if (MOBILE_MQ.matches) els.detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// モバイル用: ギャラリーカードから撤去した削除操作を詳細表示側に置く
+function makeDetailDeleteBtn(record) {
+  const btn = document.createElement('button');
+  btn.className = 'ghost-btn small mobile-only';
+  btn.textContent = '削除';
+  btn.addEventListener('click', () => {
+    saveHistory(loadHistory().filter((r) => r.id !== record.id));
+    clearDetail();
+    renderGallery();
+  });
+  return btn;
 }
 
 // 画像読み込みが稀に失敗する（拡大表示では見える）ため、失敗時に少し待って再取得する
@@ -883,6 +908,7 @@ function renderDetail(record) {
   reuseBtn.textContent = '設定を再利用';
   reuseBtn.addEventListener('click', () => reuseRecord(record));
   detailActions.appendChild(reuseBtn);
+  detailActions.appendChild(makeDetailDeleteBtn(record));
 
   meta.appendChild(detailActions);
   els.detail.appendChild(meta);
@@ -962,6 +988,7 @@ function renderCompareDetail(record) {
   reuseBtn.textContent = '設定を再利用';
   reuseBtn.addEventListener('click', () => reuseRecord(record));
   detailActions.appendChild(reuseBtn);
+  detailActions.appendChild(makeDetailDeleteBtn(record));
   meta.appendChild(detailActions);
 
   els.detail.appendChild(meta);
@@ -980,6 +1007,8 @@ function openLightbox(urls, index = 0) {
 
 function showLightboxImage() {
   els.lightbox.querySelector('img').src = lightboxUrls[lightboxIndex] ?? '';
+  els.lightboxCounter.hidden = lightboxUrls.length < 2;
+  els.lightboxCounter.textContent = `${lightboxIndex + 1} / ${lightboxUrls.length}`;
 }
 
 // 拡大表示中に前後の画像へ（端はループ）
@@ -1199,6 +1228,9 @@ initForm();
 restoreFormState();
 renderGallery();
 
+// モバイルでは LoRA アコーディオンを畳んだ状態で開始する（PC は常時展開）
+if (MOBILE_MQ.matches) els.loraField.open = false;
+
 // フォームの変更を localStorage に保存（入力のたび・離脱時）
 document.addEventListener('input', scheduleSaveForm);
 document.addEventListener('change', scheduleSaveForm);
@@ -1212,7 +1244,32 @@ els.addLoraBtn.addEventListener('click', () => addLoraRow());
 els.compareToggle.addEventListener('change', () => setCompareMode(els.compareToggle.checked));
 els.addVariantBtn.addEventListener('click', () => addVariant());
 
-els.lightbox.addEventListener('click', closeLightbox);
+// スワイプ直後は click（背景タップで閉じる）を無効化して、意図しないクローズを防ぐ
+let lightboxTouchX = 0;
+let lightboxTouchY = 0;
+let lightboxSwiped = false;
+
+els.lightbox.addEventListener('click', () => {
+  if (lightboxSwiped) { lightboxSwiped = false; return; }
+  closeLightbox();
+});
+els.lightboxClose.addEventListener('click', closeLightbox);
+
+// 横スワイプで前後の画像へ（縦方向の動きが主ならスクロール操作とみなして無視）
+els.lightbox.addEventListener('touchstart', (e) => {
+  lightboxTouchX = e.touches[0].clientX;
+  lightboxTouchY = e.touches[0].clientY;
+}, { passive: true });
+
+els.lightbox.addEventListener('touchend', (e) => {
+  const dx = e.changedTouches[0].clientX - lightboxTouchX;
+  const dy = e.changedTouches[0].clientY - lightboxTouchY;
+  if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
+    lightboxSwiped = true;
+    lightboxNav(dx < 0 ? 1 : -1);
+  }
+}, { passive: true });
+
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !els.lightbox.hidden) closeLightbox();
 });
