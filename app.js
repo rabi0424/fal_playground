@@ -3,12 +3,15 @@
 /* ---------- constants ---------- */
 
 // Modal 自前ホスト版 Krea 2（modal_comfy リポジトリ）。fal ではなく
-// Worker のプロキシ（/api/krea2/generate）経由で生成する
+// Worker のプロキシ（/api/krea2/generate）経由で生成する。
+// エンドポイントは実験版（exp）と本番の 2 系統があり、標準は実験版
+const MODAL_KREA2_EXP_ID = 'modal/krea2-turbo-exp';
 const MODAL_KREA2_ID = 'modal/krea2-turbo';
 
 const MODELS = [
   { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA', sizeParam: 'image_size', lora: true, maxLoras: 3 },
-  { id: MODAL_KREA2_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal）', sizeParam: 'image_size', lora: true, provider: 'modal' },
+  { id: MODAL_KREA2_EXP_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 実験版）', sizeParam: 'image_size', lora: true, provider: 'modal', modalEndpoint: 'exp' },
+  { id: MODAL_KREA2_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 本番）', sizeParam: 'image_size', lora: true, provider: 'modal', modalEndpoint: 'prod' },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -812,7 +815,7 @@ async function generate() {
   if (!prompt) { setError('プロンプトを入力してください'); return; }
 
   // Modal 自前ホスト版は fal の API キーを使わず Worker のプロキシ経由で生成する
-  if (model.provider === 'modal') { await generateModal(prompt); return; }
+  if (model.provider === 'modal') { await generateModal(model, prompt); return; }
 
   if (!getApiKey()) { openKeyDialog(); return; }
   // 過去に保存済みの無効なキー（全角文字混入など）もここで拾って再入力を促す
@@ -894,7 +897,7 @@ function buildModalInput(prompt) {
   return input;
 }
 
-async function generateModal(prompt) {
+async function generateModal(model, prompt) {
   if (!getSyncToken()) {
     setError('Modal 版の生成には同期トークン（Worker の SYNC_TOKEN と同じ値）が必要です。「API キー」ダイアログで設定してください。');
     openKeyDialog();
@@ -902,6 +905,8 @@ async function generateModal(prompt) {
   }
 
   const input = buildModalInput(prompt);
+  // 実験版 / 本番の切り替え。URL は Worker 側の許可リストで解決される
+  input.endpoint = model.modalEndpoint;
   if (input.cfg !== undefined && (input.cfg < 0 || input.cfg > 1)) {
     setError('この API のガイダンス（cfg）は 0〜1 の範囲で指定してください');
     return;
@@ -978,7 +983,7 @@ async function generateModal(prompt) {
       const record = {
         id: `modal_${Date.now()}`,
         ts: Date.now(),
-        model: MODAL_KREA2_ID,
+        model: model.id,
         prompt,
         loras,
         seed: firstSeed,

@@ -42,7 +42,7 @@ Cloudflare Workers（Git 連携デプロイ）でホストしている場合、A
 
 ## Modal 自前ホスト版 Krea 2（任意）
 
-モデル選択の「Krea 2 [turbo] 自前ホスト（Modal）」は、fal ではなく Modal 上の [modal_comfy](https://github.com/rabi0424/modal_comfy) API で生成します。Modal の Proxy Auth Token をブラウザに露出させないため、リクエストは Worker のプロキシ（`/api/krea2/generate`）経由で送られます。**Cloudflare Workers でホストしている場合のみ使えます**（ローカル静的サーバーでは不可）。
+モデル選択の「Krea 2 [turbo] 自前ホスト（Modal 実験版 / 本番）」は、fal ではなく Modal 上の [modal_comfy](https://github.com/rabi0424/modal_comfy) API で生成します。実験版（CPU スナップショット）と本番（安定版）はモデル選択で切り替えられ、標準は実験版です。Modal の Proxy Auth Token をブラウザに露出させないため、リクエストは Worker のプロキシ（`/api/krea2/generate`）経由で送られます。**Cloudflare Workers でホストしている場合のみ使えます**（ローカル静的サーバーでは不可）。
 
 ### 設定
 
@@ -53,7 +53,10 @@ Cloudflare Workers（Git 連携デプロイ）でホストしている場合、A
 3. 上記「端末間の同期」の `SYNC_TOKEN` も設定する（このプロキシの認証に同じトークンを使うため必須。同期自体を使うかは任意）
 4. 各端末で「API キー」ダイアログの同期トークン欄に同じ値を入力
 
-エンドポイントを実験版に切り替えたい場合は、Worker の環境変数 `KREA2_ENDPOINT` に実験版 URL を設定します（未設定なら本番 URL）。
+エンドポイントの URL 自体を変えたい場合は、Worker の環境変数で上書きできます（未設定なら modal_comfy の既定 URL）:
+
+- `KREA2_ENDPOINT_EXP` = 実験版の URL
+- `KREA2_ENDPOINT` = 本番の URL
 
 ### 使い方のメモ
 

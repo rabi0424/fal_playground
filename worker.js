@@ -95,8 +95,17 @@ export default {
         return new Response('prompt is required', { status: 422 });
       }
 
-      const endpoint = env.KREA2_ENDPOINT
-        || 'https://rabitteru--krea2-comfy-api-comfyapi-generate.modal.run';
+      // エンドポイントはクライアントの endpoint フィールド（"exp" / "prod"）で切り替える。
+      // URL 自体はクライアントから受け取らず、ここの許可リストでのみ解決する。既定は実験版
+      const endpoints = {
+        exp: env.KREA2_ENDPOINT_EXP
+          || 'https://rabitteru--krea2-comfy-api-exp-comfyapi-generate.modal.run',
+        prod: env.KREA2_ENDPOINT
+          || 'https://rabitteru--krea2-comfy-api-comfyapi-generate.modal.run',
+      };
+      const endpoint = endpoints[payload.endpoint] ?? endpoints.exp;
+      delete payload.endpoint; // Modal API には存在しないフィールドなので転送しない
+
       // 処理が約 150 秒を超えると 303 で結果ポーリング URL が返るが、fetch が自動追跡する
       const upstream = await fetch(endpoint, {
         method: 'POST',
