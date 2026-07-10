@@ -2,8 +2,13 @@
 
 /* ---------- constants ---------- */
 
+// Modal 自前ホスト版 Krea 2（modal_comfy リポジトリ）。fal ではなく
+// Worker のプロキシ（/api/krea2/generate）経由で生成する
+const MODAL_KREA2_ID = 'modal/krea2-turbo';
+
 const MODELS = [
   { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA', sizeParam: 'image_size', lora: true, maxLoras: 3 },
+  { id: MODAL_KREA2_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal）', sizeParam: 'image_size', lora: true, provider: 'modal' },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -225,8 +230,16 @@ function updateModelFields() {
   els.customModelField.hidden = model.id !== '__custom__';
   els.loraField.hidden = !model.lora;
 
-  // LoRA 非対応モデルでは比較モードを使えないので強制的に解除
-  if (!model.lora && compareMode) setCompareMode(false);
+  // Modal 版は fal のキュー API を使わないため比較モード非対応
+  const isModal = model.provider === 'modal';
+  els.compareToggle.closest('.compare-toggle').hidden = isModal;
+
+  // LoRA 非対応モデル・Modal 版では比較モードを使えないので強制的に解除
+  if ((!model.lora || isModal) && compareMode) setCompareMode(false);
+
+  // Modal 版のデフォルト値・範囲は API の仕様（INTEGRATION.md）に合わせて案内する
+  els.steps.placeholder = isModal ? '8（変更非推奨）' : 'デフォルト';
+  els.guidance.placeholder = isModal ? '1（0〜1）' : 'デフォルト';
 
   // aspect_ratio 系モデルはピクセル指定に非対応なのでカスタムを出さない
   const supportsCustom = model.sizeParam !== 'aspect_ratio';
@@ -695,6 +708,11 @@ function setGenerating(on) {
 // 失敗してもローカルでは必ずポーリングを打ち切って操作可能な状態に戻す
 async function cancelGeneration() {
   cancelRequested = true;
+  // Modal 版は進行中の fetch を中断するだけでよい
+  if (modalAbort) {
+    modalAbort.abort();
+    return;
+  }
   const job = loadActiveJob();
   const submitted = job?.kind === 'single' ? job.submitted : job?.current?.submitted;
   if (submitted?.cancel_url) {
@@ -787,8 +805,14 @@ function pollStatusText(status, startedAt, prefix = '') {
 }
 
 async function generate() {
+  const model = MODELS.find((m) => m.id === els.modelSelect.value) || MODELS[0];
   const modelId = currentModelId();
   const prompt = els.prompt.value.trim();
+
+  if (!prompt) { setError('プロンプトを入力してください'); return; }
+
+  // Modal 自前ホスト版は fal の API キーを使わず Worker のプロキシ経由で生成する
+  if (model.provider === 'modal') { await generateModal(prompt); return; }
 
   if (!getApiKey()) { openKeyDialog(); return; }
   // 過去に保存済みの無効なキー（全角文字混入など）もここで拾って再入力を促す
@@ -798,7 +822,6 @@ async function generate() {
     return;
   }
   if (!modelId) { setError('モデル ID を入力してください'); return; }
-  if (!prompt) { setError('プロンプトを入力してください'); return; }
 
   if (compareMode) { await generateCompare(modelId, prompt); return; }
 
@@ -844,6 +867,134 @@ function finishSingle(job, r) {
   history.unshift(record);
   saveHistory(history);
   clearActiveJob();
+}
+
+/* ---------- Modal (自前ホスト Krea 2) generation ---------- */
+// modal_comfy の Krea 2 Turbo API を Worker のプロキシ経由で呼ぶ。
+// fal と違いキュー / ポーリングはなく、1 リクエストで PNG が 1 枚返る同期 API。
+// 呼び出しの認証には端末間同期と同じトークン（SYNC_TOKEN）を使う
+
+const MODAL_TIMEOUT_MS = 300_000; // INTEGRATION.md 推奨: 300 秒以上
+
+let modalAbort = null;
+
+function buildModalInput(prompt) {
+  const input = { prompt };
+  if (els.sizeSelect.value === CUSTOM_SIZE) {
+    input.width = snapDim(els.customWidth.value);
+    input.height = snapDim(els.customHeight.value);
+  } else {
+    const size = SIZES.find((s) => s.value === els.sizeSelect.value) || SIZES[0];
+    input.width = size.width;
+    input.height = size.height;
+  }
+  if (els.seed.value !== '') input.seed = Number(els.seed.value);
+  if (els.steps.value !== '') input.steps = Number(els.steps.value);
+  if (els.guidance.value !== '') input.cfg = Number(els.guidance.value);
+  return input;
+}
+
+async function generateModal(prompt) {
+  if (!getSyncToken()) {
+    setError('Modal 版の生成には同期トークン（Worker の SYNC_TOKEN と同じ値）が必要です。「API キー」ダイアログで設定してください。');
+    openKeyDialog();
+    return;
+  }
+
+  const input = buildModalInput(prompt);
+  if (input.cfg !== undefined && (input.cfg < 0 || input.cfg > 1)) {
+    setError('この API のガイダンス（cfg）は 0〜1 の範囲で指定してください');
+    return;
+  }
+  // この API の LoRA は URL ではなく名前（.safetensors 抜き）で指定する仕様のため変換する
+  const loras = !els.loraField.hidden ? collectLoras() : [];
+  if (loras.length > 0) {
+    input.loras = loras.map((l) => ({ name: loraDisplayName(l.path), strength: l.scale }));
+  }
+
+  const count = Number(els.numImages.value);
+  setGenerating(true);
+  setError('');
+  modalAbort = new AbortController();
+
+  const startedAt = Date.now();
+  let progressPrefix = count > 1 ? `1/${count} ` : '';
+  const tick = () => {
+    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(0);
+    setStatus(`${progressPrefix}生成中… ${elapsed}s（コールドスタート時は 1 分ほどかかります）`);
+  };
+  tick();
+  const ticker = setInterval(tick, 1000);
+
+  const images = [];
+  let firstSeed = null;
+  let timedOut = false;
+  try {
+    for (let i = 0; i < count; i++) {
+      progressPrefix = count > 1 ? `${i + 1}/${count} ` : '';
+      const body = { ...input };
+      // seed 指定のまま複数枚生成すると全枚同一になるため、2 枚目以降はずらす
+      if (input.seed !== undefined && i > 0) body.seed = input.seed + i;
+
+      const timeoutTimer = setTimeout(() => { timedOut = true; modalAbort.abort(); }, MODAL_TIMEOUT_MS);
+      let res;
+      try {
+        res = await fetch('/api/krea2/generate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${getSyncToken()}`,
+          },
+          body: JSON.stringify(body),
+          signal: modalAbort.signal,
+        });
+      } finally {
+        clearTimeout(timeoutTimer);
+      }
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        if (res.status === 401) {
+          throw new Error('認証に失敗しました。同期トークンが Worker の SYNC_TOKEN と一致しているか、Worker に SYNC_TOKEN が設定されているか確認してください');
+        }
+        if (res.status === 404) {
+          throw new Error('この配信環境では Modal 版は使えません（Cloudflare Workers でのホストが必要です）');
+        }
+        throw new Error(text.slice(0, 300) || `HTTP ${res.status}`);
+      }
+      const r = await res.json();
+      images.push({ url: r.url, width: body.width, height: body.height });
+      if (firstSeed === null) firstSeed = r.seed;
+    }
+  } catch (err) {
+    if (cancelRequested) setError('キャンセルされました');
+    else if (timedOut) setError(`エラー: ${MODAL_TIMEOUT_MS / 1000} 秒以内に応答がありませんでした`);
+    else setError(`エラー: ${err.message}`);
+  } finally {
+    clearInterval(ticker);
+    modalAbort = null;
+    // 途中で失敗・キャンセルしても、生成できた分は結果と履歴に残す
+    if (images.length > 0) {
+      const record = {
+        id: `modal_${Date.now()}`,
+        ts: Date.now(),
+        model: MODAL_KREA2_ID,
+        prompt,
+        loras,
+        seed: firstSeed,
+        elapsed: ((Date.now() - startedAt) / 1000).toFixed(1),
+        images,
+      };
+      // renderDetail はギャラリーも再描画するため、先に履歴へ保存する
+      const history = loadHistory();
+      history.unshift(record);
+      saveHistory(history);
+      renderDetail(record);
+      scrollToDetail();
+    }
+    setGenerating(false);
+    setStatus('');
+  }
 }
 
 // 比較モード: 共通 LoRA + 各試行の LoRA を、同じ seed / プロンプトで順番に生成
