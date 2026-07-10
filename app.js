@@ -711,12 +711,9 @@ function setGenerating(on) {
 // 失敗してもローカルでは必ずポーリングを打ち切って操作可能な状態に戻す
 async function cancelGeneration() {
   cancelRequested = true;
-  // Modal 版は進行中の fetch を中断するだけでよい
-  if (modalAbort) {
-    modalAbort.abort();
-    return;
-  }
+  // Modal 版はポーリングの打ち切りのみ（サーバー側で開始済みの生成は止まらない）
   const job = loadActiveJob();
+  if (job?.kind === 'modal') return;
   const submitted = job?.kind === 'single' ? job.submitted : job?.current?.submitted;
   if (submitted?.cancel_url) {
     try {
@@ -874,12 +871,14 @@ function finishSingle(job, r) {
 
 /* ---------- Modal (自前ホスト Krea 2) generation ---------- */
 // modal_comfy の Krea 2 Turbo API を Worker のプロキシ経由で呼ぶ。
-// fal と違いキュー / ポーリングはなく、1 リクエストで PNG が 1 枚返る同期 API。
+// 生成はサーバー側（Durable Object）でジョブとして完結し、クライアントは
+// /api/krea2/job/<id> を短い間隔でポーリングして結果を受け取る。
+// 長い HTTP 接続を保持しないため、タブ休止や接続断でも結果を取りこぼさず、
+// ページを再読み込みしても途中から再開できる。
 // 呼び出しの認証には端末間同期と同じトークン（SYNC_TOKEN）を使う
 
 const MODAL_TIMEOUT_MS = 300_000; // INTEGRATION.md 推奨: 300 秒以上
-
-let modalAbort = null;
+const MODAL_POLL_INTERVAL_MS = 2000;
 
 function buildModalInput(prompt) {
   const input = { prompt };
@@ -895,6 +894,68 @@ function buildModalInput(prompt) {
   if (els.steps.value !== '') input.steps = Number(els.steps.value);
   if (els.guidance.value !== '') input.cfg = Number(els.guidance.value);
   return input;
+}
+
+// ジョブ ID はクライアント側で採番する（送信のリトライや再開時に同じ ID を
+// 使えば、サーバー側で重複生成されない）
+function makeModalJobId() {
+  if (crypto.randomUUID) return crypto.randomUUID().replaceAll('-', '');
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function modalAuthHeaders() {
+  return { Authorization: `Bearer ${getSyncToken()}` };
+}
+
+async function modalErrorMessage(res) {
+  if (res.status === 401) {
+    return '認証に失敗しました。同期トークンが Worker の SYNC_TOKEN と一致しているか、Worker に SYNC_TOKEN が設定されているか確認してください';
+  }
+  if (res.status === 404) {
+    return 'この配信環境では Modal 版は使えません（Cloudflare Workers でのホストが必要です）';
+  }
+  const text = await res.text().catch(() => '');
+  return text.slice(0, 300) || `HTTP ${res.status}`;
+}
+
+async function modalSubmit(body) {
+  const res = await fetch('/api/krea2/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...modalAuthHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await modalErrorMessage(res));
+  return res.json();
+}
+
+// ジョブ完了までポーリングする。一時的な接続エラー（オフライン・タブ休止から
+// の復帰直後など）は無視して次のポーリングで拾う
+async function modalAwaitJob(jobId, onTick) {
+  const pollStart = Date.now();
+  while (true) {
+    await sleep(MODAL_POLL_INTERVAL_MS);
+    if (cancelRequested) throw new Error('キャンセルされました');
+
+    const res = await fetch(`/api/krea2/job/${jobId}`, { headers: modalAuthHeaders() })
+      .catch(() => null);
+    if (res) {
+      if (res.status === 404) {
+        throw new Error('ジョブが見つかりませんでした（サーバー側で期限切れになった可能性があります）');
+      }
+      if (!res.ok) throw new Error(await modalErrorMessage(res));
+      const job = await res.json().catch(() => null);
+      if (job?.status === 'done') return job;
+      if (job?.status === 'error') throw new Error(job.error || '生成に失敗しました');
+    }
+
+    if (onTick) onTick();
+    // タイムアウト判定はポーリング結果を確認した後に行う（タブ休止からの復帰時、
+    // 完了済みならタイムアウトにせず結果を採用できる）
+    if (Date.now() - pollStart > MODAL_TIMEOUT_MS) {
+      throw new Error(`${MODAL_TIMEOUT_MS / 1000} 秒以内に完了しませんでした。Modal ダッシュボードでアプリの状態を確認してください`);
+    }
+  }
 }
 
 async function generateModal(model, prompt) {
@@ -918,88 +979,88 @@ async function generateModal(model, prompt) {
   }
 
   const count = Number(els.numImages.value);
+  const job = {
+    kind: 'modal',
+    modelId: model.id,
+    prompt,
+    loras,
+    input,
+    startedAt: Date.now(),
+    // seed 指定のまま複数枚生成すると全枚同一になるため、2 枚目以降はずらす
+    entries: Array.from({ length: count }, (_, i) => ({
+      jobId: makeModalJobId(),
+      seed: input.seed !== undefined ? input.seed + i : undefined,
+      submitted: false,
+      result: null,
+    })),
+  };
+
   setGenerating(true);
   setError('');
-  modalAbort = new AbortController();
-
-  const startedAt = Date.now();
-  let progressPrefix = count > 1 ? `1/${count} ` : '';
-  const tick = () => {
-    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(0);
-    setStatus(`${progressPrefix}生成中… ${elapsed}s（コールドスタート時は 1 分ほどかかります）`);
-  };
-  tick();
-  const ticker = setInterval(tick, 1000);
-
-  const images = [];
-  let firstSeed = null;
-  let timedOut = false;
   try {
-    for (let i = 0; i < count; i++) {
-      progressPrefix = count > 1 ? `${i + 1}/${count} ` : '';
-      const body = { ...input };
-      // seed 指定のまま複数枚生成すると全枚同一になるため、2 枚目以降はずらす
-      if (input.seed !== undefined && i > 0) body.seed = input.seed + i;
-
-      const timeoutTimer = setTimeout(() => { timedOut = true; modalAbort.abort(); }, MODAL_TIMEOUT_MS);
-      let res;
-      try {
-        res = await fetch('/api/krea2/generate', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${getSyncToken()}`,
-          },
-          body: JSON.stringify(body),
-          signal: modalAbort.signal,
-        });
-      } finally {
-        clearTimeout(timeoutTimer);
-      }
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        if (res.status === 401) {
-          throw new Error('認証に失敗しました。同期トークンが Worker の SYNC_TOKEN と一致しているか、Worker に SYNC_TOKEN が設定されているか確認してください');
-        }
-        if (res.status === 404) {
-          throw new Error('この配信環境では Modal 版は使えません（Cloudflare Workers でのホストが必要です）');
-        }
-        throw new Error(text.slice(0, 300) || `HTTP ${res.status}`);
-      }
-      const r = await res.json();
-      images.push({ url: r.url, width: body.width, height: body.height });
-      if (firstSeed === null) firstSeed = r.seed;
-    }
+    saveActiveJob(job);
+    await runModalJobFrom(job);
   } catch (err) {
-    if (cancelRequested) setError('キャンセルされました');
-    else if (timedOut) setError(`エラー: ${MODAL_TIMEOUT_MS / 1000} 秒以内に応答がありませんでした`);
-    else setError(`エラー: ${err.message}`);
+    setError(cancelRequested ? 'キャンセルされました' : `エラー: ${err.message}`);
+    finishModal(job); // 途中まで生成できた分は履歴に残し、ジョブをクリアする
   } finally {
-    clearInterval(ticker);
-    modalAbort = null;
-    // 途中で失敗・キャンセルしても、生成できた分は結果と履歴に残す
-    if (images.length > 0) {
-      const record = {
-        id: `modal_${Date.now()}`,
-        ts: Date.now(),
-        model: model.id,
-        prompt,
-        loras,
-        seed: firstSeed,
-        elapsed: ((Date.now() - startedAt) / 1000).toFixed(1),
-        images,
-      };
-      // renderDetail はギャラリーも再描画するため、先に履歴へ保存する
-      const history = loadHistory();
-      history.unshift(record);
-      saveHistory(history);
-      renderDetail(record);
-      scrollToDetail();
-    }
     setGenerating(false);
     setStatus('');
   }
+}
+
+// Modal ジョブを（未完了の分から）実行する。再開時もこの関数を使う
+async function runModalJobFrom(job) {
+  const total = job.entries.length;
+
+  // 未送信分を先にすべて投入する（サーバー側で順に処理される）
+  for (const entry of job.entries) {
+    if (entry.submitted || entry.result) continue;
+    const body = { ...job.input, jobId: entry.jobId };
+    if (entry.seed !== undefined) body.seed = entry.seed;
+    setStatus('リクエスト送信中…');
+    await modalSubmit(body);
+    entry.submitted = true;
+    saveActiveJob(job);
+  }
+
+  // 順番に完了を待つ
+  for (let i = 0; i < total; i++) {
+    const entry = job.entries[i];
+    if (entry.result) continue;
+    const prefix = total > 1 ? `${i + 1}/${total} ` : '';
+    const r = await modalAwaitJob(entry.jobId, () => {
+      const elapsed = ((Date.now() - job.startedAt) / 1000).toFixed(0);
+      setStatus(`${prefix}生成中… ${elapsed}s（コールドスタート時は 1 分ほどかかります）`);
+    });
+    entry.result = { url: r.url, seed: r.seed };
+    saveActiveJob(job);
+  }
+
+  finishModal(job);
+}
+
+// 完了した分を履歴・結果表示に反映してジョブをクリアする（部分完了でも呼べる）
+function finishModal(job) {
+  clearActiveJob();
+  const done = job.entries.filter((e) => e.result);
+  if (done.length === 0) return;
+  const record = {
+    id: `modal_${Date.now()}`,
+    ts: Date.now(),
+    model: job.modelId,
+    prompt: job.prompt,
+    loras: job.loras,
+    seed: done[0].result.seed,
+    elapsed: ((Date.now() - job.startedAt) / 1000).toFixed(1),
+    images: done.map((e) => ({ url: e.result.url, width: job.input.width, height: job.input.height })),
+  };
+  // renderDetail はギャラリーも再描画するため、先に履歴へ保存する
+  const history = loadHistory();
+  history.unshift(record);
+  saveHistory(history);
+  renderDetail(record);
+  scrollToDetail();
 }
 
 // 比較モード: 共通 LoRA + 各試行の LoRA を、同じ seed / プロンプトで順番に生成
@@ -1116,6 +1177,15 @@ async function resumeActiveJob() {
       finishSingle(job, r);
     } else if (job.kind === 'compare') {
       await runCompareFrom(job);
+    } else if (job.kind === 'modal') {
+      // Modal の生成はサーバー側で継続しているため、ポーリングを再開すれば
+      // 離脱中に完了した分もそのまま受け取れる
+      try {
+        await runModalJobFrom(job);
+      } catch (err) {
+        setError(`前回の生成の再開に失敗しました: ${err.message}`);
+        finishModal(job); // 完了していた分は履歴に残す
+      }
     } else {
       clearActiveJob();
     }
