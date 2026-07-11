@@ -742,6 +742,11 @@ button { font: inherit; cursor: pointer; }
 
 .hf-list:empty { display: none; }
 
+.hf-filter { width: 100%; }
+
+/* 絞り込みで一致しなかった項目（選択状態は保持して表示だけ消す） */
+.hf-item.filtered-out { display: none; }
+
 .hf-item {
   display: flex;
   align-items: center;

@@ -67,6 +67,7 @@ const els = {
   hfDialog: $('#hfDialog'),
   hfRepoInput: $('#hfRepoInput'),
   hfLoadBtn: $('#hfLoadBtn'),
+  hfFilterInput: $('#hfFilterInput'),
   hfStatus: $('#hfStatus'),
   hfError: $('#hfError'),
   hfList: $('#hfList'),
@@ -497,6 +498,9 @@ function collectLoras() {
 // 公開リポジトリの .safetensors を一覧表示し、選択したものを LoRA ライブラリに
 // 一括登録する。登録のみで、現在の LoRA 設定行には追加しない
 
+// 既定のリポジトリ。ダイアログを開くたびにこの値へ戻す
+const HF_DEFAULT_REPO = 'tottie2215/temp_str';
+
 function parseHfRepo(raw) {
   const s = raw.trim().replace(/^https?:\/\/huggingface\.co\//, '');
   const parts = s.split('/').filter(Boolean);
@@ -552,6 +556,10 @@ async function loadHfRepo() {
     return;
   }
 
+  // リポジトリへの追加日（= 最終コミット日時）の新しい順。日付が取れなければ元の順序
+  const dateOf = (f) => Date.parse(f.lastCommit?.date ?? '') || 0;
+  files.sort((a, b) => dateOf(b) - dateOf(a));
+
   const registered = new Set(loadLoraLibrary().map((l) => l.path));
   for (const f of files) {
     const url = `https://huggingface.co/${repo}/resolve/main/${f.path}`;
@@ -575,22 +583,43 @@ async function loadHfRepo() {
 
     const meta = document.createElement('span');
     meta.className = 'hf-meta';
-    meta.textContent = done ? '登録済み' : (f.size ? `${(f.size / 1024 / 1024).toFixed(0)} MB` : '');
+    const date = dateOf(f)
+      ? new Date(dateOf(f)).toLocaleDateString('ja-JP', { year: 'numeric', month: 'numeric', day: 'numeric' })
+      : '';
+    const size = f.size ? `${(f.size / 1024 / 1024).toFixed(0)} MB` : '';
+    meta.textContent = done ? '登録済み' : [date, size].filter(Boolean).join(' ・ ');
     item.appendChild(meta);
 
     els.hfList.appendChild(item);
   }
+  hfApplyFilter();
   hfUpdateAddBtn();
+}
+
+// 一覧をファイル名で絞り込む（選択状態は保持したまま表示だけ切り替える）
+function hfApplyFilter() {
+  const q = els.hfFilterInput.value.trim().toLowerCase();
+  for (const item of els.hfList.querySelectorAll('.hf-item')) {
+    const name = item.querySelector('.hf-name').textContent.toLowerCase();
+    item.classList.toggle('filtered-out', q !== '' && !name.includes(q));
+  }
 }
 
 function initHfDialog() {
   els.hfOpenBtn.addEventListener('click', () => {
     hfSetError('');
     hfSetStatus('');
+    // 開くたびに既定リポジトリ・絞り込みへ戻して自動で読み込む
+    els.hfRepoInput.value = HF_DEFAULT_REPO;
+    els.hfFilterInput.value = '';
+    els.hfList.innerHTML = '';
+    hfUpdateAddBtn();
     els.hfDialog.showModal();
+    loadHfRepo();
   });
 
   els.hfLoadBtn.addEventListener('click', loadHfRepo);
+  els.hfFilterInput.addEventListener('input', hfApplyFilter);
 
   // Enter で form が「閉じる」ボタンで submit されるのを防いで読み込みにする
   els.hfRepoInput.addEventListener('keydown', (e) => {

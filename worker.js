@@ -332,14 +332,26 @@ export default {
       if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
       const repo = url.searchParams.get('repo') || '';
       if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return new Response('Invalid repo', { status: 400 });
-      const res = await fetch(
-        `https://huggingface.co/api/models/${repo}/tree/main?recursive=true`,
-        { headers: { 'User-Agent': 'fal-playground' } },
-      );
-      return new Response(res.body, {
-        status: res.status,
-        headers: { 'Content-Type': 'application/json' },
-      });
+      // expand=true で各ファイルの最終コミット日時（lastCommit.date）も取得する
+      //（クライアント側で「追加日の新しい順」に並べるため）。expand 付きの応答は
+      // ページングされるので、Link ヘッダの rel="next" を辿って全件集める
+      const entries = [];
+      let next = `https://huggingface.co/api/models/${repo}/tree/main?recursive=true&expand=true`;
+      for (let page = 0; page < 20 && next; page++) {
+        const res = await fetch(next, { headers: { 'User-Agent': 'fal-playground' } });
+        if (!res.ok) {
+          if (entries.length > 0) break; // 途中で失敗したら取れた分だけ返す
+          return new Response(res.body, {
+            status: res.status,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        const batch = await res.json();
+        if (Array.isArray(batch)) entries.push(...batch);
+        const link = res.headers.get('Link') || '';
+        next = link.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
+      }
+      return Response.json(entries);
     }
 
     // fal API のプロキシ。API キー（Secret の FAL_KEY）はここで付与し、ブラウザには
