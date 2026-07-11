@@ -765,6 +765,9 @@ function makeJid() {
 // ジョブ行の DOM など実行時だけの状態。永続化データ（job）には含めない
 const jobUI = new WeakMap();
 
+// 実行中（未完了・未失敗）のジョブ。コールドスタート注記の表示判定に使う
+const runningJobs = new Set();
+
 // 行に ✕ ボタン（キャンセル / 閉じる）を付ける
 function makeJobXBtn(title, onClick) {
   const btn = document.createElement('button');
@@ -777,16 +780,32 @@ function makeJobXBtn(title, onClick) {
   return btn;
 }
 
+// 省略表示の全文をクリック / Enter で開閉できるようにする
+//（ツールチップの出ないタッチ端末でも全文を確認できる）
+function makeExpandable(el) {
+  el.tabIndex = 0;
+  el.addEventListener('click', () => {
+    if (!getSelection().isCollapsed) return; // テキスト選択中は切り替えない
+    el.classList.toggle('expanded');
+    el.scrollIntoView({ block: 'nearest' });
+  });
+  el.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    el.classList.toggle('expanded');
+  });
+}
+
 // Modal 版のコールドスタート注記は各行には出さず、実行中の間だけ共通で 1 行出す
 function updateJobHint() {
-  els.jobHint.hidden = !els.jobList.querySelector('.job-row.modal-job');
+  if (!els.jobHint) return;
+  els.jobHint.hidden = ![...runningJobs].some((j) => j.kind === 'modal');
 }
 
 // 1 件 = 1 行: [スピナー + 状態] [プロンプト（省略表示）] [✕]
 function startJobRow(job) {
   const row = document.createElement('div');
   row.className = 'job-row';
-  if (job.kind === 'modal') row.classList.add('modal-job');
 
   const status = document.createElement('div');
   status.className = 'status';
@@ -796,12 +815,16 @@ function startJobRow(job) {
   prompt.className = 'job-prompt';
   prompt.textContent = job.prompt || '';
   prompt.title = job.prompt || '';
+  makeExpandable(prompt);
   row.appendChild(prompt);
 
   row.appendChild(makeJobXBtn('キャンセル', () => cancelJob(job)));
 
   els.jobList.appendChild(row);
+  // リストがスクロール中でも、追加された行が見えるようにする
+  row.scrollIntoView({ block: 'nearest' });
   jobUI.set(job, { row, status });
+  runningJobs.add(job);
   updateJobHint();
 }
 
@@ -812,26 +835,28 @@ function setJobStatus(job, text) {
 
 // 失敗したジョブは行をエラー表示に切り替えて、閉じるまで残す
 function failJobRow(job, message) {
+  runningJobs.delete(job);
+  updateJobHint();
   const ui = jobUI.get(job);
   if (!ui) return;
-  ui.row.classList.remove('modal-job');
   ui.row.innerHTML = '';
 
   const err = document.createElement('div');
   err.className = 'error';
-  err.textContent = message;
-  err.title = job.prompt ? `${message}「${job.prompt}」` : message;
-  // 1 行に省略表示するため、クリックで全文表示を切り替えられるようにする
-  err.addEventListener('click', () => err.classList.toggle('expanded'));
+  // どのリクエストのエラーか分かるようプロンプトも本文に含める（省略表示・クリックで全文）
+  err.textContent = job.prompt ? `${message}「${job.prompt}」` : message;
+  err.title = err.textContent;
+  makeExpandable(err);
   ui.row.appendChild(err);
 
   ui.row.appendChild(makeJobXBtn('閉じる', () => endJobRow(job)));
-  updateJobHint();
+  ui.row.scrollIntoView({ block: 'nearest' });
 }
 
 function endJobRow(job) {
   jobUI.get(job)?.row.remove();
   jobUI.delete(job);
+  runningJobs.delete(job);
   updateJobHint();
 }
 
@@ -939,7 +964,7 @@ async function awaitJob(job, submitted, onProgress) {
 function pollStatusText(job, status, prefix = '') {
   const elapsed = ((Date.now() - job.startedAt) / 1000).toFixed(0);
   const phase = status.status === 'IN_QUEUE'
-    ? `待機中（${status.queue_position + 1} 番目）`
+    ? (status.queue_position != null ? `待機中（${status.queue_position + 1} 番目）` : '待機中')
     : '生成中';
   setJobStatus(job, `${prefix}${phase}… ${elapsed}s`);
 }
@@ -1873,6 +1898,20 @@ fetchHistoryFromServer();
 
 // モバイルでは LoRA アコーディオンを畳んだ状態で開始する（PC は常時展開）
 if (MOBILE_MQ.matches) els.loraField.open = false;
+
+// モバイルの下部固定バーは実行中ジョブの件数で高さが変わるため、
+// コンテンツが隠れないよう .layout の下余白をバーの実高さに合わせて更新する
+{
+  const generateArea = $('.generate-area');
+  const layout = $('.layout');
+  if (window.ResizeObserver && generateArea && layout) {
+    new ResizeObserver(() => {
+      layout.style.paddingBottom = MOBILE_MQ.matches
+        ? `${generateArea.offsetHeight + 16}px`
+        : '';
+    }).observe(generateArea);
+  }
+}
 
 // 起動時に他端末の変更（LoRA ライブラリ）を取り込む
 syncPull();
