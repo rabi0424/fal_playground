@@ -449,6 +449,33 @@ button { font: inherit; cursor: pointer; }
   }
 }
 
+/* ---------- running jobs ---------- */
+/* 生成中も追加リクエストを送れるため、実行中のジョブは 1 行ずつ並べて
+   それぞれにステータスとキャンセルを持たせる */
+.job-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.job-list:empty { display: none; }
+
+.job-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.job-row .status,
+.job-row .error {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.job-row .job-prompt {
+  color: var(--muted);
+}
+
 /* ---------- status / error ---------- */
 .status {
   font-size: 13px;
@@ -835,7 +862,7 @@ button { font: inherit; cursor: pointer; }
   }
 
   /* ステータス / エラーはボタンの上に出す */
-  .generate-area .status,
+  .generate-area .job-list,
   .generate-area .error { order: -1; }
 
   /* タッチターゲット（44pt）とタップ時のフィードバック */
