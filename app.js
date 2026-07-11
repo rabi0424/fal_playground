@@ -380,7 +380,7 @@ function addLoraRow(path = '', scale = 1, listEl = els.loraList) {
 
   row.appendChild(scaleWrap);
 
-  const initial = path || loadLoraLibrary()[0]?.path || LORA_URL_OPTION;
+  const initial = path || sortedLoraLibrary()[0]?.path || LORA_URL_OPTION;
   populateLoraSelect(select, initial);
   select.addEventListener('change', () => syncLoraRow(row));
 
@@ -435,10 +435,18 @@ function unregisterLora(path) {
   refreshLoraSelects();
 }
 
+// プルダウンでの表示順: 名前順。名前に含まれる数字（末尾のバージョン番号
+// 0005000 など）は数値として比較し、同じ LoRA の別バージョンが小さい順に並ぶ。
+// 登録データ（localStorage）の順序は変えず表示時にだけ並び替える
+function sortedLoraLibrary() {
+  return [...loadLoraLibrary()].sort((a, b) =>
+    a.name.localeCompare(b.name, 'ja', { numeric: true, sensitivity: 'base' }));
+}
+
 // 登録済み LoRA（ファイル名表示）+「URL を入力…」でプルダウンを構成する
 function populateLoraSelect(select, selected) {
   select.innerHTML = '';
-  for (const item of loadLoraLibrary()) {
+  for (const item of sortedLoraLibrary()) {
     const opt = document.createElement('option');
     opt.value = item.path;
     opt.textContent = item.name;
