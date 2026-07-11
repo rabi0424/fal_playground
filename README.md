@@ -27,6 +27,16 @@ Cloudflare ダッシュボード → 対象の Worker → **Settings** → **Var
 
 旧バージョンで使っていた `SYNC_TOKEN` は不要になったので削除して構いません。
 
+### 3. R2 バケットを作成する（生成画像の保存先）
+
+生成画像は R2 に保存します。デプロイ前に `wrangler.jsonc` の `r2_buckets` と同名のバケットを作成してください（未作成だとデプロイに失敗します）。
+
+```
+npx wrangler r2 bucket create fal-playground-images
+```
+
+画像は content-addressed（内容不変）なので、コストが気になる場合は R2 側でエイジングのライフサイクルルールを設定して古い孤児画像を自動削除しても構いません（履歴と連動した削除は Worker が行います）。
+
 ## 機能
 
 - モデル選択（FLUX 系 / Recraft V3 / Modal 自前ホスト版 Krea 2 / 任意のカスタムモデル ID）
@@ -42,8 +52,8 @@ Cloudflare ダッシュボード → 対象の Worker → **Settings** → **Var
 | データ | 保管先 | 備考 |
 |---|---|---|
 | fal API キー / Modal トークン | Worker の Secret | ブラウザには一切渡らない |
-| 生成履歴（プロンプト・設定・結果） | サーバー（Durable Object） | 直近 150 件。超過分は画像ごと古い順に自動削除。全端末で共通 |
-| 生成画像 | サーバー（Durable Object） | fal の CDN からも取り込むため**失効しない**。履歴の削除と連動して削除 |
+| 生成履歴（プロンプト・設定・結果） | サーバー（Durable Object） | 直近 1000 件。超過分は画像ごと古い順に自動削除。全端末で共通 |
+| 生成画像 | サーバー（R2 バケット `fal-playground-images`） | fal の CDN からも取り込むため**失効しない**。履歴の削除と連動して削除。R2 移行前の画像は旧 Durable Object から後方互換で配信 |
 | LoRA ライブラリ | サーバー（自動同期） + localStorage | 全端末で共通 |
 | フォームの下書き・テーマ | localStorage | 端末ごと（意図的に同期しない） |
 

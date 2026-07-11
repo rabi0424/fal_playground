@@ -8,9 +8,9 @@
 import { DurableObject } from 'cloudflare:workers';
 
 // 生成画像・履歴の保存設定
-const IMAGE_CHUNK_BYTES = 1024 * 1024; // SQLite バックエンドの値上限（2MiB）より小さく分割
-const HISTORY_KEEP = 150; // 履歴レコードの上限。超過分は画像ごと古い順に削除
-const IMAGE_KEEP = 600; // 履歴の削除で消し損ねた画像を拾う保険（古い順に削除）
+// 画像本体は R2（env.IMAGES）に置く。履歴レコードは Durable Object の SQLite に
+// 小さな JSON（プロンプト・設定・画像への参照）として持つ。
+const HISTORY_KEEP = 1000; // 履歴レコードの上限。超過分は画像ごと古い順に自動削除
 
 // Modal 生成ジョブの設定。ジョブは Durable Object の alarm でサーバー側完結で
 // 処理する（クライアントとの接続が切れても結果を取りこぼさないため）
@@ -100,26 +100,10 @@ export class SyncState extends DurableObject {
     await this.ctx.storage.put('state', value);
   }
 
-  /* ---- 生成画像 ---- */
+  /* ---- 生成画像（R2 移行前の旧 DO ストレージ用。新規保存は R2 に直接行う） ---- */
 
-  async saveImage(id, buf) {
-    const index = (await this.ctx.storage.get('krea2:index')) ?? [];
-    const chunks = Math.max(1, Math.ceil(buf.byteLength / IMAGE_CHUNK_BYTES));
-    const entries = {};
-    for (let i = 0; i < chunks; i++) {
-      entries[`krea2:img:${id}:${i}`] = buf.slice(i * IMAGE_CHUNK_BYTES, (i + 1) * IMAGE_CHUNK_BYTES);
-    }
-    await this.ctx.storage.put(entries);
-    index.push({ id, chunks });
-    while (index.length > IMAGE_KEEP) {
-      const old = index.shift();
-      await this.ctx.storage.delete(
-        Array.from({ length: old.chunks }, (_, i) => `krea2:img:${old.id}:${i}`),
-      );
-    }
-    await this.ctx.storage.put('krea2:index', index);
-  }
-
+  // 旧方式（R2 移行前）で DO の SQLite に分割保存した画像を読み出す。
+  // R2 に見つからなかった画像だけがここに来る（後方互換）。
   async loadImage(id) {
     const index = (await this.ctx.storage.get('krea2:index')) ?? [];
     const entry = index.find((e) => e.id === id);
@@ -189,6 +173,14 @@ export class SyncState extends DurableObject {
         }
       }
     }
+    if (ids.length === 0) return;
+    // 新方式（R2）の画像を削除。存在しないキーの delete は R2 では無害なので
+    // 旧 DO 側の画像と一括で消してよい。R2 の delete は 1 回 1000 キーまでなので分割する
+    const keys = ids.map((id) => `${id}.png`);
+    for (let i = 0; i < keys.length; i += 1000) {
+      await this.env.IMAGES.delete(keys.slice(i, i + 1000));
+    }
+    // 旧 DO ストレージに残る画像（R2 移行前）も掃除する
     await this.deleteImages(ids);
   }
 
@@ -299,7 +291,9 @@ export class SyncState extends DurableObject {
       };
       const png = embedPngMetadata(await res.arrayBuffer(), JSON.stringify(meta));
       const imageId = randomId();
-      await this.saveImage(imageId, png);
+      await this.env.IMAGES.put(`${imageId}.png`, png, {
+        httpMetadata: { contentType: 'image/png' },
+      });
       job.status = 'done';
       job.url = `/api/image/${imageId}`;
       job.seed = seed;
@@ -431,7 +425,9 @@ export default {
               };
               const buf = embedPngMetadata(await res.arrayBuffer(), JSON.stringify(meta));
               const id = randomId();
-              await stub.saveImage(id, buf);
+              await env.IMAGES.put(`${id}.png`, buf, {
+                httpMetadata: { contentType: 'image/png' },
+              });
               img.url = `/api/image/${id}`;
             } catch {
               // 取得できなければ元の URL のまま残す（表示は CDN の失効まで可能）
@@ -507,18 +503,21 @@ export default {
       return Response.json(job);
     }
 
-    // 保存済み生成画像の配信（/api/krea2/image/ は旧 URL 互換）
+    // 保存済み生成画像の配信（/api/krea2/image/ は旧 URL 互換）。
+    // R2 を正とし、見つからなければ旧 DO ストレージ（R2 移行前の画像）を辿る。
     const imageMatch = url.pathname.match(/^\/api(?:\/krea2)?\/image\/([0-9a-f]{32})$/);
     if (imageMatch) {
       if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
+      const headers = {
+        'Content-Type': 'image/png',
+        'Cache-Control': 'private, max-age=31536000, immutable',
+      };
+      const obj = await env.IMAGES.get(`${imageMatch[1]}.png`);
+      if (obj) return new Response(obj.body, { headers });
+      // 後方互換: R2 に無い画像は旧 DO ストレージから配信する
       const buf = await stub.loadImage(imageMatch[1]);
       if (!buf) return new Response('Not found', { status: 404 });
-      return new Response(buf, {
-        headers: {
-          'Content-Type': 'image/png',
-          'Cache-Control': 'private, max-age=31536000, immutable',
-        },
-      });
+      return new Response(buf, { headers });
     }
 
     if (url.pathname !== '/api/state') return new Response('Not found', { status: 404 });
