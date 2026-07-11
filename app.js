@@ -37,14 +37,13 @@ const DIM_MIN = 256;
 const DIM_MAX = 2048;
 const DIM_STEP = 8;
 
-const LS_KEY = 'fal_api_key';
-const LS_HISTORY = 'fal_history';
+const LS_HISTORY = 'fal_history'; // サーバー履歴の表示用キャッシュ
+const LS_HISTORY_MIGRATED = 'fal_history_migrated';
 const LS_THEME = 'fal_theme';
 const LS_LORAS = 'fal_lora_library';
 const LS_FORM = 'fal_form_state';
 const LS_JOB = 'fal_active_job';
 const LORA_URL_OPTION = '__url__';
-const HISTORY_LIMIT = 30;
 const POLL_INTERVAL_MS = 900;
 
 /* ---------- helpers ---------- */
@@ -56,7 +55,6 @@ const MOBILE_MQ = window.matchMedia('(max-width: 430px)');
 
 const els = {
   themeBtn: $('#themeBtn'),
-  keyBtn: $('#keyBtn'),
   modelSelect: $('#modelSelect'),
   customModelField: $('#customModelField'),
   customModel: $('#customModel'),
@@ -97,39 +95,107 @@ const els = {
   detail: $('#detail'),
   gallery: $('#gallery'),
   clearHistoryBtn: $('#clearHistoryBtn'),
-  keyDialog: $('#keyDialog'),
-  keyInput: $('#keyInput'),
-  syncTokenInput: $('#syncTokenInput'),
-  keyError: $('#keyError'),
-  keySaveBtn: $('#keySaveBtn'),
 };
-
-function getApiKey() {
-  return localStorage.getItem(LS_KEY) || '';
-}
-
-// 全角文字などが混ざると Authorization ヘッダを組めず fetch 自体が失敗する
-// （"String contains non ISO-8859-1 code point" エラー）ため事前に検出する
-function findInvalidKeyChar(key) {
-  const m = key.match(/[^\x21-\x7E]/);
-  return m ? m[0] : null;
-}
-
-function loadHistory() {
-  try {
-    return JSON.parse(localStorage.getItem(LS_HISTORY)) || [];
-  } catch {
-    return [];
-  }
-}
-
-function saveHistory(items) {
-  localStorage.setItem(LS_HISTORY, JSON.stringify(items.slice(0, HISTORY_LIMIT)));
-  syncMarkDirty('history');
-}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// Cloudflare Access のセッション切れは API がログインページ（HTML）への
+// リダイレクトになるので、それを検出して案内する
+const ACCESS_EXPIRED_MSG = 'ログインセッションが切れています。ページを再読み込みしてサインインし直してください。';
+
+function isHtmlResponse(res) {
+  return (res.headers.get('Content-Type') || '').includes('text/html');
+}
+
+/* ---------- history（サーバーが正・localStorage は表示キャッシュ） ---------- */
+
+let historyCache = [];
+
+function loadHistory() {
+  return historyCache;
+}
+
+function persistHistoryCache() {
+  try {
+    localStorage.setItem(LS_HISTORY, JSON.stringify(historyCache));
+  } catch {
+    // 容量超過などは無視（サーバー側が正なので失っても支障ない）
+  }
+}
+
+async function fetchHistoryFromServer() {
+  let res;
+  try {
+    res = await fetch('/api/history');
+  } catch {
+    return; // オフラインなどはキャッシュ表示のまま
+  }
+  if (!res.ok || isHtmlResponse(res)) return;
+  const server = await res.json().catch(() => null);
+  if (!Array.isArray(server)) return;
+
+  // 旧バージョンのローカル履歴が残っていてサーバーが空なら、一度だけ取り込む
+  if (server.length === 0 && historyCache.length > 0 && !localStorage.getItem(LS_HISTORY_MIGRATED)) {
+    localStorage.setItem(LS_HISTORY_MIGRATED, '1');
+    for (const record of [...historyCache].reverse()) {
+      try {
+        await fetch('/api/history', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(record),
+        });
+      } catch {
+        // 移行できなかった分は諦める（fal CDN の失効済み画像など）
+      }
+    }
+    return fetchHistoryFromServer();
+  }
+
+  // サーバーが空で手元に表示中の履歴があるときは消さない（移行直後の失敗対策）
+  if (server.length > 0 || historyCache.length === 0) {
+    historyCache = server;
+    persistHistoryCache();
+    renderGallery();
+  }
+}
+
+// 生成完了時に呼ぶ。即座にローカルへ反映し、サーバーへは裏で保存する。
+// fal の CDN 画像はサーバー側で失効しない URL に取り込まれるため、応答で差し替える
+function addHistoryRecord(record) {
+  historyCache.unshift(record);
+  persistHistoryCache();
+  (async () => {
+    try {
+      const res = await fetch('/api/history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(record),
+      });
+      if (!res.ok || isHtmlResponse(res)) return;
+      const saved = await res.json();
+      const i = historyCache.findIndex((r) => r.id === saved.id);
+      if (i !== -1) historyCache[i] = saved;
+      persistHistoryCache();
+      if (selectedId === saved.id) renderDetail(saved);
+      else renderGallery();
+    } catch {
+      // オフライン時など。次回起動時のサーバー取得で整合する
+    }
+  })();
+}
+
+function deleteHistoryRecord(id) {
+  historyCache = historyCache.filter((r) => r.id !== id);
+  persistHistoryCache();
+  fetch(`/api/history/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
+}
+
+function clearHistory() {
+  historyCache = [];
+  persistHistoryCache();
+  fetch('/api/history', { method: 'DELETE' }).catch(() => {});
 }
 
 /* ---------- theme ---------- */
@@ -149,52 +215,6 @@ function initTheme() {
     const next = THEME_ORDER[(THEME_ORDER.indexOf(current) + 1) % THEME_ORDER.length];
     localStorage.setItem(LS_THEME, next);
     applyTheme(next);
-  });
-}
-
-/* ---------- API key dialog ---------- */
-
-function openKeyDialog() {
-  els.keyInput.value = getApiKey();
-  els.syncTokenInput.value = getSyncToken();
-  els.keyError.hidden = true;
-  els.keyDialog.showModal();
-}
-
-function initKeyDialog() {
-  els.keyBtn.addEventListener('click', openKeyDialog);
-
-  // 無効な文字が含まれるキー / トークンは保存させない（ダイアログを閉じずにエラー表示）
-  els.keySaveBtn.addEventListener('click', (e) => {
-    const bad = findInvalidKeyChar(els.keyInput.value.trim())
-      ?? findInvalidKeyChar(els.syncTokenInput.value.trim());
-    if (bad !== null) {
-      e.preventDefault();
-      els.keyError.hidden = false;
-      els.keyError.textContent =
-        `使用できない文字「${bad}」が含まれています。全角文字や空白が混ざっていないか確認し、半角のまま貼り付けてください。`;
-    }
-  });
-
-  els.keyInput.addEventListener('input', () => { els.keyError.hidden = true; });
-  els.syncTokenInput.addEventListener('input', () => { els.keyError.hidden = true; });
-
-  els.keyDialog.addEventListener('close', () => {
-    if (els.keyDialog.returnValue === 'save') {
-      const newKey = els.keyInput.value.trim();
-      if (newKey !== getApiKey()) {
-        localStorage.setItem(LS_KEY, newKey);
-        syncMarkDirty('apiKey');
-      }
-      const newToken = els.syncTokenInput.value.trim();
-      if (newToken !== getSyncToken()) {
-        localStorage.setItem(LS_SYNC_TOKEN, newToken);
-        // トークンを設定・変更したら即座に一度同期する
-        if (newToken) syncPull();
-      }
-    }
-    els.keyInput.value = '';
-    els.syncTokenInput.value = '';
   });
 }
 
@@ -734,21 +754,24 @@ function setError(text) {
   els.error.textContent = text || '';
 }
 
+// fal の API キーは Worker 側の Secret にあり、ブラウザには置かない。
+// 呼び出しはすべて同一オリジンのプロキシ（/api/fal/proxy）経由で行う
 async function falFetch(url, options = {}) {
-  const res = await fetch(url, {
+  const res = await fetch(`/api/fal/proxy?url=${encodeURIComponent(url)}`, {
     ...options,
     headers: {
-      Authorization: `Key ${getApiKey()}`,
       'Content-Type': 'application/json',
       ...options.headers,
     },
   });
+  if (isHtmlResponse(res)) throw new Error(ACCESS_EXPIRED_MSG);
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
+    const text = await res.text().catch(() => '');
+    let detail = text.slice(0, 300) || `HTTP ${res.status}`;
     try {
-      const body = await res.json();
+      const body = JSON.parse(text);
       detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail ?? body);
-    } catch { /* 本文が JSON でない場合はステータスのみ */ }
+    } catch { /* 本文が JSON でない場合はそのまま表示する */ }
     throw new Error(detail);
   }
   return res.json();
@@ -811,16 +834,9 @@ async function generate() {
 
   if (!prompt) { setError('プロンプトを入力してください'); return; }
 
-  // Modal 自前ホスト版は fal の API キーを使わず Worker のプロキシ経由で生成する
+  // Modal 自前ホスト版は fal ではなく Worker の専用ジョブ API で生成する
   if (model.provider === 'modal') { await generateModal(model, prompt); return; }
 
-  if (!getApiKey()) { openKeyDialog(); return; }
-  // 過去に保存済みの無効なキー（全角文字混入など）もここで拾って再入力を促す
-  if (findInvalidKeyChar(getApiKey()) !== null) {
-    setError('保存されている API キーに使用できない文字が含まれています。「API キー」から貼り直してください。');
-    openKeyDialog();
-    return;
-  }
   if (!modelId) { setError('モデル ID を入力してください'); return; }
 
   if (compareMode) { await generateCompare(modelId, prompt); return; }
@@ -836,7 +852,7 @@ async function generate() {
     }
     setStatus('リクエスト送信中…');
     const submitted = await submitJob(modelId, input);
-    const job = { kind: 'single', modelId, prompt, loras: input.loras ?? [], submitted, startedAt: Date.now() };
+    const job = { kind: 'single', modelId, prompt, input, loras: input.loras ?? [], submitted, startedAt: Date.now() };
     saveActiveJob(job);
 
     const r = await awaitJob(submitted, (status) => pollStatusText(status, job.startedAt));
@@ -856,16 +872,15 @@ function finishSingle(job, r) {
     ts: Date.now(),
     model: job.modelId,
     prompt: job.prompt,
+    input: job.input ?? null, // 生成設定（サーバー側で画像への焼き込みにも使う）
     loras: job.loras ?? [],
     seed: r.seed,
     elapsed: ((Date.now() - job.startedAt) / 1000).toFixed(1),
     images: r.images,
   };
+  addHistoryRecord(record);
   renderDetail(record);
   scrollToDetail();
-  const history = loadHistory();
-  history.unshift(record);
-  saveHistory(history);
   clearActiveJob();
 }
 
@@ -904,14 +919,7 @@ function makeModalJobId() {
   return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-function modalAuthHeaders() {
-  return { Authorization: `Bearer ${getSyncToken()}` };
-}
-
 async function modalErrorMessage(res) {
-  if (res.status === 401) {
-    return '認証に失敗しました。同期トークンが Worker の SYNC_TOKEN と一致しているか、Worker に SYNC_TOKEN が設定されているか確認してください';
-  }
   if (res.status === 404) {
     return 'この配信環境では Modal 版は使えません（Cloudflare Workers でのホストが必要です）';
   }
@@ -922,9 +930,10 @@ async function modalErrorMessage(res) {
 async function modalSubmit(body) {
   const res = await fetch('/api/krea2/generate', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...modalAuthHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  if (isHtmlResponse(res)) throw new Error(ACCESS_EXPIRED_MSG);
   if (!res.ok) throw new Error(await modalErrorMessage(res));
   return res.json();
 }
@@ -937,9 +946,8 @@ async function modalAwaitJob(jobId, onTick) {
     await sleep(MODAL_POLL_INTERVAL_MS);
     if (cancelRequested) throw new Error('キャンセルされました');
 
-    const res = await fetch(`/api/krea2/job/${jobId}`, { headers: modalAuthHeaders() })
-      .catch(() => null);
-    if (res) {
+    const res = await fetch(`/api/krea2/job/${jobId}`).catch(() => null);
+    if (res && !isHtmlResponse(res)) {
       if (res.status === 404) {
         throw new Error('ジョブが見つかりませんでした（サーバー側で期限切れになった可能性があります）');
       }
@@ -959,12 +967,6 @@ async function modalAwaitJob(jobId, onTick) {
 }
 
 async function generateModal(model, prompt) {
-  if (!getSyncToken()) {
-    setError('Modal 版の生成には同期トークン（Worker の SYNC_TOKEN と同じ値）が必要です。「API キー」ダイアログで設定してください。');
-    openKeyDialog();
-    return;
-  }
-
   const input = buildModalInput(prompt);
   // 実験版 / 本番の切り替え。URL は Worker 側の許可リストで解決される
   input.endpoint = model.modalEndpoint;
@@ -1050,15 +1052,13 @@ function finishModal(job) {
     ts: Date.now(),
     model: job.modelId,
     prompt: job.prompt,
+    input: job.input ?? null,
     loras: job.loras,
     seed: done[0].result.seed,
     elapsed: ((Date.now() - job.startedAt) / 1000).toFixed(1),
     images: done.map((e) => ({ url: e.result.url, width: job.input.width, height: job.input.height })),
   };
-  // renderDetail はギャラリーも再描画するため、先に履歴へ保存する
-  const history = loadHistory();
-  history.unshift(record);
-  saveHistory(history);
+  addHistoryRecord(record);
   renderDetail(record);
   scrollToDetail();
 }
@@ -1154,11 +1154,9 @@ async function runCompareFrom(job) {
     common: job.common,
     variants: job.results,
   };
+  addHistoryRecord(record);
   renderDetail(record);
   scrollToDetail();
-  const history = loadHistory();
-  history.unshift(record);
-  saveHistory(history);
   clearActiveJob();
 }
 
@@ -1216,7 +1214,7 @@ function makeDetailDeleteBtn(record) {
   btn.className = 'ghost-btn small mobile-only';
   btn.textContent = '削除';
   btn.addEventListener('click', () => {
-    saveHistory(loadHistory().filter((r) => r.id !== record.id));
+    deleteHistoryRecord(record.id);
     clearDetail();
     renderGallery();
   });
@@ -1513,7 +1511,7 @@ function renderGallery() {
     deleteBtn.textContent = '削除';
     deleteBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      saveHistory(loadHistory().filter((r) => r.id !== record.id));
+      deleteHistoryRecord(record.id);
       if (record.id === selectedId) {
         clearDetail();
       }
@@ -1563,20 +1561,16 @@ function reuseRecord(record) {
 }
 
 /* ---------- device sync ---------- */
-// API キー・LoRA ライブラリ・生成履歴を Worker の /api/state（Durable Object）に
-// 保存して端末間で同期する。セクションごとに更新時刻を持ち、新しい方を採用する。
-// 同期トークン未設定ならすべて無効（従来どおりローカルのみで動作）。
+// LoRA ライブラリを Worker の /api/state（Durable Object）に保存して端末間で
+// 同期する。セクションごとに更新時刻を持ち、新しい方を採用する。
+// 認証は Cloudflare Access が担うため、アプリ内のトークンはない。
+//（生成履歴は /api/history でサーバー保存、fal キーは Worker の Secret なので同期対象外）
 
-const LS_SYNC_TOKEN = 'fal_sync_token';
 const LS_SYNC_TS = 'fal_sync_ts';
-const SYNC_SECTIONS = { apiKey: LS_KEY, loras: LS_LORAS, history: LS_HISTORY };
+const SYNC_SECTIONS = { loras: LS_LORAS };
 const SYNC_PUSH_DELAY_MS = 2000;
 
 let syncPushTimer = null;
-
-function getSyncToken() {
-  return localStorage.getItem(LS_SYNC_TOKEN) || '';
-}
 
 function loadSyncTs() {
   try {
@@ -1595,7 +1589,6 @@ function syncMarkDirty(section) {
   const ts = loadSyncTs();
   ts[section] = Date.now();
   saveSyncTs(ts);
-  if (!getSyncToken()) return;
   clearTimeout(syncPushTimer);
   syncPushTimer = setTimeout(() => {
     syncPushTimer = null;
@@ -1606,10 +1599,7 @@ function syncMarkDirty(section) {
 function syncFetch(method, body) {
   return fetch('/api/state', {
     method,
-    headers: {
-      Authorization: `Bearer ${getSyncToken()}`,
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-    },
+    headers: body ? { 'Content-Type': 'application/json' } : {},
     body,
     // 離脱間際の送信でも完了できるようにする
     keepalive: method === 'PUT',
@@ -1618,18 +1608,13 @@ function syncFetch(method, body) {
 
 // リモートの方が新しいセクションを取り込み、ローカルの方が新しければ送信する
 async function syncPull() {
-  if (!getSyncToken()) return;
   let doc;
   try {
     const res = await syncFetch('GET');
-    if (res.status === 401) {
-      setError('同期トークンがサーバーと一致しません。Worker の Secret（SYNC_TOKEN）とダイアログの同期トークンを確認してください。');
-      return;
-    }
-    if (!res.ok) return;
+    if (!res.ok || isHtmlResponse(res)) return;
     doc = await res.json();
   } catch {
-    return; // オフラインなどは黙って諦める（次の機会に同期される）
+    return; // オフライン・ローカル静的サーバーなどは黙って諦める
   }
 
   const ts = loadSyncTs();
@@ -1649,15 +1634,11 @@ async function syncPull() {
   }
   saveSyncTs(ts);
 
-  if (changed) {
-    renderGallery();
-    refreshLoraSelects();
-  }
+  if (changed) refreshLoraSelects();
   if (needPush) syncPush();
 }
 
 async function syncPush() {
-  if (!getSyncToken()) return;
   const ts = loadSyncTs();
   const doc = {};
   for (const [section, lsKey] of Object.entries(SYNC_SECTIONS)) {
@@ -1747,16 +1728,23 @@ function scheduleSaveForm() {
 /* ---------- init ---------- */
 
 initTheme();
-initKeyDialog();
 initHfDialog();
 initForm();
 restoreFormState();
+
+// 履歴: まずローカルキャッシュで即描画し、サーバーの内容で置き換える
+try {
+  historyCache = JSON.parse(localStorage.getItem(LS_HISTORY)) || [];
+} catch {
+  historyCache = [];
+}
 renderGallery();
+fetchHistoryFromServer();
 
 // モバイルでは LoRA アコーディオンを畳んだ状態で開始する（PC は常時展開）
 if (MOBILE_MQ.matches) els.loraField.open = false;
 
-// 起動時に他端末の変更を取り込む（トークン未設定なら何もしない）
+// 起動時に他端末の変更（LoRA ライブラリ）を取り込む
 syncPull();
 
 // フォームの変更を localStorage に保存（入力のたび・離脱時）
@@ -1773,8 +1761,11 @@ window.addEventListener('pagehide', () => {
 });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') saveFormState();
-  // タブに戻ってきたら他端末の変更を取り込む
-  if (document.visibilityState === 'visible') syncPull();
+  // タブに戻ってきたら他端末の変更（LoRA ライブラリ・履歴）を取り込む
+  if (document.visibilityState === 'visible') {
+    syncPull();
+    fetchHistoryFromServer();
+  }
 });
 
 els.generateBtn.addEventListener('click', generate);
@@ -1832,8 +1823,8 @@ document.addEventListener('keydown', (e) => {
 });
 
 els.clearHistoryBtn.addEventListener('click', () => {
-  if (confirm('履歴をすべて削除しますか？')) {
-    saveHistory([]);
+  if (confirm('履歴をすべて削除しますか？（サーバーに保存された画像も消えます）')) {
+    clearHistory();
     clearDetail();
     renderGallery();
   }
@@ -1843,9 +1834,6 @@ els.clearHistoryBtn.addEventListener('click', () => {
 els.prompt.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && !generating) generate();
 });
-
-// キー未設定なら初回にダイアログを開く
-if (!getApiKey()) openKeyDialog();
 
 // 前回の生成が完了待ちのまま離脱していたら再開する
 resumeActiveJob();

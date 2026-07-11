@@ -12,7 +12,6 @@
   <div class="brand">fal <span>playground</span></div>
   <div class="topbar-actions">
     <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
-    <button id="keyBtn" class="ghost-btn">API キー</button>
   </div>
 </header>
 
@@ -127,26 +126,6 @@
    </section>
   </section>
 </main>
-
-<dialog id="keyDialog" class="key-dialog">
-  <form method="dialog" class="key-form">
-    <h2>fal API キー</h2>
-    <p class="hint">
-      キーはこのブラウザの localStorage にのみ保存されます。<br>
-      <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noopener">fal.ai ダッシュボード</a>で発行できます。
-    </p>
-    <input id="keyInput" type="password" placeholder="key_id:key_secret" spellcheck="false" autocomplete="off">
-    <label class="field">
-      <span class="label">同期トークン <em>（任意・端末間の同期と Modal 版生成の認証に使用）</em></span>
-      <input id="syncTokenInput" type="password" placeholder="Worker の SYNC_TOKEN と同じ値" spellcheck="false" autocomplete="off">
-    </label>
-    <div id="keyError" class="error" hidden></div>
-    <div class="key-actions">
-      <button value="cancel" class="ghost-btn" formnovalidate>キャンセル</button>
-      <button value="save" id="keySaveBtn" class="primary-btn">保存</button>
-    </div>
-  </form>
-</dialog>
 
 <dialog id="hfDialog" class="key-dialog hf-dialog">
   <form method="dialog" class="key-form">
