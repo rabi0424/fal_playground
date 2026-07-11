@@ -431,16 +431,49 @@ button { font: inherit; cursor: pointer; }
 /* PC / タブレット: フォームが縦に長くてもスクロールせずに生成ボタンへ届くよう、
    コントロールパネルの下端に貼り付ける（パネル内スクロール時も常に見える） */
 @media (min-width: 431px) {
+  /* パネルの下 padding は generate-area 側で持つ。
+     負の margin-bottom で padding を覆う方式だと、sticky の bottom: 0 が
+     マージンボックス基準で解決され、貼り付き位置が 20px 浮いて下に
+     透明な隙間ができる（背後のフォームが透ける）ため */
+  .controls { padding-bottom: 0; }
+
   .generate-area {
     position: sticky;
     bottom: 0;
     z-index: 5;
-    margin: 0 -20px -20px; /* パネルの padding ぶん広げて背景で覆う */
-    padding: 12px 20px 16px;
+    margin: 0 -20px; /* パネルの左右 padding ぶん広げて背景で覆う */
+    padding: 12px 20px 20px;
     background: var(--panel);
     border-top: 1px solid var(--border);
     border-radius: 0 0 12px 12px;
   }
+}
+
+/* ---------- running jobs ---------- */
+/* 生成中も追加リクエストを送れるため、実行中のジョブは 1 行ずつ並べて
+   それぞれにステータスとキャンセルを持たせる */
+.job-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.job-list:empty { display: none; }
+
+.job-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.job-row .status,
+.job-row .error {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.job-row .job-prompt {
+  color: var(--muted);
 }
 
 /* ---------- status / error ---------- */
@@ -829,7 +862,7 @@ button { font: inherit; cursor: pointer; }
   }
 
   /* ステータス / エラーはボタンの上に出す */
-  .generate-area .status,
+  .generate-area .job-list,
   .generate-area .error { order: -1; }
 
   /* タッチターゲット（44pt）とタップ時のフィードバック */
