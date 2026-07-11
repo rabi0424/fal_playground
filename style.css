@@ -450,12 +450,15 @@ button { font: inherit; cursor: pointer; }
 }
 
 /* ---------- running jobs ---------- */
-/* 生成中も追加リクエストを送れるため、実行中のジョブは 1 行ずつ並べて
-   それぞれにステータスとキャンセルを持たせる */
+/* 生成中も追加リクエストを送れるため、実行中のジョブは 1 件 = 1 行の
+   コンパクトな表示で並べる。件数が多いときはリスト内でスクロールし、
+   フォームや生成ボタンを圧迫しない */
 .job-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
+  max-height: 150px;
+  overflow-y: auto;
 }
 
 .job-list:empty { display: none; }
@@ -463,16 +466,48 @@ button { font: inherit; cursor: pointer; }
 .job-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  font-size: 13px;
+  /* 長いステータス（比較モードの試行表示など）でもプロンプトや ✕ を
+     押し出さず、収まらない分は折り返す */
+  flex-wrap: wrap;
 }
 
-.job-row .status,
+.job-row .status {
+  flex: none;
+  white-space: nowrap;
+  /* 経過秒の桁替わりで行がガタつかないよう数字を等幅にする */
+  font-variant-numeric: tabular-nums;
+}
+
+/* プロンプト / エラーは 1 行に省略表示し、クリックで全文表示を切り替える。
+   flex-basis を 0 にしておくと、折り返し判定が本文の長さではなく
+   min-width で行われる（コンテンツ幅 auto だと長文が常に折り返されてしまう） */
+.job-row .job-prompt,
 .job-row .error {
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 1 1 0;
+  min-width: 8em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
-.job-row .job-prompt {
+.job-row .job-prompt { color: var(--muted); }
+
+.job-row .expanded {
+  white-space: normal;
+  overflow: visible;
+}
+
+.job-row .job-x {
+  flex: none;
+  padding: 2px 8px;
+}
+
+/* Modal 版ジョブの実行中だけ出す共通の注意書き（各行には出さない） */
+.job-hint {
+  font-size: 12px;
   color: var(--muted);
 }
 
@@ -863,7 +898,11 @@ button { font: inherit; cursor: pointer; }
 
   /* ステータス / エラーはボタンの上に出す */
   .generate-area .job-list,
+  .generate-area .job-hint,
   .generate-area .error { order: -1; }
+
+  /* ✕ はタッチターゲット（44pt）を確保する */
+  .job-row .job-x { min-width: 44px; }
 
   /* タッチターゲット（44pt）とタップ時のフィードバック */
   button { -webkit-tap-highlight-color: transparent; }
