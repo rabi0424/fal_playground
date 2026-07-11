@@ -3,12 +3,15 @@
 /* ---------- constants ---------- */
 
 // Modal 自前ホスト版 Krea 2（modal_comfy リポジトリ）。fal ではなく
-// Worker のプロキシ（/api/krea2/generate）経由で生成する
+// Worker のプロキシ（/api/krea2/generate）経由で生成する。
+// エンドポイントは実験版（exp）と本番の 2 系統があり、標準は実験版
+const MODAL_KREA2_EXP_ID = 'modal/krea2-turbo-exp';
 const MODAL_KREA2_ID = 'modal/krea2-turbo';
 
 const MODELS = [
   { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA', sizeParam: 'image_size', lora: true, maxLoras: 3 },
-  { id: MODAL_KREA2_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal）', sizeParam: 'image_size', lora: true, provider: 'modal' },
+  { id: MODAL_KREA2_EXP_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 実験版）', sizeParam: 'image_size', lora: true, provider: 'modal', modalEndpoint: 'exp' },
+  { id: MODAL_KREA2_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 本番）', sizeParam: 'image_size', lora: true, provider: 'modal', modalEndpoint: 'prod' },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -34,14 +37,13 @@ const DIM_MIN = 256;
 const DIM_MAX = 2048;
 const DIM_STEP = 8;
 
-const LS_KEY = 'fal_api_key';
-const LS_HISTORY = 'fal_history';
+const LS_HISTORY = 'fal_history'; // サーバー履歴の表示用キャッシュ
+const LS_HISTORY_MIGRATED = 'fal_history_migrated';
 const LS_THEME = 'fal_theme';
 const LS_LORAS = 'fal_lora_library';
 const LS_FORM = 'fal_form_state';
 const LS_JOB = 'fal_active_job';
 const LORA_URL_OPTION = '__url__';
-const HISTORY_LIMIT = 30;
 const POLL_INTERVAL_MS = 900;
 
 /* ---------- helpers ---------- */
@@ -53,7 +55,6 @@ const MOBILE_MQ = window.matchMedia('(max-width: 430px)');
 
 const els = {
   themeBtn: $('#themeBtn'),
-  keyBtn: $('#keyBtn'),
   modelSelect: $('#modelSelect'),
   customModelField: $('#customModelField'),
   customModel: $('#customModel'),
@@ -66,6 +67,7 @@ const els = {
   hfDialog: $('#hfDialog'),
   hfRepoInput: $('#hfRepoInput'),
   hfLoadBtn: $('#hfLoadBtn'),
+  hfFilterInput: $('#hfFilterInput'),
   hfStatus: $('#hfStatus'),
   hfError: $('#hfError'),
   hfList: $('#hfList'),
@@ -94,39 +96,107 @@ const els = {
   detail: $('#detail'),
   gallery: $('#gallery'),
   clearHistoryBtn: $('#clearHistoryBtn'),
-  keyDialog: $('#keyDialog'),
-  keyInput: $('#keyInput'),
-  syncTokenInput: $('#syncTokenInput'),
-  keyError: $('#keyError'),
-  keySaveBtn: $('#keySaveBtn'),
 };
-
-function getApiKey() {
-  return localStorage.getItem(LS_KEY) || '';
-}
-
-// 全角文字などが混ざると Authorization ヘッダを組めず fetch 自体が失敗する
-// （"String contains non ISO-8859-1 code point" エラー）ため事前に検出する
-function findInvalidKeyChar(key) {
-  const m = key.match(/[^\x21-\x7E]/);
-  return m ? m[0] : null;
-}
-
-function loadHistory() {
-  try {
-    return JSON.parse(localStorage.getItem(LS_HISTORY)) || [];
-  } catch {
-    return [];
-  }
-}
-
-function saveHistory(items) {
-  localStorage.setItem(LS_HISTORY, JSON.stringify(items.slice(0, HISTORY_LIMIT)));
-  syncMarkDirty('history');
-}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// Cloudflare Access のセッション切れは API がログインページ（HTML）への
+// リダイレクトになるので、それを検出して案内する
+const ACCESS_EXPIRED_MSG = 'ログインセッションが切れています。ページを再読み込みしてサインインし直してください。';
+
+function isHtmlResponse(res) {
+  return (res.headers.get('Content-Type') || '').includes('text/html');
+}
+
+/* ---------- history（サーバーが正・localStorage は表示キャッシュ） ---------- */
+
+let historyCache = [];
+
+function loadHistory() {
+  return historyCache;
+}
+
+function persistHistoryCache() {
+  try {
+    localStorage.setItem(LS_HISTORY, JSON.stringify(historyCache));
+  } catch {
+    // 容量超過などは無視（サーバー側が正なので失っても支障ない）
+  }
+}
+
+async function fetchHistoryFromServer() {
+  let res;
+  try {
+    res = await fetch('/api/history');
+  } catch {
+    return; // オフラインなどはキャッシュ表示のまま
+  }
+  if (!res.ok || isHtmlResponse(res)) return;
+  const server = await res.json().catch(() => null);
+  if (!Array.isArray(server)) return;
+
+  // 旧バージョンのローカル履歴が残っていてサーバーが空なら、一度だけ取り込む
+  if (server.length === 0 && historyCache.length > 0 && !localStorage.getItem(LS_HISTORY_MIGRATED)) {
+    localStorage.setItem(LS_HISTORY_MIGRATED, '1');
+    for (const record of [...historyCache].reverse()) {
+      try {
+        await fetch('/api/history', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(record),
+        });
+      } catch {
+        // 移行できなかった分は諦める（fal CDN の失効済み画像など）
+      }
+    }
+    return fetchHistoryFromServer();
+  }
+
+  // サーバーが空で手元に表示中の履歴があるときは消さない（移行直後の失敗対策）
+  if (server.length > 0 || historyCache.length === 0) {
+    historyCache = server;
+    persistHistoryCache();
+    renderGallery();
+  }
+}
+
+// 生成完了時に呼ぶ。即座にローカルへ反映し、サーバーへは裏で保存する。
+// fal の CDN 画像はサーバー側で失効しない URL に取り込まれるため、応答で差し替える
+function addHistoryRecord(record) {
+  historyCache.unshift(record);
+  persistHistoryCache();
+  (async () => {
+    try {
+      const res = await fetch('/api/history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(record),
+      });
+      if (!res.ok || isHtmlResponse(res)) return;
+      const saved = await res.json();
+      const i = historyCache.findIndex((r) => r.id === saved.id);
+      if (i !== -1) historyCache[i] = saved;
+      persistHistoryCache();
+      if (selectedId === saved.id) renderDetail(saved);
+      else renderGallery();
+    } catch {
+      // オフライン時など。次回起動時のサーバー取得で整合する
+    }
+  })();
+}
+
+function deleteHistoryRecord(id) {
+  historyCache = historyCache.filter((r) => r.id !== id);
+  persistHistoryCache();
+  fetch(`/api/history/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
+}
+
+function clearHistory() {
+  historyCache = [];
+  persistHistoryCache();
+  fetch('/api/history', { method: 'DELETE' }).catch(() => {});
 }
 
 /* ---------- theme ---------- */
@@ -146,52 +216,6 @@ function initTheme() {
     const next = THEME_ORDER[(THEME_ORDER.indexOf(current) + 1) % THEME_ORDER.length];
     localStorage.setItem(LS_THEME, next);
     applyTheme(next);
-  });
-}
-
-/* ---------- API key dialog ---------- */
-
-function openKeyDialog() {
-  els.keyInput.value = getApiKey();
-  els.syncTokenInput.value = getSyncToken();
-  els.keyError.hidden = true;
-  els.keyDialog.showModal();
-}
-
-function initKeyDialog() {
-  els.keyBtn.addEventListener('click', openKeyDialog);
-
-  // 無効な文字が含まれるキー / トークンは保存させない（ダイアログを閉じずにエラー表示）
-  els.keySaveBtn.addEventListener('click', (e) => {
-    const bad = findInvalidKeyChar(els.keyInput.value.trim())
-      ?? findInvalidKeyChar(els.syncTokenInput.value.trim());
-    if (bad !== null) {
-      e.preventDefault();
-      els.keyError.hidden = false;
-      els.keyError.textContent =
-        `使用できない文字「${bad}」が含まれています。全角文字や空白が混ざっていないか確認し、半角のまま貼り付けてください。`;
-    }
-  });
-
-  els.keyInput.addEventListener('input', () => { els.keyError.hidden = true; });
-  els.syncTokenInput.addEventListener('input', () => { els.keyError.hidden = true; });
-
-  els.keyDialog.addEventListener('close', () => {
-    if (els.keyDialog.returnValue === 'save') {
-      const newKey = els.keyInput.value.trim();
-      if (newKey !== getApiKey()) {
-        localStorage.setItem(LS_KEY, newKey);
-        syncMarkDirty('apiKey');
-      }
-      const newToken = els.syncTokenInput.value.trim();
-      if (newToken !== getSyncToken()) {
-        localStorage.setItem(LS_SYNC_TOKEN, newToken);
-        // トークンを設定・変更したら即座に一度同期する
-        if (newToken) syncPull();
-      }
-    }
-    els.keyInput.value = '';
-    els.syncTokenInput.value = '';
   });
 }
 
@@ -474,6 +498,9 @@ function collectLoras() {
 // 公開リポジトリの .safetensors を一覧表示し、選択したものを LoRA ライブラリに
 // 一括登録する。登録のみで、現在の LoRA 設定行には追加しない
 
+// 既定のリポジトリ。ダイアログを開くたびにこの値へ戻す
+const HF_DEFAULT_REPO = 'tottie2215/temp_str';
+
 function parseHfRepo(raw) {
   const s = raw.trim().replace(/^https?:\/\/huggingface\.co\//, '');
   const parts = s.split('/').filter(Boolean);
@@ -529,6 +556,10 @@ async function loadHfRepo() {
     return;
   }
 
+  // リポジトリへの追加日（= 最終コミット日時）の新しい順。日付が取れなければ元の順序
+  const dateOf = (f) => Date.parse(f.lastCommit?.date ?? '') || 0;
+  files.sort((a, b) => dateOf(b) - dateOf(a));
+
   const registered = new Set(loadLoraLibrary().map((l) => l.path));
   for (const f of files) {
     const url = `https://huggingface.co/${repo}/resolve/main/${f.path}`;
@@ -552,22 +583,43 @@ async function loadHfRepo() {
 
     const meta = document.createElement('span');
     meta.className = 'hf-meta';
-    meta.textContent = done ? '登録済み' : (f.size ? `${(f.size / 1024 / 1024).toFixed(0)} MB` : '');
+    const date = dateOf(f)
+      ? new Date(dateOf(f)).toLocaleDateString('ja-JP', { year: 'numeric', month: 'numeric', day: 'numeric' })
+      : '';
+    const size = f.size ? `${(f.size / 1024 / 1024).toFixed(0)} MB` : '';
+    meta.textContent = done ? '登録済み' : [date, size].filter(Boolean).join(' ・ ');
     item.appendChild(meta);
 
     els.hfList.appendChild(item);
   }
+  hfApplyFilter();
   hfUpdateAddBtn();
+}
+
+// 一覧をファイル名で絞り込む（選択状態は保持したまま表示だけ切り替える）
+function hfApplyFilter() {
+  const q = els.hfFilterInput.value.trim().toLowerCase();
+  for (const item of els.hfList.querySelectorAll('.hf-item')) {
+    const name = item.querySelector('.hf-name').textContent.toLowerCase();
+    item.classList.toggle('filtered-out', q !== '' && !name.includes(q));
+  }
 }
 
 function initHfDialog() {
   els.hfOpenBtn.addEventListener('click', () => {
     hfSetError('');
     hfSetStatus('');
+    // 開くたびに既定リポジトリ・絞り込みへ戻して自動で読み込む
+    els.hfRepoInput.value = HF_DEFAULT_REPO;
+    els.hfFilterInput.value = '';
+    els.hfList.innerHTML = '';
+    hfUpdateAddBtn();
     els.hfDialog.showModal();
+    loadHfRepo();
   });
 
   els.hfLoadBtn.addEventListener('click', loadHfRepo);
+  els.hfFilterInput.addEventListener('input', hfApplyFilter);
 
   // Enter で form が「閉じる」ボタンで submit されるのを防いで読み込みにする
   els.hfRepoInput.addEventListener('keydown', (e) => {
@@ -708,12 +760,9 @@ function setGenerating(on) {
 // 失敗してもローカルでは必ずポーリングを打ち切って操作可能な状態に戻す
 async function cancelGeneration() {
   cancelRequested = true;
-  // Modal 版は進行中の fetch を中断するだけでよい
-  if (modalAbort) {
-    modalAbort.abort();
-    return;
-  }
+  // Modal 版はポーリングの打ち切りのみ（サーバー側で開始済みの生成は止まらない）
   const job = loadActiveJob();
+  if (job?.kind === 'modal') return;
   const submitted = job?.kind === 'single' ? job.submitted : job?.current?.submitted;
   if (submitted?.cancel_url) {
     try {
@@ -734,21 +783,24 @@ function setError(text) {
   els.error.textContent = text || '';
 }
 
+// fal の API キーは Worker 側の Secret にあり、ブラウザには置かない。
+// 呼び出しはすべて同一オリジンのプロキシ（/api/fal/proxy）経由で行う
 async function falFetch(url, options = {}) {
-  const res = await fetch(url, {
+  const res = await fetch(`/api/fal/proxy?url=${encodeURIComponent(url)}`, {
     ...options,
     headers: {
-      Authorization: `Key ${getApiKey()}`,
       'Content-Type': 'application/json',
       ...options.headers,
     },
   });
+  if (isHtmlResponse(res)) throw new Error(ACCESS_EXPIRED_MSG);
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
+    const text = await res.text().catch(() => '');
+    let detail = text.slice(0, 300) || `HTTP ${res.status}`;
     try {
-      const body = await res.json();
+      const body = JSON.parse(text);
       detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail ?? body);
-    } catch { /* 本文が JSON でない場合はステータスのみ */ }
+    } catch { /* 本文が JSON でない場合はそのまま表示する */ }
     throw new Error(detail);
   }
   return res.json();
@@ -811,16 +863,9 @@ async function generate() {
 
   if (!prompt) { setError('プロンプトを入力してください'); return; }
 
-  // Modal 自前ホスト版は fal の API キーを使わず Worker のプロキシ経由で生成する
-  if (model.provider === 'modal') { await generateModal(prompt); return; }
+  // Modal 自前ホスト版は fal ではなく Worker の専用ジョブ API で生成する
+  if (model.provider === 'modal') { await generateModal(model, prompt); return; }
 
-  if (!getApiKey()) { openKeyDialog(); return; }
-  // 過去に保存済みの無効なキー（全角文字混入など）もここで拾って再入力を促す
-  if (findInvalidKeyChar(getApiKey()) !== null) {
-    setError('保存されている API キーに使用できない文字が含まれています。「API キー」から貼り直してください。');
-    openKeyDialog();
-    return;
-  }
   if (!modelId) { setError('モデル ID を入力してください'); return; }
 
   if (compareMode) { await generateCompare(modelId, prompt); return; }
@@ -836,7 +881,7 @@ async function generate() {
     }
     setStatus('リクエスト送信中…');
     const submitted = await submitJob(modelId, input);
-    const job = { kind: 'single', modelId, prompt, loras: input.loras ?? [], submitted, startedAt: Date.now() };
+    const job = { kind: 'single', modelId, prompt, input, loras: input.loras ?? [], submitted, startedAt: Date.now() };
     saveActiveJob(job);
 
     const r = await awaitJob(submitted, (status) => pollStatusText(status, job.startedAt));
@@ -856,27 +901,28 @@ function finishSingle(job, r) {
     ts: Date.now(),
     model: job.modelId,
     prompt: job.prompt,
+    input: job.input ?? null, // 生成設定（サーバー側で画像への焼き込みにも使う）
     loras: job.loras ?? [],
     seed: r.seed,
     elapsed: ((Date.now() - job.startedAt) / 1000).toFixed(1),
     images: r.images,
   };
+  addHistoryRecord(record);
   renderDetail(record);
   scrollToDetail();
-  const history = loadHistory();
-  history.unshift(record);
-  saveHistory(history);
   clearActiveJob();
 }
 
 /* ---------- Modal (自前ホスト Krea 2) generation ---------- */
 // modal_comfy の Krea 2 Turbo API を Worker のプロキシ経由で呼ぶ。
-// fal と違いキュー / ポーリングはなく、1 リクエストで PNG が 1 枚返る同期 API。
+// 生成はサーバー側（Durable Object）でジョブとして完結し、クライアントは
+// /api/krea2/job/<id> を短い間隔でポーリングして結果を受け取る。
+// 長い HTTP 接続を保持しないため、タブ休止や接続断でも結果を取りこぼさず、
+// ページを再読み込みしても途中から再開できる。
 // 呼び出しの認証には端末間同期と同じトークン（SYNC_TOKEN）を使う
 
 const MODAL_TIMEOUT_MS = 300_000; // INTEGRATION.md 推奨: 300 秒以上
-
-let modalAbort = null;
+const MODAL_POLL_INTERVAL_MS = 2000;
 
 function buildModalInput(prompt) {
   const input = { prompt };
@@ -894,14 +940,64 @@ function buildModalInput(prompt) {
   return input;
 }
 
-async function generateModal(prompt) {
-  if (!getSyncToken()) {
-    setError('Modal 版の生成には同期トークン（Worker の SYNC_TOKEN と同じ値）が必要です。「API キー」ダイアログで設定してください。');
-    openKeyDialog();
-    return;
-  }
+// ジョブ ID はクライアント側で採番する（送信のリトライや再開時に同じ ID を
+// 使えば、サーバー側で重複生成されない）
+function makeModalJobId() {
+  if (crypto.randomUUID) return crypto.randomUUID().replaceAll('-', '');
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
 
+async function modalErrorMessage(res) {
+  if (res.status === 404) {
+    return 'この配信環境では Modal 版は使えません（Cloudflare Workers でのホストが必要です）';
+  }
+  const text = await res.text().catch(() => '');
+  return text.slice(0, 300) || `HTTP ${res.status}`;
+}
+
+async function modalSubmit(body) {
+  const res = await fetch('/api/krea2/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (isHtmlResponse(res)) throw new Error(ACCESS_EXPIRED_MSG);
+  if (!res.ok) throw new Error(await modalErrorMessage(res));
+  return res.json();
+}
+
+// ジョブ完了までポーリングする。一時的な接続エラー（オフライン・タブ休止から
+// の復帰直後など）は無視して次のポーリングで拾う
+async function modalAwaitJob(jobId) {
+  const pollStart = Date.now();
+  while (true) {
+    await sleep(MODAL_POLL_INTERVAL_MS);
+    if (cancelRequested) throw new Error('キャンセルされました');
+
+    const res = await fetch(`/api/krea2/job/${jobId}`).catch(() => null);
+    if (res && !isHtmlResponse(res)) {
+      if (res.status === 404) {
+        throw new Error('ジョブが見つかりませんでした（サーバー側で期限切れになった可能性があります）');
+      }
+      if (!res.ok) throw new Error(await modalErrorMessage(res));
+      const job = await res.json().catch(() => null);
+      if (job?.status === 'done') return job;
+      if (job?.status === 'error') throw new Error(job.error || '生成に失敗しました');
+    }
+
+    // タイムアウト判定はポーリング結果を確認した後に行う（タブ休止からの復帰時、
+    // 完了済みならタイムアウトにせず結果を採用できる）
+    if (Date.now() - pollStart > MODAL_TIMEOUT_MS) {
+      throw new Error(`${MODAL_TIMEOUT_MS / 1000} 秒以内に完了しませんでした。Modal ダッシュボードでアプリの状態を確認してください`);
+    }
+  }
+}
+
+async function generateModal(model, prompt) {
   const input = buildModalInput(prompt);
+  // 実験版 / 本番の切り替え。URL は Worker 側の許可リストで解決される
+  input.endpoint = model.modalEndpoint;
   if (input.cfg !== undefined && (input.cfg < 0 || input.cfg > 1)) {
     setError('この API のガイダンス（cfg）は 0〜1 の範囲で指定してください');
     return;
@@ -913,88 +1009,95 @@ async function generateModal(prompt) {
   }
 
   const count = Number(els.numImages.value);
+  const job = {
+    kind: 'modal',
+    modelId: model.id,
+    prompt,
+    loras,
+    input,
+    startedAt: Date.now(),
+    // seed 指定のまま複数枚生成すると全枚同一になるため、2 枚目以降はずらす
+    entries: Array.from({ length: count }, (_, i) => ({
+      jobId: makeModalJobId(),
+      seed: input.seed !== undefined ? input.seed + i : undefined,
+      submitted: false,
+      result: null,
+    })),
+  };
+
   setGenerating(true);
   setError('');
-  modalAbort = new AbortController();
-
-  const startedAt = Date.now();
-  let progressPrefix = count > 1 ? `1/${count} ` : '';
-  const tick = () => {
-    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(0);
-    setStatus(`${progressPrefix}生成中… ${elapsed}s（コールドスタート時は 1 分ほどかかります）`);
-  };
-  tick();
-  const ticker = setInterval(tick, 1000);
-
-  const images = [];
-  let firstSeed = null;
-  let timedOut = false;
   try {
-    for (let i = 0; i < count; i++) {
-      progressPrefix = count > 1 ? `${i + 1}/${count} ` : '';
-      const body = { ...input };
-      // seed 指定のまま複数枚生成すると全枚同一になるため、2 枚目以降はずらす
-      if (input.seed !== undefined && i > 0) body.seed = input.seed + i;
-
-      const timeoutTimer = setTimeout(() => { timedOut = true; modalAbort.abort(); }, MODAL_TIMEOUT_MS);
-      let res;
-      try {
-        res = await fetch('/api/krea2/generate', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${getSyncToken()}`,
-          },
-          body: JSON.stringify(body),
-          signal: modalAbort.signal,
-        });
-      } finally {
-        clearTimeout(timeoutTimer);
-      }
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        if (res.status === 401) {
-          throw new Error('認証に失敗しました。同期トークンが Worker の SYNC_TOKEN と一致しているか、Worker に SYNC_TOKEN が設定されているか確認してください');
-        }
-        if (res.status === 404) {
-          throw new Error('この配信環境では Modal 版は使えません（Cloudflare Workers でのホストが必要です）');
-        }
-        throw new Error(text.slice(0, 300) || `HTTP ${res.status}`);
-      }
-      const r = await res.json();
-      images.push({ url: r.url, width: body.width, height: body.height });
-      if (firstSeed === null) firstSeed = r.seed;
-    }
+    saveActiveJob(job);
+    await runModalJobFrom(job);
   } catch (err) {
-    if (cancelRequested) setError('キャンセルされました');
-    else if (timedOut) setError(`エラー: ${MODAL_TIMEOUT_MS / 1000} 秒以内に応答がありませんでした`);
-    else setError(`エラー: ${err.message}`);
+    setError(cancelRequested ? 'キャンセルされました' : `エラー: ${err.message}`);
+    finishModal(job); // 途中まで生成できた分は履歴に残し、ジョブをクリアする
   } finally {
-    clearInterval(ticker);
-    modalAbort = null;
-    // 途中で失敗・キャンセルしても、生成できた分は結果と履歴に残す
-    if (images.length > 0) {
-      const record = {
-        id: `modal_${Date.now()}`,
-        ts: Date.now(),
-        model: MODAL_KREA2_ID,
-        prompt,
-        loras,
-        seed: firstSeed,
-        elapsed: ((Date.now() - startedAt) / 1000).toFixed(1),
-        images,
-      };
-      // renderDetail はギャラリーも再描画するため、先に履歴へ保存する
-      const history = loadHistory();
-      history.unshift(record);
-      saveHistory(history);
-      renderDetail(record);
-      scrollToDetail();
-    }
     setGenerating(false);
     setStatus('');
   }
+}
+
+// Modal ジョブを（未完了の分から）実行する。再開時もこの関数を使う
+async function runModalJobFrom(job) {
+  const total = job.entries.length;
+
+  // 未送信分を先にすべて投入する（サーバー側で順に処理される）
+  for (const entry of job.entries) {
+    if (entry.submitted || entry.result) continue;
+    const body = { ...job.input, jobId: entry.jobId };
+    if (entry.seed !== undefined) body.seed = entry.seed;
+    setStatus('リクエスト送信中…');
+    await modalSubmit(body);
+    entry.submitted = true;
+    saveActiveJob(job);
+  }
+
+  // 順番に完了を待つ
+  for (let i = 0; i < total; i++) {
+    const entry = job.entries[i];
+    if (entry.result) continue;
+    const prefix = total > 1 ? `${i + 1}/${total} ` : '';
+    // 経過秒の表示はポーリング間隔（2 秒）とは独立に 1 秒ごとに更新する
+    const tick = () => {
+      const elapsed = ((Date.now() - job.startedAt) / 1000).toFixed(0);
+      setStatus(`${prefix}生成中… ${elapsed}s（コールドスタート時は 1 分ほどかかります）`);
+    };
+    tick();
+    const ticker = setInterval(tick, 1000);
+    let r;
+    try {
+      r = await modalAwaitJob(entry.jobId);
+    } finally {
+      clearInterval(ticker);
+    }
+    entry.result = { url: r.url, seed: r.seed };
+    saveActiveJob(job);
+  }
+
+  finishModal(job);
+}
+
+// 完了した分を履歴・結果表示に反映してジョブをクリアする（部分完了でも呼べる）
+function finishModal(job) {
+  clearActiveJob();
+  const done = job.entries.filter((e) => e.result);
+  if (done.length === 0) return;
+  const record = {
+    id: `modal_${Date.now()}`,
+    ts: Date.now(),
+    model: job.modelId,
+    prompt: job.prompt,
+    input: job.input ?? null,
+    loras: job.loras,
+    seed: done[0].result.seed,
+    elapsed: ((Date.now() - job.startedAt) / 1000).toFixed(1),
+    images: done.map((e) => ({ url: e.result.url, width: job.input.width, height: job.input.height })),
+  };
+  addHistoryRecord(record);
+  renderDetail(record);
+  scrollToDetail();
 }
 
 // 比較モード: 共通 LoRA + 各試行の LoRA を、同じ seed / プロンプトで順番に生成
@@ -1088,11 +1191,9 @@ async function runCompareFrom(job) {
     common: job.common,
     variants: job.results,
   };
+  addHistoryRecord(record);
   renderDetail(record);
   scrollToDetail();
-  const history = loadHistory();
-  history.unshift(record);
-  saveHistory(history);
   clearActiveJob();
 }
 
@@ -1111,6 +1212,15 @@ async function resumeActiveJob() {
       finishSingle(job, r);
     } else if (job.kind === 'compare') {
       await runCompareFrom(job);
+    } else if (job.kind === 'modal') {
+      // Modal の生成はサーバー側で継続しているため、ポーリングを再開すれば
+      // 離脱中に完了した分もそのまま受け取れる
+      try {
+        await runModalJobFrom(job);
+      } catch (err) {
+        setError(`前回の生成の再開に失敗しました: ${err.message}`);
+        finishModal(job); // 完了していた分は履歴に残す
+      }
     } else {
       clearActiveJob();
     }
@@ -1141,7 +1251,7 @@ function makeDetailDeleteBtn(record) {
   btn.className = 'ghost-btn small mobile-only';
   btn.textContent = '削除';
   btn.addEventListener('click', () => {
-    saveHistory(loadHistory().filter((r) => r.id !== record.id));
+    deleteHistoryRecord(record.id);
     clearDetail();
     renderGallery();
   });
@@ -1438,7 +1548,7 @@ function renderGallery() {
     deleteBtn.textContent = '削除';
     deleteBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      saveHistory(loadHistory().filter((r) => r.id !== record.id));
+      deleteHistoryRecord(record.id);
       if (record.id === selectedId) {
         clearDetail();
       }
@@ -1488,20 +1598,16 @@ function reuseRecord(record) {
 }
 
 /* ---------- device sync ---------- */
-// API キー・LoRA ライブラリ・生成履歴を Worker の /api/state（Durable Object）に
-// 保存して端末間で同期する。セクションごとに更新時刻を持ち、新しい方を採用する。
-// 同期トークン未設定ならすべて無効（従来どおりローカルのみで動作）。
+// LoRA ライブラリを Worker の /api/state（Durable Object）に保存して端末間で
+// 同期する。セクションごとに更新時刻を持ち、新しい方を採用する。
+// 認証は Cloudflare Access が担うため、アプリ内のトークンはない。
+//（生成履歴は /api/history でサーバー保存、fal キーは Worker の Secret なので同期対象外）
 
-const LS_SYNC_TOKEN = 'fal_sync_token';
 const LS_SYNC_TS = 'fal_sync_ts';
-const SYNC_SECTIONS = { apiKey: LS_KEY, loras: LS_LORAS, history: LS_HISTORY };
+const SYNC_SECTIONS = { loras: LS_LORAS };
 const SYNC_PUSH_DELAY_MS = 2000;
 
 let syncPushTimer = null;
-
-function getSyncToken() {
-  return localStorage.getItem(LS_SYNC_TOKEN) || '';
-}
 
 function loadSyncTs() {
   try {
@@ -1520,7 +1626,6 @@ function syncMarkDirty(section) {
   const ts = loadSyncTs();
   ts[section] = Date.now();
   saveSyncTs(ts);
-  if (!getSyncToken()) return;
   clearTimeout(syncPushTimer);
   syncPushTimer = setTimeout(() => {
     syncPushTimer = null;
@@ -1531,10 +1636,7 @@ function syncMarkDirty(section) {
 function syncFetch(method, body) {
   return fetch('/api/state', {
     method,
-    headers: {
-      Authorization: `Bearer ${getSyncToken()}`,
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-    },
+    headers: body ? { 'Content-Type': 'application/json' } : {},
     body,
     // 離脱間際の送信でも完了できるようにする
     keepalive: method === 'PUT',
@@ -1543,18 +1645,13 @@ function syncFetch(method, body) {
 
 // リモートの方が新しいセクションを取り込み、ローカルの方が新しければ送信する
 async function syncPull() {
-  if (!getSyncToken()) return;
   let doc;
   try {
     const res = await syncFetch('GET');
-    if (res.status === 401) {
-      setError('同期トークンがサーバーと一致しません。Worker の Secret（SYNC_TOKEN）とダイアログの同期トークンを確認してください。');
-      return;
-    }
-    if (!res.ok) return;
+    if (!res.ok || isHtmlResponse(res)) return;
     doc = await res.json();
   } catch {
-    return; // オフラインなどは黙って諦める（次の機会に同期される）
+    return; // オフライン・ローカル静的サーバーなどは黙って諦める
   }
 
   const ts = loadSyncTs();
@@ -1574,15 +1671,11 @@ async function syncPull() {
   }
   saveSyncTs(ts);
 
-  if (changed) {
-    renderGallery();
-    refreshLoraSelects();
-  }
+  if (changed) refreshLoraSelects();
   if (needPush) syncPush();
 }
 
 async function syncPush() {
-  if (!getSyncToken()) return;
   const ts = loadSyncTs();
   const doc = {};
   for (const [section, lsKey] of Object.entries(SYNC_SECTIONS)) {
@@ -1672,16 +1765,23 @@ function scheduleSaveForm() {
 /* ---------- init ---------- */
 
 initTheme();
-initKeyDialog();
 initHfDialog();
 initForm();
 restoreFormState();
+
+// 履歴: まずローカルキャッシュで即描画し、サーバーの内容で置き換える
+try {
+  historyCache = JSON.parse(localStorage.getItem(LS_HISTORY)) || [];
+} catch {
+  historyCache = [];
+}
 renderGallery();
+fetchHistoryFromServer();
 
 // モバイルでは LoRA アコーディオンを畳んだ状態で開始する（PC は常時展開）
 if (MOBILE_MQ.matches) els.loraField.open = false;
 
-// 起動時に他端末の変更を取り込む（トークン未設定なら何もしない）
+// 起動時に他端末の変更（LoRA ライブラリ）を取り込む
 syncPull();
 
 // フォームの変更を localStorage に保存（入力のたび・離脱時）
@@ -1698,8 +1798,11 @@ window.addEventListener('pagehide', () => {
 });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') saveFormState();
-  // タブに戻ってきたら他端末の変更を取り込む
-  if (document.visibilityState === 'visible') syncPull();
+  // タブに戻ってきたら他端末の変更（LoRA ライブラリ・履歴）を取り込む
+  if (document.visibilityState === 'visible') {
+    syncPull();
+    fetchHistoryFromServer();
+  }
 });
 
 els.generateBtn.addEventListener('click', generate);
@@ -1757,8 +1860,8 @@ document.addEventListener('keydown', (e) => {
 });
 
 els.clearHistoryBtn.addEventListener('click', () => {
-  if (confirm('履歴をすべて削除しますか？')) {
-    saveHistory([]);
+  if (confirm('履歴をすべて削除しますか？（サーバーに保存された画像も消えます）')) {
+    clearHistory();
     clearDetail();
     renderGallery();
   }
@@ -1768,9 +1871,6 @@ els.clearHistoryBtn.addEventListener('click', () => {
 els.prompt.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && !generating) generate();
 });
-
-// キー未設定なら初回にダイアログを開く
-if (!getApiKey()) openKeyDialog();
 
 // 前回の生成が完了待ちのまま離脱していたら再開する
 resumeActiveJob();

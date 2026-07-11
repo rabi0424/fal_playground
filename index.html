@@ -12,7 +12,6 @@
   <div class="brand">fal <span>playground</span></div>
   <div class="topbar-actions">
     <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
-    <button id="keyBtn" class="ghost-btn">API キー</button>
   </div>
 </header>
 
@@ -128,26 +127,6 @@
   </section>
 </main>
 
-<dialog id="keyDialog" class="key-dialog">
-  <form method="dialog" class="key-form">
-    <h2>fal API キー</h2>
-    <p class="hint">
-      キーはこのブラウザの localStorage にのみ保存されます。<br>
-      <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noopener">fal.ai ダッシュボード</a>で発行できます。
-    </p>
-    <input id="keyInput" type="password" placeholder="key_id:key_secret" spellcheck="false" autocomplete="off">
-    <label class="field">
-      <span class="label">同期トークン <em>（任意・端末間の同期と Modal 版生成の認証に使用）</em></span>
-      <input id="syncTokenInput" type="password" placeholder="Worker の SYNC_TOKEN と同じ値" spellcheck="false" autocomplete="off">
-    </label>
-    <div id="keyError" class="error" hidden></div>
-    <div class="key-actions">
-      <button value="cancel" class="ghost-btn" formnovalidate>キャンセル</button>
-      <button value="save" id="keySaveBtn" class="primary-btn">保存</button>
-    </div>
-  </form>
-</dialog>
-
 <dialog id="hfDialog" class="key-dialog hf-dialog">
   <form method="dialog" class="key-form">
     <h2>Hugging Face から LoRA を一括登録</h2>
@@ -159,6 +138,7 @@
       <input id="hfRepoInput" type="text" placeholder="owner/repo" spellcheck="false" autocomplete="off">
       <button id="hfLoadBtn" class="ghost-btn" type="button">読み込み</button>
     </div>
+    <input id="hfFilterInput" class="hf-filter" type="search" placeholder="ファイル名で絞り込み…" spellcheck="false" autocomplete="off">
     <div id="hfStatus" class="status" hidden></div>
     <div id="hfError" class="error" hidden></div>
     <div id="hfList" class="hf-list"></div>
