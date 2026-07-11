@@ -88,8 +88,7 @@ const els = {
   steps: $('#steps'),
   guidance: $('#guidance'),
   generateBtn: $('#generateBtn'),
-  cancelBtn: $('#cancelBtn'),
-  status: $('#status'),
+  jobs: $('#jobs'),
   error: $('#error'),
   detail: $('#detail'),
   gallery: $('#gallery'),
@@ -692,29 +691,55 @@ function buildInput({ loras, seed, numImages } = {}) {
 
 /* ---------- generation ---------- */
 
-let generating = false;
 let selectedId = null;
-let cancelRequested = false;
 
-// 生成中フラグと生成/キャンセルボタンの表示をまとめて切り替える
-function setGenerating(on) {
-  generating = on;
-  els.generateBtn.disabled = on;
-  els.cancelBtn.hidden = !on;
-  if (on) cancelRequested = false;
+// 生成中でも追加リクエストを送れるよう、実行中ジョブを複数同時に管理する
+const activeJobs = new Map();
+let jobSeq = 0;
+
+// ジョブごとのステータス行（スピナー + キャンセル）を生成ボタン付近に出す
+function addJobRow(job) {
+  const row = document.createElement('div');
+  row.className = 'job-row';
+
+  const status = document.createElement('span');
+  status.className = 'status';
+  row.appendChild(status);
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'ghost-btn small';
+  cancelBtn.type = 'button';
+  cancelBtn.textContent = 'キャンセル';
+  cancelBtn.addEventListener('click', () => cancelJob(job));
+  row.appendChild(cancelBtn);
+
+  els.jobs.appendChild(row);
+  job.row = row;
+  job.setStatus = (text) => { status.textContent = text; };
+}
+
+function registerJob(job) {
+  activeJobs.set(job.id, job);
+  addJobRow(job);
+  persistJobs();
+}
+
+function removeJob(job) {
+  activeJobs.delete(job.id);
+  job.row?.remove();
+  persistJobs();
 }
 
 // 実行中ジョブの中断。fal 側のキャンセル（待機中のみ有効）も試みるが、
 // 失敗してもローカルでは必ずポーリングを打ち切って操作可能な状態に戻す
-async function cancelGeneration() {
-  cancelRequested = true;
+async function cancelJob(job) {
+  job.cancelled = true;
   // Modal 版は進行中の fetch を中断するだけでよい
-  if (modalAbort) {
-    modalAbort.abort();
+  if (job.abort) {
+    job.abort.abort();
     return;
   }
-  const job = loadActiveJob();
-  const submitted = job?.kind === 'single' ? job.submitted : job?.current?.submitted;
+  const submitted = job.kind === 'single' ? job.submitted : job.current?.submitted;
   if (submitted?.cancel_url) {
     try {
       await falFetch(submitted.cancel_url, { method: 'PUT' });
@@ -722,11 +747,6 @@ async function cancelGeneration() {
       // 生成開始済みなどでキャンセルできなくても、ローカルの打ち切りは行う
     }
   }
-}
-
-function setStatus(text) {
-  els.status.hidden = !text;
-  els.status.textContent = text || '';
 }
 
 function setError(text) {
@@ -754,21 +774,25 @@ async function falFetch(url, options = {}) {
   return res.json();
 }
 
-// 保留中ジョブ（生成完了待ち）の永続化。再読み込み/クローズしても再開できる
-function saveActiveJob(job) {
-  localStorage.setItem(LS_JOB, JSON.stringify(job));
+// 保留中ジョブ（生成完了待ち）の永続化。再読み込み/クローズしても再開できる。
+// Modal 版は同期 API のため再開できず、永続化の対象外
+function persistJobs() {
+  const jobs = [...activeJobs.values()]
+    .filter((j) => (j.kind === 'single' && j.submitted) || j.kind === 'compare')
+    .map(({ id, row, setStatus, abort, cancelled, ...rest }) => rest);
+  if (jobs.length === 0) localStorage.removeItem(LS_JOB);
+  else localStorage.setItem(LS_JOB, JSON.stringify(jobs));
 }
 
-function loadActiveJob() {
+function loadPendingJobs() {
   try {
-    return JSON.parse(localStorage.getItem(LS_JOB));
+    const parsed = JSON.parse(localStorage.getItem(LS_JOB));
+    if (!parsed) return [];
+    // 旧形式（単一オブジェクト）で保存されたジョブも受け付ける
+    return Array.isArray(parsed) ? parsed : [parsed];
   } catch {
-    return null;
+    return [];
   }
-}
-
-function clearActiveJob() {
-  localStorage.removeItem(LS_JOB);
 }
 
 // リクエスト送信のみ（status_url / response_url を含む submitted を返す）
@@ -780,11 +804,11 @@ async function submitJob(modelId, input) {
 }
 
 // 既に送信済みの submitted をポーリングし、完了したら画像を取得する
-async function awaitJob(submitted, onProgress) {
+async function awaitJob(job, submitted, onProgress) {
   let status;
   do {
     await sleep(POLL_INTERVAL_MS);
-    if (cancelRequested) throw new Error('キャンセルされました');
+    if (job.cancelled) throw new Error('キャンセルされました');
     status = await falFetch(submitted.status_url);
     if (onProgress) onProgress(status);
   } while (status.status !== 'COMPLETED');
@@ -801,7 +825,7 @@ function pollStatusText(status, startedAt, prefix = '') {
   const phase = status.status === 'IN_QUEUE'
     ? `待機中（${status.queue_position + 1} 番目）`
     : '生成中';
-  setStatus(`${prefix}${phase}… ${elapsed}s`);
+  return `${prefix}${phase}… ${elapsed}s`;
 }
 
 async function generate() {
@@ -825,28 +849,36 @@ async function generate() {
 
   if (compareMode) { await generateCompare(modelId, prompt); return; }
 
-  setGenerating(true);
+  const input = buildInput();
+  const limit = modelLoraLimit();
+  if ((input.loras?.length ?? 0) > limit) {
+    setError(`LoRA はこのモデルでは最大 ${limit} 個までです（現在 ${input.loras.length} 個）`);
+    return;
+  }
   setError('');
 
-  try {
-    const input = buildInput();
-    const limit = modelLoraLimit();
-    if ((input.loras?.length ?? 0) > limit) {
-      throw new Error(`LoRA はこのモデルでは最大 ${limit} 個までです（現在 ${input.loras.length} 個）`);
-    }
-    setStatus('リクエスト送信中…');
-    const submitted = await submitJob(modelId, input);
-    const job = { kind: 'single', modelId, prompt, loras: input.loras ?? [], submitted, startedAt: Date.now() };
-    saveActiveJob(job);
+  const job = {
+    id: `job_${++jobSeq}`,
+    kind: 'single',
+    modelId,
+    prompt,
+    loras: input.loras ?? [],
+    submitted: null,
+    startedAt: Date.now(),
+    cancelled: false,
+  };
+  registerJob(job);
+  job.setStatus('リクエスト送信中…');
 
-    const r = await awaitJob(submitted, (status) => pollStatusText(status, job.startedAt));
+  try {
+    job.submitted = await submitJob(modelId, input);
+    persistJobs();
+    const r = await awaitJob(job, job.submitted, (status) => job.setStatus(pollStatusText(status, job.startedAt)));
     finishSingle(job, r);
   } catch (err) {
     setError(`エラー: ${err.message}`);
-    clearActiveJob();
   } finally {
-    setGenerating(false);
-    setStatus('');
+    removeJob(job);
   }
 }
 
@@ -861,12 +893,12 @@ function finishSingle(job, r) {
     elapsed: ((Date.now() - job.startedAt) / 1000).toFixed(1),
     images: r.images,
   };
-  renderDetail(record);
-  scrollToDetail();
+  // renderDetail はギャラリーも再描画するため、先に履歴へ保存する
   const history = loadHistory();
   history.unshift(record);
   saveHistory(history);
-  clearActiveJob();
+  renderDetail(record);
+  scrollToDetail();
 }
 
 /* ---------- Modal (自前ホスト Krea 2) generation ---------- */
@@ -875,8 +907,6 @@ function finishSingle(job, r) {
 // 呼び出しの認証には端末間同期と同じトークン（SYNC_TOKEN）を使う
 
 const MODAL_TIMEOUT_MS = 300_000; // INTEGRATION.md 推奨: 300 秒以上
-
-let modalAbort = null;
 
 function buildModalInput(prompt) {
   const input = { prompt };
@@ -913,15 +943,23 @@ async function generateModal(prompt) {
   }
 
   const count = Number(els.numImages.value);
-  setGenerating(true);
   setError('');
-  modalAbort = new AbortController();
 
-  const startedAt = Date.now();
+  const job = {
+    id: `job_${++jobSeq}`,
+    kind: 'modal',
+    prompt,
+    startedAt: Date.now(),
+    cancelled: false,
+    abort: new AbortController(),
+  };
+  registerJob(job);
+
+  const startedAt = job.startedAt;
   let progressPrefix = count > 1 ? `1/${count} ` : '';
   const tick = () => {
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(0);
-    setStatus(`${progressPrefix}生成中… ${elapsed}s（コールドスタート時は 1 分ほどかかります）`);
+    job.setStatus(`${progressPrefix}生成中… ${elapsed}s（コールドスタート時は 1 分ほどかかります）`);
   };
   tick();
   const ticker = setInterval(tick, 1000);
@@ -936,7 +974,7 @@ async function generateModal(prompt) {
       // seed 指定のまま複数枚生成すると全枚同一になるため、2 枚目以降はずらす
       if (input.seed !== undefined && i > 0) body.seed = input.seed + i;
 
-      const timeoutTimer = setTimeout(() => { timedOut = true; modalAbort.abort(); }, MODAL_TIMEOUT_MS);
+      const timeoutTimer = setTimeout(() => { timedOut = true; job.abort.abort(); }, MODAL_TIMEOUT_MS);
       let res;
       try {
         res = await fetch('/api/krea2/generate', {
@@ -946,7 +984,7 @@ async function generateModal(prompt) {
             Authorization: `Bearer ${getSyncToken()}`,
           },
           body: JSON.stringify(body),
-          signal: modalAbort.signal,
+          signal: job.abort.signal,
         });
       } finally {
         clearTimeout(timeoutTimer);
@@ -967,12 +1005,11 @@ async function generateModal(prompt) {
       if (firstSeed === null) firstSeed = r.seed;
     }
   } catch (err) {
-    if (cancelRequested) setError('キャンセルされました');
+    if (job.cancelled) setError('キャンセルされました');
     else if (timedOut) setError(`エラー: ${MODAL_TIMEOUT_MS / 1000} 秒以内に応答がありませんでした`);
     else setError(`エラー: ${err.message}`);
   } finally {
     clearInterval(ticker);
-    modalAbort = null;
     // 途中で失敗・キャンセルしても、生成できた分は結果と履歴に残す
     if (images.length > 0) {
       const record = {
@@ -992,8 +1029,7 @@ async function generateModal(prompt) {
       renderDetail(record);
       scrollToDetail();
     }
-    setGenerating(false);
-    setStatus('');
+    removeJob(job);
   }
 }
 
@@ -1023,6 +1059,7 @@ async function generateCompare(modelId, prompt) {
     : Math.floor(Math.random() * 4294967296);
 
   const job = {
+    id: `job_${++jobSeq}`,
     kind: 'compare',
     modelId,
     prompt,
@@ -1032,19 +1069,18 @@ async function generateCompare(modelId, prompt) {
     results: [],
     current: null,
     startedAt: Date.now(),
+    cancelled: false,
   };
 
-  setGenerating(true);
   setError('');
+  registerJob(job);
 
   try {
     await runCompareFrom(job);
   } catch (err) {
     setError(`エラー: ${err.message}`);
-    clearActiveJob();
   } finally {
-    setGenerating(false);
-    setStatus('');
+    removeJob(job);
   }
 }
 
@@ -1063,19 +1099,19 @@ async function runCompareFrom(job) {
       const input = buildInput({ loras, seed: job.seed, numImages: 1 });
       submitted = await submitJob(job.modelId, input);
       job.current = { index: i, submitted };
-      saveActiveJob(job);
+      persistJobs();
     }
 
     try {
-      const r = await awaitJob(submitted, (status) => pollStatusText(status, job.startedAt, `試行 ${i + 1}/${total} `));
+      const r = await awaitJob(job, submitted, (status) => job.setStatus(pollStatusText(status, job.startedAt, `試行 ${i + 1}/${total} `)));
       job.results.push({ ownLoras: own, loras, images: r.images, seed: r.seed, elapsed: null, error: null });
     } catch (err) {
       // キャンセルは試行の失敗としてではなく比較全体の中断として扱う
-      if (cancelRequested) throw err;
+      if (job.cancelled) throw err;
       job.results.push({ ownLoras: own, loras, images: [], seed: null, elapsed: null, error: err.message });
     }
     job.current = null;
-    saveActiveJob(job);
+    persistJobs();
   }
 
   const record = {
@@ -1088,38 +1124,37 @@ async function runCompareFrom(job) {
     common: job.common,
     variants: job.results,
   };
-  renderDetail(record);
-  scrollToDetail();
+  // renderDetail はギャラリーも再描画するため、先に履歴へ保存する
   const history = loadHistory();
   history.unshift(record);
   saveHistory(history);
-  clearActiveJob();
+  renderDetail(record);
+  scrollToDetail();
 }
 
 // 起動時: 保留中ジョブがあればポーリングを再開して完了させる
-async function resumeActiveJob() {
-  const job = loadActiveJob();
-  if (!job) return;
+function resumeActiveJobs() {
+  for (const stored of loadPendingJobs()) {
+    if (stored.kind !== 'single' && stored.kind !== 'compare') continue;
+    const job = { ...stored, id: `job_${++jobSeq}`, cancelled: false };
+    registerJob(job);
+    job.setStatus('前回の生成を再開中…');
+    resumeJob(job);
+  }
+}
 
-  setGenerating(true);
-  setError('');
-  setStatus('前回の生成を再開中…');
-
+async function resumeJob(job) {
   try {
     if (job.kind === 'single') {
-      const r = await awaitJob(job.submitted, (status) => pollStatusText(status, job.startedAt));
+      const r = await awaitJob(job, job.submitted, (status) => job.setStatus(pollStatusText(status, job.startedAt)));
       finishSingle(job, r);
-    } else if (job.kind === 'compare') {
-      await runCompareFrom(job);
     } else {
-      clearActiveJob();
+      await runCompareFrom(job);
     }
   } catch (err) {
     setError(`前回の生成の再開に失敗しました: ${err.message}`);
-    clearActiveJob();
   } finally {
-    setGenerating(false);
-    setStatus('');
+    removeJob(job);
   }
 }
 
@@ -1703,7 +1738,6 @@ document.addEventListener('visibilitychange', () => {
 });
 
 els.generateBtn.addEventListener('click', generate);
-els.cancelBtn.addEventListener('click', cancelGeneration);
 els.addLoraBtn.addEventListener('click', () => addLoraRow());
 els.compareToggle.addEventListener('change', () => setCompareMode(els.compareToggle.checked));
 els.addVariantBtn.addEventListener('click', () => addVariant());
@@ -1764,13 +1798,13 @@ els.clearHistoryBtn.addEventListener('click', () => {
   }
 });
 
-// Cmd/Ctrl + Enter で生成
+// Cmd/Ctrl + Enter で生成（生成中でも追加リクエストとして送信できる）
 els.prompt.addEventListener('keydown', (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && !generating) generate();
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') generate();
 });
 
 // キー未設定なら初回にダイアログを開く
 if (!getApiKey()) openKeyDialog();
 
 // 前回の生成が完了待ちのまま離脱していたら再開する
-resumeActiveJob();
+resumeActiveJobs();

@@ -428,6 +428,25 @@ button { font: inherit; cursor: pointer; }
   gap: 14px;
 }
 
+/* ---------- running jobs ---------- */
+/* 生成中でも追加リクエストを送れるため、ジョブごとに 1 行ずつ表示する */
+.jobs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.jobs:empty { display: none; }
+
+.job-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.job-row .status { flex: 1; min-width: 0; }
+.job-row .ghost-btn { flex-shrink: 0; }
+
 /* ---------- status / error ---------- */
 .status {
   font-size: 13px;
@@ -808,8 +827,20 @@ button { font: inherit; cursor: pointer; }
     border-top: 1px solid var(--border);
   }
 
-  /* ステータス / エラーはボタンの上に出す */
-  .generate-area .status,
+  /* iOS Safari の半透明ツールバーはバー下端より下のページ内容を映すため、
+     背景を画面外（下方向）まで延長してフォームが透けて見えないようにする */
+  .generate-area::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    height: 200px;
+    background: var(--panel);
+  }
+
+  /* ジョブ状況 / エラーはボタンの上に出す */
+  .generate-area .jobs,
   .generate-area .error { order: -1; }
 
   /* タッチターゲット（44pt）とタップ時のフィードバック */
