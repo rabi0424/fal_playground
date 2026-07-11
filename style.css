@@ -450,12 +450,15 @@ button { font: inherit; cursor: pointer; }
 }
 
 /* ---------- running jobs ---------- */
-/* 生成中も追加リクエストを送れるため、実行中のジョブは 1 行ずつ並べて
-   それぞれにステータスとキャンセルを持たせる */
+/* 生成中も追加リクエストを送れるため、実行中のジョブは 1 件 = 1 行の
+   コンパクトな表示で並べる。件数が多いときはリスト内でスクロールし、
+   フォームや生成ボタンを圧迫しない */
 .job-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
+  max-height: 150px;
+  overflow-y: auto;
 }
 
 .job-list:empty { display: none; }
@@ -463,16 +466,48 @@ button { font: inherit; cursor: pointer; }
 .job-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  font-size: 13px;
 }
 
-.job-row .status,
+.job-row .status {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* プロンプトは 1 行に省略表示（全文はツールチップ） */
+.job-row .job-prompt {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+/* エラーも 1 行に省略し、クリックで全文表示を切り替える */
 .job-row .error {
   flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
-.job-row .job-prompt {
+.job-row .error.expanded {
+  white-space: normal;
+  overflow: visible;
+}
+
+.job-row .job-x {
+  flex: none;
+  padding: 2px 8px;
+}
+
+/* Modal 版ジョブの実行中だけ出す共通の注意書き（各行には出さない） */
+.job-hint {
+  font-size: 12px;
   color: var(--muted);
 }
 
@@ -863,6 +898,7 @@ button { font: inherit; cursor: pointer; }
 
   /* ステータス / エラーはボタンの上に出す */
   .generate-area .job-list,
+  .generate-area .job-hint,
   .generate-area .error { order: -1; }
 
   /* タッチターゲット（44pt）とタップ時のフィードバック */

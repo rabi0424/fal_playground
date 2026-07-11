@@ -91,6 +91,7 @@ const els = {
   guidance: $('#guidance'),
   generateBtn: $('#generateBtn'),
   jobList: $('#jobList'),
+  jobHint: $('#jobHint'),
   error: $('#error'),
   detail: $('#detail'),
   gallery: $('#gallery'),
@@ -764,61 +765,74 @@ function makeJid() {
 // ジョブ行の DOM など実行時だけの状態。永続化データ（job）には含めない
 const jobUI = new WeakMap();
 
-// 並行実行中はどの行がどのリクエストか分かるよう、プロンプトの冒頭を添える
-function promptSnippet(prompt) {
-  const p = (prompt || '').replace(/\s+/g, ' ').trim();
-  return p.length > 24 ? `${p.slice(0, 24)}…` : p;
+// 行に ✕ ボタン（キャンセル / 閉じる）を付ける
+function makeJobXBtn(title, onClick) {
+  const btn = document.createElement('button');
+  btn.className = 'ghost-btn small job-x';
+  btn.type = 'button';
+  btn.textContent = '✕';
+  btn.title = title;
+  btn.setAttribute('aria-label', title);
+  btn.addEventListener('click', onClick);
+  return btn;
 }
 
+// Modal 版のコールドスタート注記は各行には出さず、実行中の間だけ共通で 1 行出す
+function updateJobHint() {
+  els.jobHint.hidden = !els.jobList.querySelector('.job-row.modal-job');
+}
+
+// 1 件 = 1 行: [スピナー + 状態] [プロンプト（省略表示）] [✕]
 function startJobRow(job) {
   const row = document.createElement('div');
   row.className = 'job-row';
+  if (job.kind === 'modal') row.classList.add('modal-job');
 
   const status = document.createElement('div');
   status.className = 'status';
   row.appendChild(status);
 
-  const cancelBtn = document.createElement('button');
-  cancelBtn.className = 'ghost-btn small';
-  cancelBtn.type = 'button';
-  cancelBtn.textContent = 'キャンセル';
-  cancelBtn.addEventListener('click', () => cancelJob(job));
-  row.appendChild(cancelBtn);
+  const prompt = document.createElement('div');
+  prompt.className = 'job-prompt';
+  prompt.textContent = job.prompt || '';
+  prompt.title = job.prompt || '';
+  row.appendChild(prompt);
+
+  row.appendChild(makeJobXBtn('キャンセル', () => cancelJob(job)));
 
   els.jobList.appendChild(row);
   jobUI.set(job, { row, status });
+  updateJobHint();
 }
 
 function setJobStatus(job, text) {
   const ui = jobUI.get(job);
-  if (!ui) return;
-  const snippet = promptSnippet(job.prompt);
-  ui.status.textContent = snippet ? `${text}「${snippet}」` : text;
+  if (ui) ui.status.textContent = text;
 }
 
 // 失敗したジョブは行をエラー表示に切り替えて、閉じるまで残す
 function failJobRow(job, message) {
   const ui = jobUI.get(job);
   if (!ui) return;
+  ui.row.classList.remove('modal-job');
   ui.row.innerHTML = '';
 
   const err = document.createElement('div');
   err.className = 'error';
-  const snippet = promptSnippet(job.prompt);
-  err.textContent = snippet ? `${message}「${snippet}」` : message;
+  err.textContent = message;
+  err.title = job.prompt ? `${message}「${job.prompt}」` : message;
+  // 1 行に省略表示するため、クリックで全文表示を切り替えられるようにする
+  err.addEventListener('click', () => err.classList.toggle('expanded'));
   ui.row.appendChild(err);
 
-  const closeBtn = document.createElement('button');
-  closeBtn.className = 'ghost-btn small';
-  closeBtn.type = 'button';
-  closeBtn.textContent = '閉じる';
-  closeBtn.addEventListener('click', () => endJobRow(job));
-  ui.row.appendChild(closeBtn);
+  ui.row.appendChild(makeJobXBtn('閉じる', () => endJobRow(job)));
+  updateJobHint();
 }
 
 function endJobRow(job) {
   jobUI.get(job)?.row.remove();
   jobUI.delete(job);
+  updateJobHint();
 }
 
 // ジョブの中断。fal 側のキャンセル（待機中のみ有効）も試みるが、
@@ -927,7 +941,7 @@ function pollStatusText(job, status, prefix = '') {
   const phase = status.status === 'IN_QUEUE'
     ? `待機中（${status.queue_position + 1} 番目）`
     : '生成中';
-  setJobStatus(job, `${prefix}${phase}… ${elapsed}s `);
+  setJobStatus(job, `${prefix}${phase}… ${elapsed}s`);
 }
 
 async function generate() {
@@ -954,7 +968,7 @@ async function generate() {
 
   const job = { jid: makeJid(), kind: 'single', modelId, prompt, input, loras: input.loras ?? [], submitted: null, startedAt: Date.now() };
   startJobRow(job);
-  setJobStatus(job, 'リクエスト送信中… ');
+  setJobStatus(job, '送信中…');
 
   try {
     job.submitted = await submitJob(modelId, input);
@@ -1121,7 +1135,7 @@ async function runModalJobFrom(job) {
     if (entry.submitted || entry.result) continue;
     const body = { ...job.input, jobId: entry.jobId };
     if (entry.seed !== undefined) body.seed = entry.seed;
-    setJobStatus(job, 'リクエスト送信中… ');
+    setJobStatus(job, '送信中…');
     await modalSubmit(body);
     entry.submitted = true;
     saveActiveJob(job);
@@ -1135,7 +1149,7 @@ async function runModalJobFrom(job) {
     // 経過秒の表示はポーリング間隔（2 秒）とは独立に 1 秒ごとに更新する
     const tick = () => {
       const elapsed = ((Date.now() - job.startedAt) / 1000).toFixed(0);
-      setJobStatus(job, `${prefix}生成中… ${elapsed}s（コールドスタート時は 1 分ほどかかります）`);
+      setJobStatus(job, `${prefix}生成中… ${elapsed}s`);
     };
     tick();
     const ticker = setInterval(tick, 1000);
@@ -1280,7 +1294,7 @@ async function resumeJob(job) {
   if (!job.jid) job.jid = makeJid(); // 旧形式のジョブには ID がない
   job.cancelled = false;
   startJobRow(job);
-  setJobStatus(job, '前回の生成を再開中… ');
+  setJobStatus(job, '再開中…');
 
   try {
     if (job.kind === 'single') {
