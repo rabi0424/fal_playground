@@ -428,6 +428,21 @@ button { font: inherit; cursor: pointer; }
   gap: 14px;
 }
 
+/* PC / タブレット: フォームが縦に長くてもスクロールせずに生成ボタンへ届くよう、
+   コントロールパネルの下端に貼り付ける（パネル内スクロール時も常に見える） */
+@media (min-width: 431px) {
+  .generate-area {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    margin: 0 -20px -20px; /* パネルの padding ぶん広げて背景で覆う */
+    padding: 12px 20px 16px;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    border-radius: 0 0 12px 12px;
+  }
+}
+
 /* ---------- status / error ---------- */
 .status {
   font-size: 13px;

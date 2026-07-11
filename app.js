@@ -940,7 +940,7 @@ async function modalSubmit(body) {
 
 // ジョブ完了までポーリングする。一時的な接続エラー（オフライン・タブ休止から
 // の復帰直後など）は無視して次のポーリングで拾う
-async function modalAwaitJob(jobId, onTick) {
+async function modalAwaitJob(jobId) {
   const pollStart = Date.now();
   while (true) {
     await sleep(MODAL_POLL_INTERVAL_MS);
@@ -957,7 +957,6 @@ async function modalAwaitJob(jobId, onTick) {
       if (job?.status === 'error') throw new Error(job.error || '生成に失敗しました');
     }
 
-    if (onTick) onTick();
     // タイムアウト判定はポーリング結果を確認した後に行う（タブ休止からの復帰時、
     // 完了済みならタイムアウトにせず結果を採用できる）
     if (Date.now() - pollStart > MODAL_TIMEOUT_MS) {
@@ -1031,10 +1030,19 @@ async function runModalJobFrom(job) {
     const entry = job.entries[i];
     if (entry.result) continue;
     const prefix = total > 1 ? `${i + 1}/${total} ` : '';
-    const r = await modalAwaitJob(entry.jobId, () => {
+    // 経過秒の表示はポーリング間隔（2 秒）とは独立に 1 秒ごとに更新する
+    const tick = () => {
       const elapsed = ((Date.now() - job.startedAt) / 1000).toFixed(0);
       setStatus(`${prefix}生成中… ${elapsed}s（コールドスタート時は 1 分ほどかかります）`);
-    });
+    };
+    tick();
+    const ticker = setInterval(tick, 1000);
+    let r;
+    try {
+      r = await modalAwaitJob(entry.jobId);
+    } finally {
+      clearInterval(ticker);
+    }
     entry.result = { url: r.url, seed: r.seed };
     saveActiveJob(job);
   }
