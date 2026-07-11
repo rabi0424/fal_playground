@@ -15,6 +15,12 @@
       { "name": "STATE", "class_name": "SyncState" }
     ]
   },
+  // 生成画像の保存先（オブジェクトストレージ）。Durable Object の SQLite に
+  // バイナリを詰めるのをやめ、R2 に置く。デプロイ前に同名のバケットを作成すること:
+  //   npx wrangler r2 bucket create fal-playground-images
+  "r2_buckets": [
+    { "binding": "IMAGES", "bucket_name": "fal-playground-images" }
+  ],
   // 無料プランでは SQLite バックエンドの Durable Object のみ利用可能
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["SyncState"] }
