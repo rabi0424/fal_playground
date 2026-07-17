@@ -455,6 +455,10 @@ button { font: inherit; cursor: pointer; }
   gap: 14px;
 }
 
+/* ジョブ一覧・注記・エラーの入れ物。モバイルではボックスを作らず、
+   中身を generate-area の flex に直接ぶら下げる（order で並べ替えるため） */
+.job-stack { display: contents; }
+
 /* PC / タブレット: フォームが縦に長くてもスクロールせずに生成ボタンへ届くよう、
    コントロールパネルの下端に貼り付ける（パネル内スクロール時も常に見える） */
 @media (min-width: 431px) {
@@ -473,6 +477,28 @@ button { font: inherit; cursor: pointer; }
     background: var(--panel);
     border-top: 1px solid var(--border);
     border-radius: 0 0 12px 12px;
+  }
+
+  /* ジョブ一覧・注記・エラーはボタンの上にオーバーレイ表示する。
+     通常フローでボタンの下に積むと、下端固定 (bottom: 0) 中はボックスが
+     上に伸びてボタンが押し上げられ、連続でクリックできない。absolute で
+     レイアウトから切り離せば、ボタンはジョブの増減で一切動かない */
+  .job-stack {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 20px;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+  }
+
+  /* 表示中の子が 1 つもないときは箱ごと消す（padding ぶんの帯を残さない） */
+  .job-stack:not(:has(.job-row, .job-hint:not([hidden]), .error:not([hidden]))) {
+    display: none;
   }
 }
 
