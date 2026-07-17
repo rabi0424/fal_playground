@@ -87,6 +87,7 @@ const els = {
   mpReadout: $('#mpReadout'),
   numImages: $('#numImages'),
   seed: $('#seed'),
+  seedLock: $('#seedLock'),
   steps: $('#steps'),
   guidance: $('#guidance'),
   generateBtn: $('#generateBtn'),
@@ -724,6 +725,12 @@ function currentModelId() {
   return selected;
 }
 
+// 入力済みのシード値は「固定」チェックが入っているときだけ生成に使う
+function lockedSeed() {
+  if (!els.seedLock.checked || els.seed.value === '') return undefined;
+  return Number(els.seed.value);
+}
+
 function buildInput({ loras, seed, numImages } = {}) {
   const model = MODELS.find((m) => m.id === els.modelSelect.value) || MODELS[0];
   const input = {
@@ -741,7 +748,7 @@ function buildInput({ loras, seed, numImages } = {}) {
   } else {
     input.image_size = { width: size.width, height: size.height };
   }
-  const effSeed = seed ?? (els.seed.value !== '' ? Number(els.seed.value) : undefined);
+  const effSeed = seed ?? lockedSeed();
   if (effSeed !== undefined) input.seed = effSeed;
   if (els.steps.value !== '') input.num_inference_steps = Number(els.steps.value);
   if (els.guidance.value !== '') input.guidance_scale = Number(els.guidance.value);
@@ -1047,7 +1054,8 @@ function buildModalInput(prompt) {
     input.width = size.width;
     input.height = size.height;
   }
-  if (els.seed.value !== '') input.seed = Number(els.seed.value);
+  const seed = lockedSeed();
+  if (seed !== undefined) input.seed = seed;
   if (els.steps.value !== '') input.steps = Number(els.steps.value);
   if (els.guidance.value !== '') input.cfg = Number(els.guidance.value);
   return input;
@@ -1232,10 +1240,8 @@ async function generateCompare(modelId, prompt) {
     }
   }
 
-  // 公平な比較のため全試行で同じ seed を使う（未指定ならランダムに決定）
-  const runSeed = els.seed.value !== ''
-    ? Number(els.seed.value)
-    : Math.floor(Math.random() * 4294967296);
+  // 公平な比較のため全試行で同じ seed を使う（固定指定がなければランダムに決定）
+  const runSeed = lockedSeed() ?? Math.floor(Math.random() * 4294967296);
 
   const job = {
     jid: makeJid(),
@@ -1441,7 +1447,11 @@ function renderDetail(record) {
       seedMeta.textContent = `seed: ${record.seed}`;
       seedMeta.title = 'クリックでシードを再利用';
       seedMeta.style.cursor = 'pointer';
-      seedMeta.addEventListener('click', () => { els.seed.value = record.seed; });
+      seedMeta.addEventListener('click', () => {
+        // シード単体の再利用は明示操作なので固定チェックも入れる
+        els.seed.value = record.seed;
+        els.seedLock.checked = true;
+      });
       actions.appendChild(seedMeta);
     }
 
@@ -1712,6 +1722,8 @@ function reuseRecord(record) {
     for (const lora of record.loras ?? []) addLoraRow(lora.path, lora.scale);
   }
   if (record.seed != null) els.seed.value = record.seed;
+  // 設定の再利用では意図せず同じ画像が出続けないよう、シード固定は常にオフに戻す
+  els.seedLock.checked = false;
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
@@ -1831,6 +1843,7 @@ function saveFormState() {
     customHeight: els.customHeight.value,
     numImages: els.numImages.value,
     seed: els.seed.value,
+    seedLock: els.seedLock.checked,
     steps: els.steps.value,
     guidance: els.guidance.value,
     compare: compareMode,
@@ -1859,6 +1872,7 @@ function restoreFormState() {
   if (s.customHeight) els.customHeight.value = s.customHeight;
   els.numImages.value = s.numImages || '1';
   els.seed.value = s.seed || '';
+  els.seedLock.checked = !!s.seedLock;
   els.steps.value = s.steps || '';
   els.guidance.value = s.guidance || '';
   updateCustomSize();

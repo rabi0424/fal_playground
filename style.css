@@ -191,6 +191,33 @@ textarea { resize: vertical; min-height: 80px; }
   gap: 12px;
 }
 
+.seed-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.seed-row input[type="number"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.seed-lock {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.seed-lock input {
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 /* ---------- lora ---------- */
 /* PC ではアコーディオンとして振る舞わせない（常時展開・従来のラベル見た目） */
 details.lora-accordion { display: block; }

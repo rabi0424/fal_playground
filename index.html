@@ -87,10 +87,15 @@
     <details class="advanced">
       <summary>詳細設定</summary>
       <div class="advanced-body">
-        <label class="field">
-          <span class="label">シード <em>（空欄でランダム）</em></span>
-          <input id="seed" type="number" min="0" placeholder="random">
-        </label>
+        <div class="field">
+          <span class="label">シード <em>（「固定」にチェック時のみ使用）</em></span>
+          <div class="seed-row">
+            <input id="seed" type="number" min="0" placeholder="random">
+            <label class="seed-lock" title="チェックすると入力したシード値で生成します。オフの間はシードは使われずランダムになります">
+              <input type="checkbox" id="seedLock"> 固定
+            </label>
+          </div>
+        </div>
         <div class="row">
           <label class="field">
             <span class="label">ステップ数</span>
