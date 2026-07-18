@@ -115,6 +115,14 @@ function isHtmlResponse(res) {
 
 let historyCache = [];
 
+// サーバーへ保存中（POST 応答待ち）のレコード ID と、保存が完了した時刻。
+// fetchHistoryFromServer の応答一覧に含まれない可能性がある間、上書きから守る
+const pendingHistorySaves = new Set();
+const historySavedAt = new Map();
+
+// このセッションで削除済みのレコード ID。保存応答による復活を防ぐ
+const deletedHistoryIds = new Set();
+
 function loadHistory() {
   return historyCache;
 }
@@ -128,6 +136,7 @@ function persistHistoryCache() {
 }
 
 async function fetchHistoryFromServer() {
+  const startedAt = Date.now();
   let res;
   try {
     res = await fetch('/api/history');
@@ -156,11 +165,20 @@ async function fetchHistoryFromServer() {
   }
 
   // サーバーが空で手元に表示中の履歴があるときは消さない（移行直後の失敗対策）
-  if (server.length > 0 || historyCache.length === 0) {
-    historyCache = server;
-    persistHistoryCache();
-    renderGallery();
-  }
+  if (server.length === 0 && historyCache.length > 0) return;
+
+  // タブ復帰時は、この取得と「復帰で再開したポーリングの完了 → 履歴保存」が
+  // 競合する。保存中（POST 応答待ち）や、この取得の開始後に保存が完了した
+  // レコードは応答一覧に含まれないことがあり、丸ごと上書きすると
+  // ギャラリーから消える。それらはローカル側を残してマージする
+  const keep = historyCache.filter(
+    (r) =>
+      (pendingHistorySaves.has(r.id) || (historySavedAt.get(r.id) ?? 0) >= startedAt) &&
+      !server.some((s) => s.id === r.id),
+  );
+  historyCache = [...keep, ...server];
+  persistHistoryCache();
+  renderGallery();
 }
 
 // 生成完了時に呼ぶ。即座にローカルへ反映し、サーバーへは裏で保存する。
@@ -168,6 +186,7 @@ async function fetchHistoryFromServer() {
 function addHistoryRecord(record) {
   historyCache.unshift(record);
   persistHistoryCache();
+  pendingHistorySaves.add(record.id);
   (async () => {
     try {
       const res = await fetch('/api/history', {
@@ -177,24 +196,31 @@ function addHistoryRecord(record) {
       });
       if (!res.ok || isHtmlResponse(res)) return;
       const saved = await res.json();
+      historySavedAt.set(saved.id, Date.now());
       const i = historyCache.findIndex((r) => r.id === saved.id);
       if (i !== -1) historyCache[i] = saved;
+      // 保存中にサーバー取得の応答で上書きされて消えていたら先頭へ戻す
+      else if (!deletedHistoryIds.has(saved.id)) historyCache.unshift(saved);
       persistHistoryCache();
       if (selectedId === saved.id) renderDetail(saved);
       else renderGallery();
     } catch {
       // オフライン時など。次回起動時のサーバー取得で整合する
+    } finally {
+      pendingHistorySaves.delete(record.id);
     }
   })();
 }
 
 function deleteHistoryRecord(id) {
+  deletedHistoryIds.add(id);
   historyCache = historyCache.filter((r) => r.id !== id);
   persistHistoryCache();
   fetch(`/api/history/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
 }
 
 function clearHistory() {
+  for (const r of historyCache) deletedHistoryIds.add(r.id);
   historyCache = [];
   persistHistoryCache();
   fetch('/api/history', { method: 'DELETE' }).catch(() => {});

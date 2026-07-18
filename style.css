@@ -455,6 +455,14 @@ button { font: inherit; cursor: pointer; }
   gap: 14px;
 }
 
+/* ジョブ一覧・注記・エラーの入れ物。ボックスは作らず、中身を generate-area の
+   flex に直接ぶら下げ、order でボタンより上に並べる（PC・モバイル共通）。
+   生成ボタンは flex の最後・下端に残るため、ジョブが増減しても位置が動かない */
+.job-stack { display: contents; }
+.generate-area .job-list,
+.generate-area .job-hint,
+.generate-area .error { order: -1; }
+
 /* PC / タブレット: フォームが縦に長くてもスクロールせずに生成ボタンへ届くよう、
    コントロールパネルの下端に貼り付ける（パネル内スクロール時も常に見える） */
 @media (min-width: 431px) {
@@ -464,6 +472,10 @@ button { font: inherit; cursor: pointer; }
      透明な隙間ができる（背後のフォームが透ける）ため */
   .controls { padding-bottom: 0; }
 
+  /* ジョブ一覧はボタンの上（order: -1）に通常フローで積む。バー全体が下端に
+     貼り付いているため、ジョブが増えるとバーは上へ伸び、最下段のボタンは
+     動かない。overlay と違いフォームに重ならず、隠れた設定もスクロールで
+     たどれる。ジョブが多いときは job-list 側が内部スクロールで高さを抑える */
   .generate-area {
     position: sticky;
     bottom: 0;
@@ -923,10 +935,7 @@ button { font: inherit; cursor: pointer; }
     border-top: 1px solid var(--border);
   }
 
-  /* ステータス / エラーはボタンの上に出す */
-  .generate-area .job-list,
-  .generate-area .job-hint,
-  .generate-area .error { order: -1; }
+  /* ジョブ一覧・注記・エラーをボタンの上に出す指定はグローバル側で共通化済み */
 
   /* ✕ はタッチターゲット（44pt）を確保する */
   .job-row .job-x { min-width: 44px; }
