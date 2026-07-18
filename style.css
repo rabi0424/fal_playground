@@ -9,6 +9,7 @@
   --accent-hover: #1d4ed8;
   --accent-text: #ffffff;
   --danger: #dc2626;
+  --success: #16a34a;
   --shadow: 0 1px 3px rgb(0 0 0 / 0.06), 0 1px 2px rgb(0 0 0 / 0.04);
   color-scheme: light;
 }
@@ -23,6 +24,7 @@
   --accent-hover: #60a5fa;
   --accent-text: #0b1220;
   --danger: #f87171;
+  --success: #4ade80;
   --shadow: 0 1px 3px rgb(0 0 0 / 0.4);
   color-scheme: dark;
 }
@@ -38,6 +40,7 @@
     --accent-hover: #60a5fa;
     --accent-text: #0b1220;
     --danger: #f87171;
+  --success: #4ade80;
     --shadow: 0 1px 3px rgb(0 0 0 / 0.4);
     color-scheme: dark;
   }
@@ -1308,3 +1311,22 @@ a.ghost-btn {
   .vote-pair { gap: 8px; }
   .vote-side .primary-btn { font-size: 12px; padding: 8px 6px; }
 }
+
+/* 投票数の目安（リーダーボード下） */
+.lb-status {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+  white-space: pre-line; /* 目安と順位変動の 2 行表示 */
+}
+
+.lb-status.mid { color: var(--text); }
+
+.lb-status.done {
+  color: var(--success);
+  font-weight: 600;
+}
+
+/* 試合数が目安未満のチェックポイントは薄く表示する */
+.lb-table .low { color: var(--muted); opacity: 0.7; }
