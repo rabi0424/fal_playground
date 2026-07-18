@@ -1001,3 +1001,310 @@ button { font: inherit; cursor: pointer; }
              calc(16px + env(safe-area-inset-bottom));
   }
 }
+
+/* ---------- arena（LoRA 比較アリーナ / arena.html） ---------- */
+.arena-main {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.topbar .brand a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.arena-tag {
+  font-weight: 400;
+  color: var(--muted);
+  margin-left: 8px;
+}
+
+/* リンクをボタン見た目で使う（トップバーの「比較アリーナ」「← 生成画面へ」） */
+a.ghost-btn {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.arena-main .hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 8px 0;
+}
+
+.arena-main .meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.arena-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.arena-head h2 { margin: 0; font-size: 18px; }
+
+.session-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.session-card {
+  padding: 14px 16px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.session-card:hover { border-color: var(--muted); }
+.session-card h3 { margin: 0; font-size: 14px; }
+
+.session-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.session-head h2 { margin: 0; font-size: 18px; }
+.session-head .danger { color: var(--danger); margin-left: auto; }
+
+.arena-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  gap: 20px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .arena-layout { grid-template-columns: minmax(0, 1fr); }
+}
+
+.arena-panel {
+  padding: 16px 18px;
+  margin-bottom: 20px;
+}
+
+.arena-panel h3 { margin: 0 0 10px; font-size: 14px; }
+
+.round-start-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+/* ---- 投票 ---- */
+.vote-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.vote-head h3 { margin: 0; }
+
+#voteRoundLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
+}
+
+.vote-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.vote-side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vote-side img {
+  width: 100%;
+  border-radius: 8px;
+  background: var(--bg);
+  cursor: zoom-in;
+}
+
+.vote-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.vote-log {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.vote-log .win {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* ---- リーダーボード ---- */
+.lb-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.lb-head h3 { margin: 0; }
+.lb-head select { max-width: 55%; }
+
+.lb-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.lb-table th,
+.lb-table td {
+  text-align: left;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.lb-table th { color: var(--muted); font-weight: 500; font-size: 12px; }
+.lb-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.lb-table .lb-name {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- ラウンド履歴 ---- */
+.round-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.round-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.round-item.active { border-color: var(--accent); }
+
+.round-item-title {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.round-item-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.round-item details summary {
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.round-thumbs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.round-thumb img {
+  width: 100%;
+  border-radius: 6px;
+  cursor: zoom-in;
+  background: var(--bg);
+}
+
+.round-thumb .name {
+  font-size: 10px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- セッション作成ダイアログ ---- */
+.session-dialog { width: min(560px, calc(100vw - 32px)); }
+
+.range-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.range-row select { flex: 1; min-width: 0; }
+.range-tilde { color: var(--muted); flex-shrink: 0; }
+
+.plist-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.plist-actions .meta { margin-left: auto; }
+
+.plist {
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+}
+
+.plist label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.plist label:hover { background: var(--bg); }
+
+.plist .plist-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scale-field { max-width: 110px; }
+
+@media (max-width: 430px) {
+  .arena-main { padding: 16px; }
+  .vote-pair { gap: 8px; }
+  .vote-side .primary-btn { font-size: 12px; padding: 8px 6px; }
+}

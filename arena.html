@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ja" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LoRA 比較アリーナ - fal playground</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><a href="./">fal <span>playground</span></a><span class="arena-tag">/ 比較アリーナ</span></div>
+  <div class="topbar-actions">
+    <a href="./" class="ghost-btn">← 生成画面へ</a>
+    <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
+  </div>
+</header>
+
+<main class="arena-main">
+
+  <!-- セッション一覧 -->
+  <section id="sessionListView">
+    <div class="arena-head">
+      <h2>比較セッション</h2>
+      <button id="newSessionBtn" class="primary-btn">＋ 新しいセッション</button>
+    </div>
+    <p class="hint">
+      比較したい LoRA チェックポイント群を選んでセッションを作成すると、プロンプトを変えながら何度でも
+      一斉生成 → 匿名の 1 対 1 比較ができます。投票結果から Elo レートを計算してランキングを表示します。
+    </p>
+    <div id="sessionList" class="session-list"></div>
+  </section>
+
+  <!-- セッション詳細 -->
+  <section id="sessionView" hidden>
+    <div class="session-head">
+      <button id="backBtn" class="ghost-btn small" type="button">← 一覧</button>
+      <h2 id="sessionTitle"></h2>
+      <span id="sessionMeta" class="meta"></span>
+      <button id="deleteSessionBtn" class="ghost-btn small danger" type="button">セッションを削除</button>
+    </div>
+
+    <div class="arena-layout">
+      <div class="arena-col-main">
+
+        <div class="panel arena-panel">
+          <h3>新しいラウンド（全チェックポイントで一斉生成）</h3>
+          <label class="field">
+            <span class="label">プロンプト</span>
+            <textarea id="roundPrompt" rows="3" placeholder="生成したい画像を英語で記述..." spellcheck="false"></textarea>
+          </label>
+          <div class="row">
+            <label class="field">
+              <span class="label">サイズ</span>
+              <select id="roundSize"></select>
+            </label>
+            <label class="field num-field">
+              <span class="label">ステップ数</span>
+              <input id="roundSteps" type="number" min="1" max="100" placeholder="既定">
+            </label>
+            <label class="field num-field">
+              <span class="label">ガイダンス</span>
+              <input id="roundGuidance" type="number" min="0" max="30" step="0.5" placeholder="既定">
+            </label>
+          </div>
+          <div class="round-start-row">
+            <button id="startRoundBtn" class="primary-btn" type="button">生成する</button>
+            <button id="abortRoundBtn" class="ghost-btn" type="button" hidden>中断</button>
+            <div id="roundProgress" class="status" hidden></div>
+          </div>
+          <div id="arenaError" class="error" role="alert" hidden></div>
+        </div>
+
+        <div class="panel arena-panel" id="votePanel" hidden>
+          <div class="vote-head">
+            <h3>匿名比較</h3>
+            <span id="voteRoundLabel" class="meta"></span>
+            <span id="voteCount" class="meta"></span>
+          </div>
+          <div class="vote-pair">
+            <div class="vote-side">
+              <img id="voteImgA" alt="A">
+              <button id="voteABtn" class="primary-btn" type="button">← こちらが良い</button>
+            </div>
+            <div class="vote-side">
+              <img id="voteImgB" alt="B">
+              <button id="voteBBtn" class="primary-btn" type="button">こちらが良い →</button>
+            </div>
+          </div>
+          <div class="vote-actions">
+            <button id="voteDrawBtn" class="ghost-btn" type="button">引き分け（D）</button>
+            <button id="voteSkipBtn" class="ghost-btn" type="button">スキップ（S）</button>
+            <button id="voteUndoBtn" class="ghost-btn" type="button">直前の投票を取り消す</button>
+          </div>
+          <div class="hint">キーボード: ← / → で投票、D 引き分け、S スキップ。画像クリックで拡大（拡大中も ← / → は投票）。</div>
+          <div id="voteLog" class="vote-log"></div>
+        </div>
+
+      </div>
+      <div class="arena-col-side">
+
+        <div class="panel arena-panel">
+          <div class="lb-head">
+            <h3>リーダーボード（Elo）</h3>
+            <select id="lbScope"></select>
+          </div>
+          <table class="lb-table">
+            <thead>
+              <tr><th>#</th><th>チェックポイント</th><th class="num">Elo</th><th class="num">試合</th><th class="num">勝-分-負</th></tr>
+            </thead>
+            <tbody id="lbBody"></tbody>
+          </table>
+          <div id="lbEmpty" class="hint" hidden>まだ投票がありません。ラウンドを生成して匿名比較で投票すると、ここにランキングが表示されます。</div>
+        </div>
+
+        <div class="panel arena-panel">
+          <h3>ラウンド履歴</h3>
+          <div id="roundList" class="round-list"></div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- セッション作成ダイアログ -->
+<dialog id="sessionDialog" class="key-dialog session-dialog">
+  <form method="dialog" class="key-form">
+    <h2>新しい比較セッション</h2>
+    <label class="field">
+      <span class="label">セッション名</span>
+      <input id="sessionName" type="text" spellcheck="false" autocomplete="off">
+    </label>
+    <div class="row">
+      <label class="field">
+        <span class="label">モデル</span>
+        <select id="sessionModel"></select>
+      </label>
+      <label class="field num-field scale-field">
+        <span class="label">LoRA scale</span>
+        <input id="sessionScale" type="number" min="0" max="2" step="0.05" value="1">
+      </label>
+    </div>
+    <label class="field" id="sessionCustomModelField" hidden>
+      <span class="label">カスタムモデル ID</span>
+      <input id="sessionCustomModel" type="text" placeholder="fal-ai/..." spellcheck="false">
+    </label>
+
+    <div class="field">
+      <span class="label">参加チェックポイント（LoRA ライブラリから選択）</span>
+      <div class="range-row">
+        <select id="rangeStart"></select>
+        <span class="range-tilde">〜</span>
+        <select id="rangeEnd"></select>
+        <button id="rangeAddBtn" class="ghost-btn small" type="button">範囲を選択</button>
+      </div>
+      <div class="plist-actions">
+        <button id="plistAllBtn" class="ghost-btn small" type="button">すべて選択</button>
+        <button id="plistNoneBtn" class="ghost-btn small" type="button">すべて解除</button>
+        <span id="plistCount" class="meta"></span>
+      </div>
+      <div id="plist" class="plist"></div>
+      <div class="hint">2 つの LoRA を「範囲を選択」で指定すると、名前順（バージョン番号順）でその間にあるチェックポイントもすべて個別の参加者として選択されます。</div>
+    </div>
+
+    <div id="sessionDialogError" class="error" hidden></div>
+    <div class="key-actions">
+      <button value="cancel" class="ghost-btn" formnovalidate type="submit">キャンセル</button>
+      <button value="create" id="createSessionBtn" class="primary-btn" type="submit">セッションを作成</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="lightbox" class="lightbox" hidden>
+  <button id="lightboxClose" class="lightbox-close mobile-only" type="button" aria-label="閉じる">✕</button>
+  <img alt="">
+</div>
+
+<script src="arena.js"></script>
+</body>
+</html>
