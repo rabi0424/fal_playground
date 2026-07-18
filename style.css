@@ -664,9 +664,12 @@ button { font: inherit; cursor: pointer; }
 .gallery-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 10px;
   margin-bottom: 12px;
 }
+
+/* 「すべて削除」は常に右端へ寄せる */
+.gallery-head .ghost-btn { margin-left: auto; }
 
 .gallery-head h2 {
   font-size: 14px;
@@ -674,6 +677,24 @@ button { font: inherit; cursor: pointer; }
   margin: 0;
   color: var(--muted);
 }
+
+.gallery-search {
+  width: auto;
+  max-width: 100%;
+  padding: 5px 9px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.gallery-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.gallery-search::placeholder { color: var(--muted); }
 
 .gallery {
   display: grid;
@@ -957,6 +978,13 @@ button { font: inherit; cursor: pointer; }
     grid-template-columns: repeat(3, 1fr);
     max-height: none;
     overflow-y: visible;
+  }
+
+  /* 見出し・検索欄・削除ボタンが狭い画面で窮屈にならないよう折り返す */
+  .gallery-head { flex-wrap: wrap; }
+  .gallery-search {
+    order: 3;
+    margin: 8px 0 0;
   }
 
   /* HF 一覧の行はタップしやすい高さにする */

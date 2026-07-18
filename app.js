@@ -96,6 +96,7 @@ const els = {
   error: $('#error'),
   detail: $('#detail'),
   gallery: $('#gallery'),
+  gallerySearch: $('#gallerySearch'),
   clearHistoryBtn: $('#clearHistoryBtn'),
 };
 
@@ -1648,14 +1649,53 @@ function galleryThumbUrl(record) {
   return record.images[0]?.url ?? '';
 }
 
+// 履歴レコードから重み（scale）が 0 より大きい LoRA だけを集める
+function recordActiveLoras(record) {
+  const loras = [];
+  if (Array.isArray(record.loras)) loras.push(...record.loras);
+  if (Array.isArray(record.common)) loras.push(...record.common);
+  if (Array.isArray(record.variants)) {
+    for (const v of record.variants) {
+      if (Array.isArray(v.ownLoras)) loras.push(...v.ownLoras);
+    }
+  }
+  // 重みゼロの LoRA は効果がないので検索対象から除外する
+  return loras.filter((l) => l && l.path && (Number(l.scale) || 0) > 0);
+}
+
+// ギャラリー検索の対象テキスト（プロンプト・モデル名・使用 LoRA）
+function gallerySearchText(record) {
+  const loraText = recordActiveLoras(record)
+    .map((l) => `${l.path} ${loraDisplayName(l.path)}`)
+    .join(' ');
+  return `${record.prompt ?? ''} ${record.model ?? ''} ${loraText}`.toLowerCase();
+}
+
 function renderGallery() {
-  const items = loadHistory();
+  const allItems = loadHistory();
   els.gallery.innerHTML = '';
+
+  if (allItems.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'gallery-empty';
+    empty.textContent = 'まだ履歴はありません';
+    els.gallery.appendChild(empty);
+    return;
+  }
+
+  // スペース区切りで AND 検索。各トークンをすべて含む履歴だけを残す
+  const tokens = (els.gallerySearch?.value ?? '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const items = tokens.length
+    ? allItems.filter((record) => {
+        const haystack = gallerySearchText(record);
+        return tokens.every((t) => haystack.includes(t));
+      })
+    : allItems;
 
   if (items.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'gallery-empty';
-    empty.textContent = 'まだ履歴はありません';
+    empty.textContent = '一致する履歴がありません';
     els.gallery.appendChild(empty);
     return;
   }
@@ -2037,6 +2077,17 @@ els.clearHistoryBtn.addEventListener('click', () => {
     renderGallery();
   }
 });
+
+// ギャラリー検索：入力に応じてサムネを絞り込む（カラなら通常表示）。
+// 入力欄は空欄時は小さく、入力が伸びるほど広がる。
+function syncGallerySearchSize() {
+  els.gallerySearch.size = Math.max(8, els.gallerySearch.value.length + 1);
+}
+els.gallerySearch.addEventListener('input', () => {
+  syncGallerySearchSize();
+  renderGallery();
+});
+syncGallerySearchSize();
 
 // Cmd/Ctrl + Enter で生成（生成中でも追加リクエストを送れる）
 els.prompt.addEventListener('keydown', (e) => {
