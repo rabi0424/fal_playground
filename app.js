@@ -96,6 +96,7 @@ const els = {
   error: $('#error'),
   detail: $('#detail'),
   gallery: $('#gallery'),
+  gallerySearch: $('#gallerySearch'),
   clearHistoryBtn: $('#clearHistoryBtn'),
 };
 
@@ -1649,13 +1650,28 @@ function galleryThumbUrl(record) {
 }
 
 function renderGallery() {
-  const items = loadHistory();
+  const allItems = loadHistory();
   els.gallery.innerHTML = '';
+
+  if (allItems.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'gallery-empty';
+    empty.textContent = 'まだ履歴はありません';
+    els.gallery.appendChild(empty);
+    return;
+  }
+
+  const query = (els.gallerySearch?.value ?? '').trim().toLowerCase();
+  const items = query
+    ? allItems.filter((record) =>
+        `${record.prompt ?? ''} ${record.model ?? ''}`.toLowerCase().includes(query)
+      )
+    : allItems;
 
   if (items.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'gallery-empty';
-    empty.textContent = 'まだ履歴はありません';
+    empty.textContent = '一致する履歴がありません';
     els.gallery.appendChild(empty);
     return;
   }
@@ -2037,6 +2053,9 @@ els.clearHistoryBtn.addEventListener('click', () => {
     renderGallery();
   }
 });
+
+// ギャラリー検索：入力に応じてサムネを絞り込む（カラなら通常表示）
+els.gallerySearch.addEventListener('input', renderGallery);
 
 // Cmd/Ctrl + Enter で生成（生成中でも追加リクエストを送れる）
 els.prompt.addEventListener('keydown', (e) => {

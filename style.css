@@ -675,6 +675,25 @@ button { font: inherit; cursor: pointer; }
   color: var(--muted);
 }
 
+.gallery-search {
+  flex: 1;
+  min-width: 0;
+  margin: 0 12px;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.gallery-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.gallery-search::placeholder { color: var(--muted); }
+
 .gallery {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
@@ -957,6 +976,14 @@ button { font: inherit; cursor: pointer; }
     grid-template-columns: repeat(3, 1fr);
     max-height: none;
     overflow-y: visible;
+  }
+
+  /* 見出し・検索欄・削除ボタンが狭い画面で窮屈にならないよう折り返す */
+  .gallery-head { flex-wrap: wrap; }
+  .gallery-search {
+    order: 3;
+    flex-basis: 100%;
+    margin: 8px 0 0;
   }
 
   /* HF 一覧の行はタップしやすい高さにする */
