@@ -664,9 +664,12 @@ button { font: inherit; cursor: pointer; }
 .gallery-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 10px;
   margin-bottom: 12px;
 }
+
+/* 「すべて削除」は常に右端へ寄せる */
+.gallery-head .ghost-btn { margin-left: auto; }
 
 .gallery-head h2 {
   font-size: 14px;
@@ -676,13 +679,12 @@ button { font: inherit; cursor: pointer; }
 }
 
 .gallery-search {
-  flex: 1;
-  min-width: 0;
-  margin: 0 12px;
-  padding: 6px 10px;
+  width: auto;
+  max-width: 100%;
+  padding: 5px 9px;
   font-size: 13px;
   color: var(--text);
-  background: var(--panel, var(--bg));
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
 }
@@ -982,7 +984,6 @@ button { font: inherit; cursor: pointer; }
   .gallery-head { flex-wrap: wrap; }
   .gallery-search {
     order: 3;
-    flex-basis: 100%;
     margin: 8px 0 0;
   }
 
