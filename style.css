@@ -10,7 +10,13 @@
   --accent-text: #ffffff;
   --danger: #dc2626;
   --success: #16a34a;
-  --shadow: 0 1px 3px rgb(0 0 0 / 0.06), 0 1px 2px rgb(0 0 0 / 0.04);
+  /* 重なりの階層はシャドウの深さで表現する（浮いているものほど深い） */
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.04), 0 2px 6px rgb(0 0 0 / 0.04);
+  --shadow-raised: 0 2px 6px rgb(0 0 0 / 0.06), 0 8px 24px rgb(0 0 0 / 0.10);
+  --shadow-floating: 0 4px 12px rgb(0 0 0 / 0.10), 0 24px 60px rgb(0 0 0 / 0.22);
+  /* 半透明マテリアル: バー類は背後をぼかして透かし、コンテンツが下を流れる */
+  --material: rgb(255 255 255 / 0.72);
+  --hairline: rgb(0 0 0 / 0.07);
   color-scheme: light;
 }
 
@@ -25,7 +31,11 @@
   --accent-text: #0b1220;
   --danger: #f87171;
   --success: #4ade80;
-  --shadow: 0 1px 3px rgb(0 0 0 / 0.4);
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 2px 6px rgb(0 0 0 / 0.25);
+  --shadow-raised: 0 2px 6px rgb(0 0 0 / 0.35), 0 8px 24px rgb(0 0 0 / 0.4);
+  --shadow-floating: 0 4px 12px rgb(0 0 0 / 0.4), 0 24px 60px rgb(0 0 0 / 0.55);
+  --material: rgb(20 20 23 / 0.72);
+  --hairline: rgb(255 255 255 / 0.09);
   color-scheme: dark;
 }
 
@@ -40,10 +50,24 @@
     --accent-hover: #60a5fa;
     --accent-text: #0b1220;
     --danger: #f87171;
-  --success: #4ade80;
-    --shadow: 0 1px 3px rgb(0 0 0 / 0.4);
+    --success: #4ade80;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 2px 6px rgb(0 0 0 / 0.25);
+    --shadow-raised: 0 2px 6px rgb(0 0 0 / 0.35), 0 8px 24px rgb(0 0 0 / 0.4);
+    --shadow-floating: 0 4px 12px rgb(0 0 0 / 0.4), 0 24px 60px rgb(0 0 0 / 0.55);
+    --material: rgb(20 20 23 / 0.72);
+    --hairline: rgb(255 255 255 / 0.09);
     color-scheme: dark;
   }
+}
+
+/* ---------- motion ---------- */
+:root {
+  /* 既定はオーバーシュートなしの減衰カーブ（damping 1.0 相当）。
+     跳ねる動きは勢いを伴う操作にだけ使う */
+  --spring: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-press: 0.1s;   /* 押下は即時に */
+  --dur-quick: 0.2s;
+  --dur-move: 0.35s;
 }
 
 /* ---------- base ---------- */
@@ -53,25 +77,38 @@
 
 body {
   margin: 0;
-  /* viewport-fit=cover で Dynamic Island の下に潜らないようにする */
-  padding-top: env(safe-area-inset-top);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     "Hiragino Sans", "Noto Sans JP", sans-serif;
   font-size: 14px;
   line-height: 1.6;
   background: var(--bg);
   color: var(--text);
+  /* テーマ切替（自動含む）で明暗が急にジャンプしないようにならす */
+  transition: background-color 0.25s ease, color 0.25s ease;
 }
 
 a { color: var(--accent); }
 
+/* 見出しはサイズに応じてトラッキングを詰める（大きい文字ほど負に） */
+h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
+
 /* ---------- topbar ---------- */
+/* 不透明な帯ではなく半透明マテリアルの浮遊レイヤーにして、
+   コンテンツがその下をスクロールして流れるようにする */
 .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 14px 24px;
-  border-bottom: 1px solid var(--border);
+  /* viewport-fit=cover で Dynamic Island の下に潜らないようにする */
+  padding-top: calc(14px + env(safe-area-inset-top));
+  background: var(--material);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid var(--hairline);
 }
 
 .brand {
@@ -158,12 +195,13 @@ input, select, textarea {
   border-radius: 8px;
   padding: 8px 10px;
   width: 100%;
+  transition: border-color var(--dur-quick) ease, box-shadow var(--dur-quick) ease;
 }
 
 input:focus, select:focus, textarea:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: -1px;
-  border-color: transparent;
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 textarea { resize: vertical; min-height: 80px; }
@@ -423,7 +461,26 @@ details.lora-accordion { display: block; }
 }
 
 /* ---------- buttons ---------- */
-button { font: inherit; cursor: pointer; }
+button { font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+
+button:focus-visible, a.ghost-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 押下の瞬間（pointer-down）に沈み、離すとスプリングで戻る。
+   click を待ってからの反応は死んで見える */
+.primary-btn, .ghost-btn {
+  transition: background var(--dur-quick) ease,
+    border-color var(--dur-quick) ease,
+    transform var(--dur-move) var(--spring);
+}
+
+.primary-btn:active:not(:disabled),
+.ghost-btn:active {
+  transform: scale(0.97);
+  transition-duration: var(--dur-press), var(--dur-press), var(--dur-press);
+}
 
 .primary-btn {
   background: var(--accent);
@@ -432,7 +489,7 @@ button { font: inherit; cursor: pointer; }
   border-radius: 8px;
   padding: 10px 16px;
   font-weight: 600;
-  transition: background 0.15s;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .primary-btn:hover:not(:disabled) { background: var(--accent-hover); }
@@ -445,7 +502,6 @@ button { font: inherit; cursor: pointer; }
   border-radius: 8px;
   padding: 6px 12px;
   white-space: nowrap;
-  transition: border-color 0.15s, background 0.15s;
 }
 
 .ghost-btn:hover { border-color: var(--muted); }
@@ -485,8 +541,11 @@ button { font: inherit; cursor: pointer; }
     z-index: 5;
     margin: 0 -20px; /* パネルの左右 padding ぶん広げて背景で覆う */
     padding: 12px 20px 20px;
-    background: var(--panel);
-    border-top: 1px solid var(--border);
+    /* 半透明マテリアル: 背後のフォームがぼけて透け、バーが「浮いている」ことが分かる */
+    background: var(--material);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    border-top: 1px solid var(--hairline);
     border-radius: 0 0 12px 12px;
   }
 }
@@ -605,6 +664,16 @@ button { font: inherit; cursor: pointer; }
   gap: 16px;
 }
 
+/* 生成結果・選択切替時は下からわずかに浮き上がって現れる（減衰・オーバーシュートなし） */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.99); }
+}
+
+.detail-images .image-card { animation: rise-in var(--dur-move) var(--spring) backwards; }
+.detail-images .image-card:nth-child(2) { animation-delay: 0.04s; }
+.detail-images .image-card:nth-child(3) { animation-delay: 0.08s; }
+.detail-images .image-card:nth-child(4) { animation-delay: 0.12s; }
+
 .image-card {
   display: flex;
   flex-direction: column;
@@ -718,10 +787,23 @@ button { font: inherit; cursor: pointer; }
   display: flex;
   flex-direction: column;
   cursor: pointer;
-  transition: border-color 0.15s;
+  background: var(--panel);
+  transition: border-color var(--dur-quick) ease,
+    box-shadow var(--dur-quick) ease,
+    transform var(--dur-move) var(--spring);
 }
 
-.gallery-item:hover { border-color: var(--muted); }
+.gallery-item:hover {
+  border-color: var(--muted);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-raised);
+}
+
+/* 押下した瞬間に沈む（クリック確定を待たない） */
+.gallery-item:active {
+  transform: scale(0.97);
+  transition-duration: var(--dur-quick), var(--dur-quick), var(--dur-press);
+}
 
 .gallery-item.selected {
   border-color: var(--accent);
@@ -774,18 +856,26 @@ button { font: inherit; cursor: pointer; }
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgb(0 0 0 / 0.85);
+  /* 黒背景ではなく、背後のページをぼかしたマテリアルの上に浮かべる */
+  background: rgb(10 10 12 / 0.65);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  backdrop-filter: blur(24px) saturate(140%);
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 24px;
   cursor: zoom-out;
+  animation: fade-in var(--dur-quick) ease-out;
 }
+
+@keyframes fade-in { from { opacity: 0; } }
 
 .lightbox img {
   max-width: 100%;
   max-height: 100%;
   border-radius: 8px;
+  box-shadow: var(--shadow-floating);
+  animation: rise-in var(--dur-move) var(--spring) backwards;
 }
 
 .lightbox-close {
@@ -818,17 +908,27 @@ button { font: inherit; cursor: pointer; }
 /* ---------- dialog ---------- */
 .key-dialog {
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 14px;
   background: var(--panel);
   color: var(--text);
   padding: 0;
   width: min(420px, 90vw);
-  box-shadow: 0 10px 40px rgb(0 0 0 / 0.25);
+  box-shadow: var(--shadow-floating);
+}
+
+/* 開くときは単なるフェードではなく、スケールを伴って「実体化」させる */
+.key-dialog[open] {
+  animation: dialog-in var(--dur-move) var(--spring);
+}
+
+@keyframes dialog-in {
+  from { opacity: 0; transform: scale(0.96) translateY(10px); }
 }
 
 .key-dialog::backdrop {
-  background: rgb(0 0 0 / 0.4);
-  backdrop-filter: blur(2px);
+  background: rgb(0 0 0 / 0.35);
+  -webkit-backdrop-filter: blur(8px) saturate(120%);
+  backdrop-filter: blur(8px) saturate(120%);
 }
 
 .key-form {
@@ -885,9 +985,15 @@ button { font: inherit; cursor: pointer; }
   padding: 8px 10px;
   border-radius: 8px;
   cursor: pointer;
+  transition: background var(--dur-quick) ease, transform var(--dur-move) var(--spring);
 }
 
 .hf-item:hover { background: var(--bg); }
+
+.hf-item:active:not(.registered) {
+  transform: scale(0.99);
+  transition-duration: var(--dur-press), var(--dur-press);
+}
 
 .hf-item input {
   width: auto;
@@ -919,6 +1025,8 @@ button { font: inherit; cursor: pointer; }
   .topbar {
     padding: 12px calc(16px + env(safe-area-inset-right))
              12px calc(16px + env(safe-area-inset-left));
+    /* sticky 化に伴い Dynamic Island ぶんの余白はバー自身が持つ */
+    padding-top: calc(12px + env(safe-area-inset-top));
   }
 
   .layout {
@@ -955,8 +1063,10 @@ button { font: inherit; cursor: pointer; }
     padding: 10px calc(16px + env(safe-area-inset-right))
              calc(10px + env(safe-area-inset-bottom))
              calc(16px + env(safe-area-inset-left));
-    background: var(--panel);
-    border-top: 1px solid var(--border);
+    background: var(--material);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    border-top: 1px solid var(--hairline);
   }
 
   /* ジョブ一覧・注記・エラーをボタンの上に出す指定はグローバル側で共通化済み */
@@ -1063,9 +1173,21 @@ a.ghost-btn {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  transition: border-color var(--dur-quick) ease,
+    box-shadow var(--dur-quick) ease,
+    transform var(--dur-move) var(--spring);
 }
 
-.session-card:hover { border-color: var(--muted); }
+.session-card:hover {
+  border-color: var(--muted);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-raised);
+}
+
+.session-card:active {
+  transform: scale(0.98);
+  transition-duration: var(--dur-quick), var(--dur-quick), var(--dur-press);
+}
 .session-card h3 { margin: 0; font-size: 14px; }
 
 .session-head {
@@ -1330,3 +1452,58 @@ a.ghost-btn {
 
 /* 試合数が目安未満のチェックポイントは薄く表示する */
 .lb-table .low { color: var(--muted); opacity: 0.7; }
+
+/* ---------- アクセシビリティ ---------- */
+/* 動きを減らす設定: スライドやスケールは行わず、短いフェードに置き換える
+   （フィードバックそのものは残す） */
+@media (prefers-reduced-motion: reduce) {
+  body,
+  .primary-btn, .ghost-btn,
+  .gallery-item, .session-card, .hf-item {
+    transition: none;
+  }
+
+  .gallery-item:hover, .session-card:hover,
+  .primary-btn:active:not(:disabled), .ghost-btn:active,
+  .gallery-item:active, .session-card:active,
+  .hf-item:active:not(.registered) {
+    transform: none;
+  }
+
+  .detail-images .image-card,
+  .lightbox,
+  .lightbox img,
+  .key-dialog[open] {
+    animation-name: fade-in;
+    animation-duration: 0.15s;
+    animation-delay: 0s;
+    animation-timing-function: ease;
+  }
+}
+
+/* 透明度を減らす設定: マテリアルを不透明にしてぼかしをやめる */
+@media (prefers-reduced-transparency: reduce) {
+  .topbar,
+  .generate-area {
+    background: var(--panel);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .lightbox {
+    background: rgb(10 10 12 / 0.92);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .key-dialog::backdrop {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+/* コントラストを上げる設定: ヘアラインをはっきりした境界線に戻す */
+@media (prefers-contrast: more) {
+  .topbar { border-bottom-color: var(--border); }
+  .generate-area { border-top-color: var(--border); }
+}
