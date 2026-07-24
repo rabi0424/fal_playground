@@ -4,13 +4,15 @@
 
 // Modal 自前ホスト版 Krea 2（modal_comfy リポジトリ）。fal ではなく
 // Worker のプロキシ（/api/krea2/generate）経由で生成する。
-// エンドポイントは実験版（exp）と本番の 2 系統があり、標準は実験版
+// エンドポイントは実験版（exp）・GPU スナップショット版（gpusnap）・本番の 3 系統があり、標準は実験版
 const MODAL_KREA2_EXP_ID = 'modal/krea2-turbo-exp';
+const MODAL_KREA2_GPUSNAP_ID = 'modal/krea2-turbo-gpusnap';
 const MODAL_KREA2_ID = 'modal/krea2-turbo';
 
 const MODELS = [
   { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA', sizeParam: 'image_size', lora: true, maxLoras: 3 },
   { id: MODAL_KREA2_EXP_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 実験版）', sizeParam: 'image_size', lora: true, provider: 'modal', modalEndpoint: 'exp' },
+  { id: MODAL_KREA2_GPUSNAP_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal GPU スナップショット版）', sizeParam: 'image_size', lora: true, provider: 'modal', modalEndpoint: 'gpusnap' },
   { id: MODAL_KREA2_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 本番）', sizeParam: 'image_size', lora: true, provider: 'modal', modalEndpoint: 'prod' },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
