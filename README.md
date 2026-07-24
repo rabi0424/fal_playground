@@ -77,7 +77,7 @@ npx wrangler r2 bucket create fal-playground-images
 
 ## Modal 自前ホスト版 Krea 2
 
-モデル選択の「Krea 2 [turbo] 自前ホスト（Modal 実験版 / GPU スナップショット版 / 本番）」は、fal ではなく Modal 上の [modal_comfy](https://github.com/rabi0424/modal_comfy) API で生成します。実験版（CPU スナップショット）・GPU スナップショット版（`krea2-comfy-api-gpusnap`）・本番（安定版）はモデル選択で切り替えられ、標準は実験版です。エンドポイントの URL 自体を変えたい場合は、Worker の環境変数で上書きできます（未設定なら modal_comfy の既定 URL）:
+モデル選択の「Krea 2 [turbo] 自前ホスト（Modal 実験版 / GPUスナップ版 / 本番）」は、fal ではなく Modal 上の [modal_comfy](https://github.com/rabi0424/modal_comfy) API で生成します。実験版（CPU スナップショット）・GPU スナップショット版（`krea2-comfy-api-gpusnap`）・本番（安定版）はモデル選択で切り替えられ、標準は実験版です。エンドポイントの URL 自体を変えたい場合は、Worker の環境変数で上書きできます（未設定なら modal_comfy の既定 URL）:
 
 - `KREA2_ENDPOINT_EXP` = 実験版の URL
 - `KREA2_ENDPOINT_GPUSNAP` = GPU スナップショット版の URL
