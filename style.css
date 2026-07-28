@@ -88,9 +88,13 @@ a { color: var(--accent); }
 .topbar-actions { display: flex; gap: 8px; }
 
 /* ---------- layout ---------- */
+/* 列は minmax(0, 1fr) にする。1fr だけだと最小幅が auto になり、
+   折り返せない中身（select の長いモデル名など）の固有幅で列が
+   ビューポートより広がってページ全体が横にはみ出す（スマホで
+   縮小表示・右に余白ができる）ため */
 .layout {
   display: grid;
-  grid-template-columns: 340px 1fr;
+  grid-template-columns: 340px minmax(0, 1fr);
   gap: 24px;
   max-width: 1400px;
   margin: 0 auto;
@@ -98,7 +102,7 @@ a { color: var(--accent); }
 }
 
 @media (max-width: 900px) {
-  .layout { grid-template-columns: 1fr; }
+  .layout { grid-template-columns: minmax(0, 1fr); }
 }
 
 .panel {
