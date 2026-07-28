@@ -1330,3 +1330,187 @@ a.ghost-btn {
 
 /* 試合数が目安未満のチェックポイントは薄く表示する */
 .lb-table .low { color: var(--muted); opacity: 0.7; }
+
+/* ---------- 部分AI編集（edit.html） ---------- */
+.edit-main {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.edit-main .hint { font-size: 12px; color: var(--muted); }
+.edit-main .meta { font-size: 12px; font-weight: 400; color: var(--muted); }
+
+.upload-area {
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 48px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.upload-area:hover, .upload-area.dragover { border-color: var(--accent); }
+.upload-icon { font-size: 26px; color: var(--accent); margin-bottom: 8px; }
+.upload-text { font-weight: 600; }
+.upload-hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+#workspace { display: flex; flex-direction: column; gap: 14px; }
+
+.ratio-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ratio-chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+
+.ratio-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  padding: 4px 12px;
+  white-space: nowrap;
+}
+
+.ratio-chip:hover { border-color: var(--muted); }
+.ratio-chip.active { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+
+.orient-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  transition: opacity 0.15s;
+}
+
+.orient-toggle.disabled { opacity: 0.35; pointer-events: none; }
+
+.orient-btn {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 4px 12px;
+}
+
+.orient-btn.active { background: var(--accent); color: var(--accent-text); }
+
+/* 選択キャンバス。ハンドルが枠の外にはみ出す分だけ左右に余白を取る */
+.canvas-wrap {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  margin: 0 12px;
+}
+
+.canvas-wrap canvas { display: block; width: 100%; height: auto; }
+
+.sel-ov { position: absolute; inset: 0; cursor: crosshair; z-index: 2; }
+
+.sel-box {
+  position: absolute;
+  border: 2px solid var(--accent);
+  /* 選択範囲の外側を暗くする */
+  box-shadow: 0 0 0 9999px rgb(0 0 0 / 0.45);
+  display: none;
+  z-index: 3;
+  cursor: move;
+}
+
+.sel-box.visible { display: block; }
+
+.rh {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  background: var(--panel);
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  z-index: 4;
+  box-shadow: var(--shadow);
+}
+
+.rh.tl { top: -9px; left: -9px; cursor: nw-resize; }
+.rh.tr { top: -9px; right: -9px; cursor: ne-resize; }
+.rh.bl { bottom: -9px; left: -9px; cursor: sw-resize; }
+.rh.br { bottom: -9px; right: -9px; cursor: se-resize; }
+.rh.tm { top: -9px; left: 50%; transform: translateX(-50%); cursor: n-resize; }
+.rh.bm { bottom: -9px; left: 50%; transform: translateX(-50%); cursor: s-resize; }
+.rh.ml { top: 50%; left: -9px; transform: translateY(-50%); cursor: w-resize; }
+.rh.mr { top: 50%; right: -9px; transform: translateY(-50%); cursor: e-resize; }
+
+/* 比率固定中は辺の中央ハンドル（自由リサイズ）を隠す */
+.ratio-locked .rh.tm, .ratio-locked .rh.bm, .ratio-locked .rh.ml, .ratio-locked .rh.mr { display: none; }
+
+.dim-badge {
+  position: absolute;
+  bottom: -28px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.edit-form { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.quality-field { max-width: 120px; }
+
+.edit-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.edit-actions-spacer { flex: 1; }
+
+.edit-result { padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+.edit-result h3 { margin: 0; font-size: 15px; }
+.edit-result img { max-width: 100%; border-radius: 8px; }
+
+a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
+
+.details-section summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  user-select: none;
+  padding: 4px 0;
+}
+
+.inter-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 8px; }
+
+.inter-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.inter-card span { font-size: 12px; color: var(--muted); font-weight: 600; }
+.inter-card img { max-width: 100%; border-radius: 6px; margin: 0 auto; }
+.inter-card a { font-size: 12px; }
+
+@media (max-width: 700px) {
+  .edit-main { padding: 16px 10px; }
+  .inter-grid { grid-template-columns: 1fr; }
+  /* タッチ操作用にハンドルを大きくする */
+  .rh { width: 24px; height: 24px; }
+  .rh.tl { top: -12px; left: -12px; }
+  .rh.tr { top: -12px; right: -12px; }
+  .rh.bl { bottom: -12px; left: -12px; }
+  .rh.br { bottom: -12px; right: -12px; }
+  .rh.tm { top: -12px; }
+  .rh.bm { bottom: -12px; }
+  .rh.ml { left: -12px; }
+  .rh.mr { right: -12px; }
+}

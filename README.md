@@ -24,6 +24,7 @@ Cloudflare ダッシュボード → 対象の Worker → **Settings** → **Var
 | `FAL_KEY` | [fal.ai ダッシュボード](https://fal.ai/dashboard/keys)で発行した API キー（`key_id:key_secret`） | fal での生成 |
 | `MODAL_PROXY_KEY` | Modal の Proxy Auth Token（`wk-…`） | Modal 版 Krea 2 での生成 |
 | `MODAL_PROXY_SECRET` | 同上（`ws-…`）。[Modal ダッシュボード → Settings → Proxy Auth Tokens](https://modal.com/settings) で発行 | 同上 |
+| `POE_API_KEY` | [poe.com/api_key](https://poe.com/api_key) で発行した Poe の API キー | 部分AI編集（課金は Poe ポイント） |
 
 旧バージョンで使っていた `SYNC_TOKEN` は不要になったので削除して構いません。
 
@@ -43,6 +44,7 @@ npx wrangler r2 bucket create fal-playground-images
 - サイズ（約 1MP 基準のプリセット 6 種 + カスタム px 指定）・枚数・シード（「固定」チェック時のみ適用）・ステップ数・ガイダンスの指定
 - Hugging Face 公開リポジトリからの LoRA 一括登録（.safetensors を一覧表示して選択）
 - LoRA 比較アリーナ（別画面 `arena.html`・下記参照）
+- 部分AI編集（別画面 `edit.html`・下記参照）
 - 生成履歴とプロンプトの再利用（サーバー保存・全端末で共通）
 - ダークモード（自動 / ライト / ダーク切替）
 - Cmd/Ctrl + Enter で生成
@@ -59,6 +61,23 @@ npx wrangler r2 bucket create fal-playground-images
 - 生成画像は type: compare の履歴として保存されるため、**通常の生成画面のギャラリーにもそのまま表示**されます（ギャラリー側で履歴を削除するとアリーナ側の画像表示も消えるので注意）
 - セッション・投票結果は LoRA ライブラリと同じ仕組みでサーバーに自動同期され、全端末で共通です
 - 生成中にタブを閉じても、次にアリーナを開いたときに未完了のラウンドのポーリングを再開します
+
+## 部分AI編集
+
+トップバーの「部分AI編集」から開く別画面で、画像の一部だけを AI で編集して元画像にはめ込みます。
+
+1. 画像を読み込み、ドラッグで編集したい範囲を選択（比率プリセット・縦横切替・移動・リサイズ対応）
+2. 編集プロンプトとモデルを指定して実行すると、切り抜きが Poe の画像編集ボットに送られます
+3. 返ってきた編集結果をブラウザ内で元画像にはめ込み合成します（Lanczos3 縮小・外周のカラーマッチ・境界のフェザーブレンド）
+
+### 使い方のメモ
+
+- 生成は [Poe の OpenAI 互換 API](https://creator.poe.com/docs/external-applications/openai-compatible-api) 経由で、**課金は Poe のポイント**です（fal ではありません）。Worker の Secret に `POE_API_KEY` の設定が必要です
+- モデルは Nano Banana 2 / Nano Banana Pro / GPT Image 2（品質指定つき）のほか、カスタム欄に任意の Poe ボットハンドルを指定できます（カスタム時はボット固有パラメータを送りません）
+- アスペクト比は選択範囲から最も近いプリセットが自動選択され、長辺 512px 未満の切り抜きは送信前に拡大されます
+- Poe の呼び出しはサーバー側（Worker のジョブ）で完結します。生成中にタブを閉じても、次に編集画面を開いたときに続きから再開されます
+- 結果は生成履歴に保存され、トップのギャラリーに表示されます（画像は 合成結果 / AI 編集後 / 切り抜き / 元画像 の 4 枚。履歴の削除で一括削除）
+- 「はめ込み合成の設定」で境界ブレンド幅とカラーマッチ幅（いずれも選択範囲の短辺に対する %）を調整できます
 
 ## データの保管先
 
