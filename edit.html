@@ -60,10 +60,12 @@
     </div>
 
     <div class="panel edit-form">
-      <label class="field">
-        <span class="label">編集プロンプト（選択範囲に対する指示）</span>
-        <textarea id="editPrompt" rows="4" placeholder="選択した範囲をどう編集するか英語で記述..." spellcheck="false"></textarea>
-      </label>
+      <details class="advanced prompt-details">
+        <summary>編集プロンプト <span class="prompt-preview" id="promptPreview"></span></summary>
+        <div class="advanced-body">
+          <textarea id="editPrompt" rows="4" placeholder="選択した範囲をどう編集するか英語で記述..." spellcheck="false"></textarea>
+        </div>
+      </details>
       <div class="row">
         <label class="field">
           <span class="label">AI モデル（Poe ボット）</span>

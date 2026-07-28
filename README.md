@@ -89,6 +89,7 @@ npx wrangler r2 bucket create fal-playground-images
 | LoRA ライブラリ | サーバー（自動同期） + localStorage | 全端末で共通 |
 | 比較アリーナのセッション・投票結果 | サーバー（自動同期） + localStorage | 全端末で共通。画像は生成履歴と共用 |
 | フォームの下書き・テーマ | localStorage | 端末ごと（意図的に同期しない） |
+| 部分AI編集の作業状態（元画像・選択範囲・プロンプト） | localStorage + IndexedDB（元画像） | 端末ごと。再読み込みしても復元される |
 
 ### 生成設定の画像への焼き込み
 

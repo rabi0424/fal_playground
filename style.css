@@ -1514,3 +1514,6 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
   .rh.ml { left: -12px; }
   .rh.mr { right: -12px; }
 }
+
+/* 編集プロンプトの折りたたみ（サマリーに先頭を薄く表示） */
+.prompt-preview { font-weight: 400; color: var(--muted); }

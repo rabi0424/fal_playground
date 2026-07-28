@@ -34,6 +34,12 @@ const GPT_RATIOS = [
 const LS_THEME = 'fal_theme';
 const LS_FORM = 'fal_edit_form';
 const LS_JOB = 'fal_edit_job'; // 実行中ジョブ。タブを閉じても次回開いたときに再開する
+const LS_STATE = 'fal_edit_state'; // 選択範囲・アップロード済み元画像 URL（再読み込みで復元）
+
+// 元画像の data URI は localStorage の容量に収まらないことがあるので IndexedDB に置く
+const IDB_NAME = 'fal_edit';
+const IDB_STORE = 'state';
+const IDB_IMAGE_KEY = 'image';
 
 const POLL_INTERVAL_MS = 2000;
 const SEND_MIN_PX = 512; // AI に送る切り抜きの最小長辺（小さすぎると編集品質が落ちる）
@@ -56,6 +62,7 @@ const els = {
   selBox: $('#selBox'),
   dimBadge: $('#dimBadge'),
   editPrompt: $('#editPrompt'),
+  promptPreview: $('#promptPreview'),
   botSelect: $('#botSelect'),
   customBotField: $('#customBotField'),
   customBot: $('#customBot'),
@@ -147,6 +154,38 @@ function loadImageEl(src) {
     im.onload = () => resolve(im);
     im.onerror = () => reject(new Error('画像を読み込めませんでした'));
     im.src = src;
+  });
+}
+
+/* ---------- IndexedDB（元画像の保存） ---------- */
+// 保存に失敗しても機能自体は使えるよう、呼び出し側はすべて失敗を無視する
+
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbSet(key, value) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(value, key);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+  });
+}
+
+async function idbGet(key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const req = tx.objectStore(IDB_STORE).get(key);
+    req.onsuccess = () => { db.close(); resolve(req.result ?? null); };
+    req.onerror = () => { db.close(); reject(req.error); };
   });
 }
 
@@ -243,6 +282,9 @@ function loadFile(file) {
     imgDataUri = e.target.result;
     origUrl = null; // 新しい画像なので次の実行でアップロードし直す
     showWorkspace();
+    saveWorkState();
+    // 再読み込みで復元できるよう端末内（IndexedDB）にも保存する
+    idbSet(IDB_IMAGE_KEY, { dataUri: imgDataUri }).catch(() => {});
   };
   reader.readAsDataURL(file);
 }
@@ -368,6 +410,7 @@ function endDraw() {
   if (sel.w > 5 && sel.h > 5) hasSel = true;
   else clearSel();
   updateExecState();
+  saveWorkState();
 }
 
 function startInteract(e) {
@@ -405,6 +448,7 @@ function endMove() {
   document.removeEventListener('mouseup', endMove);
   document.removeEventListener('touchmove', onMove);
   document.removeEventListener('touchend', endMove);
+  saveWorkState();
 }
 
 function startResize(e, handle) {
@@ -480,6 +524,7 @@ function endResize() {
   document.removeEventListener('mouseup', endResize);
   document.removeEventListener('touchmove', onResize);
   document.removeEventListener('touchend', endResize);
+  saveWorkState();
 }
 
 function updateSelBox() {
@@ -510,7 +555,18 @@ function selToRect() {
   return { x, y, w, h };
 }
 
-// ジョブ再開時: 元画像座標の rect から表示座標の選択範囲を復元する
+// 選択範囲とアップロード済み元画像 URL を保存する（再読み込みでの復元用）。
+// 元画像そのものは IndexedDB（loadFile 時に保存）にある
+function saveWorkState() {
+  try {
+    localStorage.setItem(LS_STATE, JSON.stringify({
+      rect: img && hasSel ? selToRect() : null,
+      origUrl,
+    }));
+  } catch { /* 容量超過などは無視（復元できなくなるだけ） */ }
+}
+
+// 再読み込み時: 元画像座標の rect から表示座標の選択範囲を復元する
 function restoreSelection(rect) {
   sel = {
     x: rect.x * displayScale,
@@ -802,6 +858,7 @@ async function execute() {
     if (!origUrl) {
       setStatus('元画像をアップロード中…');
       origUrl = await uploadImage(imgDataUri, null);
+      saveWorkState(); // 再読み込み後の実行で再アップロードしないよう覚えておく
     }
     setStatus('切り抜きをアップロード中…');
     const cropUrl = await uploadImage(buildSendImage(rect), null);
@@ -978,6 +1035,8 @@ function saveForm() {
     quality: els.qualitySelect.value,
     blend: els.blendSlider.value,
     color: els.colorSlider.value,
+    ratio: curRatio,
+    orient,
   }));
 }
 
@@ -993,6 +1052,60 @@ function restoreForm() {
   if (['low', 'medium', 'high'].includes(saved.quality)) els.qualitySelect.value = saved.quality;
   if (saved.blend != null) els.blendSlider.value = saved.blend;
   if (saved.color != null) els.colorSlider.value = saved.color;
+  if (Object.hasOwn(RATIOS, saved.ratio ?? '')) curRatio = saved.ratio;
+  if (saved.orient === 'landscape' || saved.orient === 'portrait') orient = saved.orient;
+  for (const c of els.ratioChips.querySelectorAll('.ratio-chip')) {
+    c.classList.toggle('active', c.dataset.ratio === curRatio);
+  }
+  for (const b of els.orientToggle.querySelectorAll('.orient-btn')) {
+    b.classList.toggle('active', b.dataset.orient === orient);
+  }
+  updateChipLabels();
+  updateLockedClass();
+}
+
+// 折りたたみサマリーに現在のプロンプトの先頭を表示する
+function updatePromptPreview() {
+  const t = els.editPrompt.value.trim();
+  els.promptPreview.textContent = t ? (t.length > 42 ? `${t.slice(0, 42)}…` : t) : '（未入力）';
+}
+
+/* ---------- restore（再読み込み時の復元） ---------- */
+
+// 実行中ジョブがあればその再開を優先し（元画像はサーバーから読み戻す）、
+// なければ端末内に保存した元画像と選択範囲を復元する
+async function restoreWorkspace() {
+  if (localStorage.getItem(LS_JOB)) {
+    await resumeJob();
+    return;
+  }
+
+  let state = null;
+  try {
+    state = JSON.parse(localStorage.getItem(LS_STATE));
+  } catch { /* 壊れていたら無視 */ }
+
+  let saved = null;
+  try {
+    saved = await idbGet(IDB_IMAGE_KEY);
+  } catch { /* IndexedDB が使えない環境では復元しない */ }
+  if (typeof saved?.dataUri !== 'string') return;
+
+  let restored;
+  try {
+    restored = await loadImageEl(saved.dataUri);
+  } catch {
+    return; // 壊れた保存データ。次の画像読み込みで上書きされる
+  }
+  if (img) return; // 復元を待つ間にユーザーが別の画像を読み込んだ
+  img = restored;
+  imgDataUri = saved.dataUri;
+  origUrl = state?.origUrl ?? null;
+  showWorkspace();
+  if (state?.rect) {
+    restoreSelection(state.rect);
+    updateExecState();
+  }
 }
 
 /* ---------- init ---------- */
@@ -1012,13 +1125,14 @@ function initForm() {
   }
   restoreForm();
   updateBotFields();
+  updatePromptPreview();
   els.blendVal.textContent = els.blendSlider.value;
   els.colorVal.textContent = els.colorSlider.value;
 
   els.botSelect.addEventListener('change', () => { updateBotFields(); updateExecState(); saveForm(); });
   els.customBot.addEventListener('input', () => { updateExecState(); saveForm(); });
   els.qualitySelect.addEventListener('change', saveForm);
-  els.editPrompt.addEventListener('input', () => { updateExecState(); saveForm(); });
+  els.editPrompt.addEventListener('input', () => { updateExecState(); updatePromptPreview(); saveForm(); });
   els.blendSlider.addEventListener('input', () => { els.blendVal.textContent = els.blendSlider.value; saveForm(); });
   els.colorSlider.addEventListener('input', () => { els.colorVal.textContent = els.colorSlider.value; saveForm(); });
 }
@@ -1058,6 +1172,8 @@ function initSelection() {
     updateLockedClass();
     updateOrientVis();
     if (hasSel && ratioLocked()) { applyRatio(); updateSelBox(); }
+    saveWorkState();
+    saveForm();
   });
 
   els.orientToggle.addEventListener('click', (e) => {
@@ -1068,12 +1184,15 @@ function initSelection() {
     btn.classList.add('active');
     updateChipLabels();
     if (hasSel && ratioLocked()) { applyRatio(); updateSelBox(); }
+    saveWorkState();
+    saveForm();
   });
 
   els.btnReset.addEventListener('click', () => {
     if (running) return;
     clearSel();
     els.guideHint.hidden = false;
+    saveWorkState();
   });
 }
 
@@ -1084,4 +1203,4 @@ initSelection();
 els.btnExec.addEventListener('click', execute);
 updateOrientVis();
 updateExecState();
-resumeJob();
+restoreWorkspace();
