@@ -21,6 +21,12 @@ const JOB_MAX_SUBMIT_ATTEMPTS = 2; // 送信自体の再試行上限（多重生
 // 履歴追加時に取り込む外部画像のホスト（fal の CDN）。それ以外は取り込まず URL のまま残す
 const CAPTURE_HOSTS = /(^|\.)fal\.(media|ai|run)$/;
 
+// Poe の OpenAI 互換 API（部分AI編集で使用）。キーは Worker の Secret（POE_API_KEY）
+const POE_API_URL = 'https://api.poe.com/v1/chat/completions';
+
+// /api/upload で受け付ける画像の上限（デコード後のバイト数）
+const UPLOAD_MAX_BYTES = 40 * 1024 * 1024;
+
 /* ---------- PNG メタデータ焼き込み ---------- */
 // 生成設定の JSON を PNG の iTXt チャンクとして埋め込む（ComfyUI がワークフローを
 // 画像に焼き込むのと同じ発想）。ダウンロードした画像ファイルだけから設定を確認できる
@@ -72,6 +78,50 @@ function embedPngMetadata(buf, text) {
 
 function randomId() {
   return crypto.randomUUID().replaceAll('-', '');
+}
+
+// data URI（または生の base64 文字列）を { mime, bytes } に変換する。
+// 画像以外の MIME や壊れた base64 は null を返す
+function decodeImageDataUri(input) {
+  if (typeof input !== 'string' || input === '') return null;
+  let mime = 'image/png';
+  let b64 = input;
+  const m = input.match(/^data:([\w/+.-]+);base64,(.*)$/s);
+  if (m) {
+    mime = m[1];
+    b64 = m[2];
+  }
+  if (!mime.startsWith('image/')) return null;
+  let bin;
+  try {
+    bin = atob(b64);
+  } catch {
+    return null;
+  }
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return { mime, bytes };
+}
+
+function bytesToBase64(bytes) {
+  let bin = '';
+  const chunk = 0x8000; // 引数上限を避けて分割する
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+// Poe（OpenAI 互換 API）の応答テキストから画像 URL を取り出す。
+// 画像ボットは Markdown の画像リンク（または裸の URL）として返す
+function extractImageUrl(content) {
+  if (typeof content !== 'string') return null;
+  const md = content.match(/!\[[^\]]*\]\((https?:[^)\s]+)\)/);
+  if (md) return md[1];
+  const link = content.match(/\[[^\]]*\]\((https?:[^)\s]+)\)/);
+  if (link) return link[1];
+  const bare = content.match(/https?:\/\/\S+\.(?:png|jpe?g|webp|gif)(?:\?\S*)?/i);
+  return bare ? bare[0] : null;
 }
 
 // 履歴レコード内の画像リスト（通常は images、比較レコードは variants[].images）を
@@ -223,15 +273,161 @@ export class SyncState extends DurableObject {
 
   // 未完了ジョブを順に処理する（順次実行なので Modal 側のウォーム状態も保ちやすい）
   async alarm() {
-    const jobs = await this.ctx.storage.list({ prefix: 'krea2:job:' });
     let pendingLeft = false;
-    for (const [key, job] of jobs) {
-      if (job.status !== 'pending') continue;
-      await this.runKrea2Job(key, job);
-      const after = await this.ctx.storage.get(key);
-      if (after?.status === 'pending') pendingLeft = true;
+    for (const prefix of ['krea2:job:', 'poe:job:']) {
+      const jobs = await this.ctx.storage.list({ prefix });
+      for (const [key, job] of jobs) {
+        if (job.status !== 'pending') continue;
+        if (prefix === 'poe:job:') await this.runPoeJob(key, job);
+        else await this.runKrea2Job(key, job);
+        const after = await this.ctx.storage.get(key);
+        if (after?.status === 'pending') pendingLeft = true;
+      }
     }
     if (pendingLeft) await this.ctx.storage.setAlarm(Date.now() + JOB_POLL_DELAY_MS);
+  }
+
+  /* ---- Poe 部分AI編集ジョブ ---- */
+  // krea2 ジョブと同じ考え方: ジョブを登録してすぐ応答し、Poe API の呼び出しは
+  // alarm で行う。生成中にタブを閉じても結果を取りこぼさない。
+  // 入力画像（切り抜き）は事前に /api/upload で R2 へ置き、その id を参照する
+
+  async startPoeJob(id, payload) {
+    const key = `poe:job:${id}`;
+    if (await this.ctx.storage.get(key)) return; // 同 id の再送は無視（多重課金防止）
+
+    const jobs = await this.ctx.storage.list({ prefix: 'poe:job:' });
+    for (const [k, j] of jobs) {
+      if (Date.now() - j.created > JOB_TTL_MS) await this.ctx.storage.delete(k);
+    }
+
+    await this.ctx.storage.put(key, {
+      status: 'pending',
+      payload,
+      attempts: 0,
+      created: Date.now(),
+    });
+    if ((await this.ctx.storage.getAlarm()) === null) {
+      await this.ctx.storage.setAlarm(Date.now() + 50);
+    }
+  }
+
+  async getPoeJob(id) {
+    const job = await this.ctx.storage.get(`poe:job:${id}`);
+    if (!job) return null;
+    return {
+      status: job.status,
+      url: job.url ?? null,
+      error: job.error ?? null,
+    };
+  }
+
+  // Poe のチャット補完 API（非ストリーミング）を 1 回呼び、応答中の画像を
+  // R2 に取り込んで完了する。応答待ちは数十秒〜になるが alarm 内の fetch で待てる
+  async runPoeJob(key, job) {
+    try {
+      if (job.attempts >= JOB_MAX_SUBMIT_ATTEMPTS) {
+        job.status = 'error';
+        job.error = 'Poe へのリクエストを完了できませんでした（接続エラーが続いています）';
+        await this.ctx.storage.put(key, job);
+        return;
+      }
+      // 途中で落ちても際限なく再送されないよう、送信前に回数を記録する
+      job.attempts += 1;
+      await this.ctx.storage.put(key, job);
+
+      const { model, prompt, imageId, parameters } = job.payload;
+
+      // 入力画像（切り抜き）を R2 から読み出して data URI にする
+      const obj = await this.env.IMAGES.get(`${imageId}.png`);
+      if (!obj) {
+        job.status = 'error';
+        job.error = '入力画像が見つかりませんでした（アップロードからやり直してください）';
+        await this.ctx.storage.put(key, job);
+        return;
+      }
+      const mime = obj.httpMetadata?.contentType || 'image/png';
+      const dataUri = `data:${mime};base64,${bytesToBase64(new Uint8Array(await obj.arrayBuffer()))}`;
+
+      const res = await fetch(POE_API_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.env.POE_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: dataUri } },
+            ],
+          }],
+          stream: false,
+          // ボット固有パラメータ（aspect_ratio / quality など）はトップレベルに展開する
+          //（OpenAI SDK の extra_body 相当）
+          ...(parameters ?? {}),
+        }),
+      });
+
+      if (!res.ok) {
+        const text = (await res.text()).slice(0, 500);
+        let detail = text;
+        try {
+          const body = JSON.parse(text);
+          detail = body?.error?.message || detail;
+        } catch { /* JSON でなければ本文をそのまま使う */ }
+        job.status = 'error';
+        job.error = `Poe API error ${res.status}: ${detail}`;
+        await this.ctx.storage.put(key, job);
+        return;
+      }
+
+      const data = await res.json();
+      const message = data?.choices?.[0]?.message ?? {};
+      // 画像は Markdown リンクで返るのが基本だが、attachments を返す実装にも備える
+      let imageUrl = null;
+      for (const a of message.attachments ?? []) {
+        if (a?.url && (a.mimeType ?? a.content_type ?? '').startsWith('image/')) {
+          imageUrl = a.url;
+          break;
+        }
+      }
+      if (!imageUrl) imageUrl = extractImageUrl(message.content);
+      if (!imageUrl) {
+        job.status = 'error';
+        job.error = `画像が返されませんでした: ${String(message.content ?? '').slice(0, 300)}`;
+        await this.ctx.storage.put(key, job);
+        return;
+      }
+
+      // Poe CDN の URL は失効しうるので、即座に R2 へ取り込む
+      const imgRes = await fetch(imageUrl);
+      if (!imgRes.ok) {
+        job.status = 'error';
+        job.error = `編集結果の画像を取得できませんでした（HTTP ${imgRes.status}）`;
+        await this.ctx.storage.put(key, job);
+        return;
+      }
+      const meta = {
+        app: 'fal playground',
+        source: 'poe-edit',
+        model,
+        prompt,
+        created: new Date(job.created).toISOString(),
+      };
+      const buf = embedPngMetadata(await imgRes.arrayBuffer(), JSON.stringify(meta));
+      const resultId = randomId();
+      await this.env.IMAGES.put(`${resultId}.png`, buf, {
+        httpMetadata: { contentType: imgRes.headers.get('Content-Type') || 'image/png' },
+      });
+      job.status = 'done';
+      job.url = `/api/image/${resultId}`;
+      await this.ctx.storage.put(key, job);
+    } catch {
+      // ネットワーク断など。pending のまま次の alarm で再試行する（attempts 上限で打ち切り）
+    }
   }
 
   // 1 ジョブを進める。Modal が 303（処理継続中）を返したらポーリング URL を保存して
@@ -452,6 +648,79 @@ export default {
       return Response.json({ ok: true });
     }
 
+    // クライアント側で生成した画像（部分編集の切り抜き・合成結果など）の保存先。
+    // base64 の JSON で受け取り R2 に置いて /api/image/<id> の URL を返す（README の案 A）。
+    // meta があれば PNG に生成設定として焼き込む（fal 経由の履歴取り込みと同じ扱い）
+    if (url.pathname === '/api/upload') {
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+      if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return new Response('Invalid JSON', { status: 400 });
+      }
+      const decoded = decodeImageDataUri(body?.image);
+      if (!decoded) return new Response('image must be a base64 image data URI', { status: 422 });
+      if (decoded.bytes.length > UPLOAD_MAX_BYTES) {
+        return new Response('Image too large', { status: 413 });
+      }
+      let buf = decoded.bytes.buffer;
+      if (body.meta && typeof body.meta === 'object') {
+        buf = embedPngMetadata(buf, JSON.stringify(body.meta));
+      }
+      const id = randomId();
+      await env.IMAGES.put(`${id}.png`, buf, {
+        httpMetadata: { contentType: decoded.mime },
+      });
+      return Response.json({ url: `/api/image/${id}` });
+    }
+
+    // Poe（OpenAI 互換 API）での部分AI編集ジョブの投入。API キー（Secret の
+    // POE_API_KEY）は Worker で付与し、ブラウザには渡さない。実際の呼び出しは
+    // krea2 と同じく Durable Object の alarm で行い、クライアントはポーリングする
+    if (url.pathname === '/api/poe/edit') {
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+      if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });
+      if (!env.POE_API_KEY) {
+        return new Response('POE_API_KEY is not configured（Worker の Secret に Poe の API キーを設定してください）', { status: 500 });
+      }
+      let payload;
+      try {
+        payload = await request.json();
+      } catch {
+        return new Response('Invalid JSON', { status: 400 });
+      }
+      const { jobId, model, prompt, imageId, parameters } = payload ?? {};
+      if (typeof jobId !== 'string' || !/^[0-9a-f]{32}$/.test(jobId)) {
+        return new Response('jobId is required', { status: 422 });
+      }
+      if (typeof model !== 'string' || !/^[\w.-]{1,64}$/.test(model)) {
+        return new Response('model is required', { status: 422 });
+      }
+      if (typeof prompt !== 'string' || prompt.trim() === '' || prompt.length > 8000) {
+        return new Response('prompt is required', { status: 422 });
+      }
+      if (typeof imageId !== 'string' || !/^[0-9a-f]{32}$/.test(imageId)) {
+        return new Response('imageId is required', { status: 422 });
+      }
+      if (parameters != null && (typeof parameters !== 'object' || Array.isArray(parameters)
+        || JSON.stringify(parameters).length > 2000)) {
+        return new Response('Invalid parameters', { status: 422 });
+      }
+      await stub.startPoeJob(jobId, { model, prompt, imageId, parameters: parameters ?? {} });
+      return Response.json({ queued: true, jobId });
+    }
+
+    // Poe 編集ジョブの状態取得（クライアントはこれをポーリングして結果を受け取る）
+    const poeJobMatch = url.pathname.match(/^\/api\/poe\/job\/([0-9a-f]{32})$/);
+    if (poeJobMatch) {
+      if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
+      const job = await stub.getPoeJob(poeJobMatch[1]);
+      if (!job) return new Response('Job not found', { status: 404 });
+      return Response.json(job);
+    }
+
     // Modal 上の Krea 2 Turbo API（modal_comfy）への生成ジョブ投入。
     // Proxy Auth Token をブラウザに置かないよう Worker 経由で呼ぶ（INTEGRATION.md 参照）。
     // ジョブを登録してすぐ応答し、実際の Modal 呼び出しは Durable Object の alarm で行う。
@@ -479,11 +748,13 @@ export default {
       }
       delete payload.jobId;
 
-      // エンドポイントはクライアントの endpoint フィールド（"exp" / "prod"）で切り替える。
+      // エンドポイントはクライアントの endpoint フィールド（"exp" / "gpusnap" / "prod"）で切り替える。
       // URL 自体はクライアントから受け取らず、ここの許可リストでのみ解決する。既定は実験版
       const endpoints = {
         exp: env.KREA2_ENDPOINT_EXP
           || 'https://rabitteru--krea2-comfy-api-exp-comfyapi-generate.modal.run',
+        gpusnap: env.KREA2_ENDPOINT_GPUSNAP
+          || 'https://rabitteru--krea2-comfy-api-gpusnap-comfyapi-generate.modal.run',
         prod: env.KREA2_ENDPOINT
           || 'https://rabitteru--krea2-comfy-api-comfyapi-generate.modal.run',
       };
@@ -508,11 +779,13 @@ export default {
     const imageMatch = url.pathname.match(/^\/api(?:\/krea2)?\/image\/([0-9a-f]{32})$/);
     if (imageMatch) {
       if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
+      const obj = await env.IMAGES.get(`${imageMatch[1]}.png`);
+      // /api/upload は PNG 以外（JPEG の元画像など）も置くので、保存時の
+      // Content-Type を優先する（旧画像はメタデータなし = PNG）
       const headers = {
-        'Content-Type': 'image/png',
+        'Content-Type': obj?.httpMetadata?.contentType || 'image/png',
         'Cache-Control': 'private, max-age=31536000, immutable',
       };
-      const obj = await env.IMAGES.get(`${imageMatch[1]}.png`);
       if (obj) return new Response(obj.body, { headers });
       // 後方互換: R2 に無い画像は旧 DO ストレージから配信する
       const buf = await stub.loadImage(imageMatch[1]);

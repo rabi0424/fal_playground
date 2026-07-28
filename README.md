@@ -24,6 +24,7 @@ Cloudflare ダッシュボード → 対象の Worker → **Settings** → **Var
 | `FAL_KEY` | [fal.ai ダッシュボード](https://fal.ai/dashboard/keys)で発行した API キー（`key_id:key_secret`） | fal での生成 |
 | `MODAL_PROXY_KEY` | Modal の Proxy Auth Token（`wk-…`） | Modal 版 Krea 2 での生成 |
 | `MODAL_PROXY_SECRET` | 同上（`ws-…`）。[Modal ダッシュボード → Settings → Proxy Auth Tokens](https://modal.com/settings) で発行 | 同上 |
+| `POE_API_KEY` | [poe.com/api_key](https://poe.com/api_key) で発行した Poe の API キー | 部分AI編集（課金は Poe ポイント） |
 
 旧バージョンで使っていた `SYNC_TOKEN` は不要になったので削除して構いません。
 
@@ -43,6 +44,7 @@ npx wrangler r2 bucket create fal-playground-images
 - サイズ（約 1MP 基準のプリセット 6 種 + カスタム px 指定）・枚数・シード（「固定」チェック時のみ適用）・ステップ数・ガイダンスの指定
 - Hugging Face 公開リポジトリからの LoRA 一括登録（.safetensors を一覧表示して選択）
 - LoRA 比較アリーナ（別画面 `arena.html`・下記参照）
+- 部分AI編集（別画面 `edit.html`・下記参照）
 - 生成履歴とプロンプトの再利用（サーバー保存・全端末で共通）
 - ダークモード（自動 / ライト / ダーク切替）
 - Cmd/Ctrl + Enter で生成
@@ -60,6 +62,23 @@ npx wrangler r2 bucket create fal-playground-images
 - セッション・投票結果は LoRA ライブラリと同じ仕組みでサーバーに自動同期され、全端末で共通です
 - 生成中にタブを閉じても、次にアリーナを開いたときに未完了のラウンドのポーリングを再開します
 
+## 部分AI編集
+
+トップバーの「部分AI編集」から開く別画面で、画像の一部だけを AI で編集して元画像にはめ込みます。
+
+1. 画像を読み込み、ドラッグで編集したい範囲を選択（比率プリセット・縦横切替・移動・リサイズ対応）
+2. 編集プロンプトとモデルを指定して実行すると、切り抜きが Poe の画像編集ボットに送られます
+3. 返ってきた編集結果をブラウザ内で元画像にはめ込み合成します（Lanczos3 縮小・外周のカラーマッチ・境界のフェザーブレンド）
+
+### 使い方のメモ
+
+- 生成は [Poe の OpenAI 互換 API](https://creator.poe.com/docs/external-applications/openai-compatible-api) 経由で、**課金は Poe のポイント**です（fal ではありません）。Worker の Secret に `POE_API_KEY` の設定が必要です
+- モデルは Nano Banana 2 / Nano Banana Pro / GPT Image 2（品質指定つき）のほか、カスタム欄に任意の Poe ボットハンドルを指定できます（カスタム時はボット固有パラメータを送りません）
+- アスペクト比は選択範囲から最も近いプリセットが自動選択され、長辺 512px 未満の切り抜きは送信前に拡大されます
+- Poe の呼び出しはサーバー側（Worker のジョブ）で完結します。生成中にタブを閉じても、次に編集画面を開いたときに続きから再開されます
+- 結果は生成履歴に保存され、トップのギャラリーに表示されます（画像は 合成結果 / AI 編集後 / 切り抜き / 元画像 の 4 枚。履歴の削除で一括削除）
+- 「はめ込み合成の設定」で境界ブレンド幅とカラーマッチ幅（いずれも選択範囲の短辺に対する %）を調整できます
+
 ## データの保管先
 
 | データ | 保管先 | 備考 |
@@ -70,6 +89,7 @@ npx wrangler r2 bucket create fal-playground-images
 | LoRA ライブラリ | サーバー（自動同期） + localStorage | 全端末で共通 |
 | 比較アリーナのセッション・投票結果 | サーバー（自動同期） + localStorage | 全端末で共通。画像は生成履歴と共用 |
 | フォームの下書き・テーマ | localStorage | 端末ごと（意図的に同期しない） |
+| 部分AI編集の作業状態（元画像・選択範囲・プロンプト） | localStorage + IndexedDB（元画像） | 端末ごと。再読み込みしても復元される |
 
 ### 生成設定の画像への焼き込み
 
@@ -77,9 +97,10 @@ npx wrangler r2 bucket create fal-playground-images
 
 ## Modal 自前ホスト版 Krea 2
 
-モデル選択の「Krea 2 [turbo] 自前ホスト（Modal 実験版 / 本番）」は、fal ではなく Modal 上の [modal_comfy](https://github.com/rabi0424/modal_comfy) API で生成します。実験版（CPU スナップショット）と本番（安定版）はモデル選択で切り替えられ、標準は実験版です。エンドポイントの URL 自体を変えたい場合は、Worker の環境変数で上書きできます（未設定なら modal_comfy の既定 URL）:
+モデル選択の「Krea 2 [turbo] 自前ホスト（Modal 実験版 / GPUスナップ版 / 本番）」は、fal ではなく Modal 上の [modal_comfy](https://github.com/rabi0424/modal_comfy) API で生成します。実験版（CPU スナップショット）・GPU スナップショット版（`krea2-comfy-api-gpusnap`）・本番（安定版）はモデル選択で切り替えられ、標準は実験版です。エンドポイントの URL 自体を変えたい場合は、Worker の環境変数で上書きできます（未設定なら modal_comfy の既定 URL）:
 
 - `KREA2_ENDPOINT_EXP` = 実験版の URL
+- `KREA2_ENDPOINT_GPUSNAP` = GPU スナップショット版の URL
 - `KREA2_ENDPOINT` = 本番の URL
 
 ### 使い方のメモ

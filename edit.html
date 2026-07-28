@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ja" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>部分AI編集 - fal playground</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><a href="./">fal <span>playground</span></a><span class="arena-tag">/ 部分AI編集</span></div>
+  <div class="topbar-actions">
+    <a href="./" class="ghost-btn">← 生成画面へ</a>
+    <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
+  </div>
+</header>
+
+<main class="edit-main">
+
+  <div class="upload-area" id="uploadArea">
+    <div class="upload-icon">⬆</div>
+    <div class="upload-text">クリックまたはドラッグ＆ドロップで画像を読み込む</div>
+    <div class="upload-hint">JPG, PNG, WebP に対応。範囲を選択して Poe の画像編集ボットで部分編集し、元画像にはめ込みます</div>
+    <input type="file" id="fileInput" accept="image/*" hidden>
+  </div>
+
+  <div id="pageError" class="error" role="alert" hidden></div>
+
+  <section id="workspace" hidden>
+
+    <div class="hint edit-guide" id="guideHint">画像の上でドラッグして、編集したい範囲を選択してください</div>
+
+    <div class="ratio-bar">
+      <span class="label">比率</span>
+      <div class="ratio-chips" id="ratioChips">
+        <button type="button" class="ratio-chip" data-ratio="free">フリー</button>
+        <button type="button" class="ratio-chip active" data-ratio="1:1">1:1</button>
+        <button type="button" class="ratio-chip" data-ratio="4:5">4:5</button>
+        <button type="button" class="ratio-chip" data-ratio="3:4">3:4</button>
+        <button type="button" class="ratio-chip" data-ratio="2:3">2:3</button>
+        <button type="button" class="ratio-chip" data-ratio="9:16">9:16</button>
+      </div>
+      <div class="orient-toggle" id="orientToggle">
+        <button type="button" class="orient-btn" data-orient="landscape">横</button>
+        <button type="button" class="orient-btn active" data-orient="portrait">縦</button>
+      </div>
+    </div>
+
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="mainCanvas"></canvas>
+      <div class="sel-ov" id="selOv"></div>
+      <div class="sel-box" id="selBox">
+        <div class="rh tl" data-handle="tl"></div><div class="rh tr" data-handle="tr"></div>
+        <div class="rh bl" data-handle="bl"></div><div class="rh br" data-handle="br"></div>
+        <div class="rh tm" data-handle="tm"></div><div class="rh bm" data-handle="bm"></div>
+        <div class="rh ml" data-handle="ml"></div><div class="rh mr" data-handle="mr"></div>
+        <div class="dim-badge" id="dimBadge"></div>
+      </div>
+    </div>
+
+    <div class="panel edit-form">
+      <details class="advanced prompt-details">
+        <summary>編集プロンプト <span class="prompt-preview" id="promptPreview"></span></summary>
+        <div class="advanced-body">
+          <textarea id="editPrompt" rows="4" placeholder="選択した範囲をどう編集するか英語で記述..." spellcheck="false"></textarea>
+        </div>
+      </details>
+      <div class="row">
+        <label class="field">
+          <span class="label">AI モデル（Poe ボット）</span>
+          <select id="botSelect"></select>
+        </label>
+        <label class="field num-field quality-field" id="qualityField" hidden>
+          <span class="label">品質</span>
+          <select id="qualitySelect">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+          </select>
+        </label>
+      </div>
+      <label class="field" id="customBotField" hidden>
+        <span class="label">カスタムボット名 <em>（Poe のボットハンドル。固有パラメータは送信されません）</em></span>
+        <input id="customBot" type="text" placeholder="例: FLUX-Kontext-Pro" spellcheck="false">
+      </label>
+
+      <details class="advanced">
+        <summary>はめ込み合成の設定</summary>
+        <div class="advanced-body">
+          <label class="field">
+            <span class="label">境界ブレンド幅: <span id="blendVal">5</span>%</span>
+            <input type="range" id="blendSlider" min="0" max="20" value="5">
+          </label>
+          <label class="field">
+            <span class="label">カラーマッチ幅: <span id="colorVal">5</span>%</span>
+            <input type="range" id="colorSlider" min="0" max="20" value="5">
+          </label>
+          <div class="hint">境界ブレンドは選択範囲の外周をフェザー合成し、カラーマッチは外周の平均色を元画像に合わせます。0 で無効。</div>
+        </div>
+      </details>
+
+      <div class="edit-actions">
+        <button id="btnChange" class="ghost-btn" type="button">別の画像</button>
+        <button id="btnReset" class="ghost-btn" type="button">選択をリセット</button>
+        <span class="edit-actions-spacer"></span>
+        <button id="btnExec" class="primary-btn" type="button" disabled>実行する</button>
+      </div>
+      <div id="editStatus" class="status" hidden></div>
+      <div id="editError" class="error" role="alert" hidden></div>
+    </div>
+
+    <div class="panel edit-result" id="resultPanel" hidden>
+      <h3>合成結果 <span class="meta">（生成履歴のギャラリーにも保存されます）</span></h3>
+      <img id="resultImg" alt="合成結果">
+      <div class="edit-result-actions">
+        <a id="btnDlResult" class="primary-btn dl-btn" download="composited.png">ダウンロード</a>
+      </div>
+      <details class="details-section">
+        <summary>中間画像を表示</summary>
+        <div class="inter-grid">
+          <div class="inter-card">
+            <span>切り抜き</span>
+            <img id="cropImg" alt="切り抜き">
+            <a id="dlCrop" download="crop.png">ダウンロード</a>
+          </div>
+          <div class="inter-card">
+            <span>AI 編集後</span>
+            <img id="aiImg" alt="AI編集後">
+            <a id="dlAi" download="ai_edited.png">ダウンロード</a>
+          </div>
+          <div class="inter-card">
+            <span>重ね合わせ（位置確認用）</span>
+            <img id="overlayImg" alt="重ね合わせ">
+            <a id="dlOverlay" download="overlay.png">ダウンロード</a>
+          </div>
+        </div>
+      </details>
+    </div>
+
+  </section>
+</main>
+
+<script src="edit.js"></script>
+</body>
+</html>
