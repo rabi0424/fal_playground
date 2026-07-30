@@ -105,6 +105,10 @@ const els = {
   dlCrop: $('#dlCrop'),
   dlAi: $('#dlAi'),
   dlOverlay: $('#dlOverlay'),
+  gallery: $('#gallery'),
+  lightbox: $('#lightbox'),
+  lightboxClose: $('#lightboxClose'),
+  lightboxCounter: $('#lightboxCounter'),
 };
 
 function sleep(ms) {
@@ -988,6 +992,9 @@ async function awaitAndComposite(job) {
   } catch {
     // 履歴保存の失敗は結果表示を妨げない（画像自体は R2 に保存済み）
   }
+  // 下部の履歴ギャラリーにも即時反映する
+  historyItems = [record, ...historyItems.filter((r) => r.id !== record.id)];
+  renderGallery();
 
   localStorage.removeItem(LS_JOB);
   setStatus('');
@@ -996,6 +1003,173 @@ async function awaitAndComposite(job) {
     aiUrl: result.url,
     cropUri: cropCanvas.toDataURL('image/png'),
     overlayUri: overlayCanvas.toDataURL('image/png'),
+  });
+}
+
+/* ---------- history gallery（トップと同じサーバー履歴を表示） ---------- */
+
+let historyItems = [];
+
+// R2 反映直後などで読めないことがあるので軽くリトライする（app.js と同じ）
+function loadThumb(imgEl, url, maxRetries = 5) {
+  if (!url) { imgEl.src = ''; return; }
+  let attempts = 0;
+  imgEl.addEventListener('error', () => {
+    if (attempts >= maxRetries) return;
+    attempts += 1;
+    setTimeout(() => {
+      imgEl.removeAttribute('src');
+      imgEl.src = url;
+    }, 400 * attempts);
+  });
+  imgEl.src = url;
+}
+
+function galleryThumbUrl(record) {
+  if (record.type === 'compare') {
+    return record.variants?.find((v) => v.images?.length)?.images[0]?.url ?? '';
+  }
+  return record.images?.[0]?.url ?? '';
+}
+
+// 拡大表示に使う URL 一覧（←/→・スワイプで切替できる）
+function galleryImageUrls(record) {
+  if (record.type === 'compare') {
+    return (record.variants ?? []).flatMap((v) => (v.images ?? []).map((i) => i.url));
+  }
+  return (record.images ?? []).map((i) => i.url);
+}
+
+async function fetchHistory() {
+  let res;
+  try {
+    res = await fetch('/api/history');
+  } catch {
+    return; // オフラインなどは表示中のまま
+  }
+  if (!res.ok || isHtmlResponse(res)) return;
+  const list = await res.json().catch(() => null);
+  if (!Array.isArray(list)) return;
+  historyItems = list;
+  renderGallery();
+}
+
+function renderGallery() {
+  els.gallery.innerHTML = '';
+
+  if (historyItems.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'gallery-empty';
+    empty.textContent = 'まだ履歴はありません';
+    els.gallery.appendChild(empty);
+    return;
+  }
+
+  for (const record of historyItems) {
+    const item = document.createElement('div');
+    item.className = 'gallery-item';
+
+    const thumb = document.createElement('img');
+    thumb.className = 'thumb';
+    thumb.alt = record.prompt ?? '';
+    thumb.loading = 'lazy';
+    loadThumb(thumb, galleryThumbUrl(record));
+    thumb.addEventListener('click', () => openLightbox(galleryImageUrls(record)));
+    item.appendChild(thumb);
+
+    const body = document.createElement('div');
+    body.className = 'body';
+
+    const promptText = document.createElement('div');
+    promptText.className = 'prompt-text';
+    promptText.textContent = record.prompt ?? '';
+    promptText.title = record.prompt ?? '';
+    body.appendChild(promptText);
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = (record.model ?? '').replace(/^fal-ai\//, '');
+    body.appendChild(meta);
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'ghost-btn small';
+    deleteBtn.textContent = '削除';
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      historyItems = historyItems.filter((r) => r.id !== record.id);
+      fetch(`/api/history/${encodeURIComponent(record.id)}`, { method: 'DELETE' }).catch(() => {});
+      renderGallery();
+    });
+    actions.appendChild(deleteBtn);
+    body.appendChild(actions);
+
+    item.appendChild(body);
+    els.gallery.appendChild(item);
+  }
+}
+
+/* ---------- lightbox（app.js の簡略版） ---------- */
+
+let lightboxUrls = [];
+let lightboxIndex = 0;
+
+function openLightbox(urls, index = 0) {
+  lightboxUrls = Array.isArray(urls) ? urls : [urls];
+  if (lightboxUrls.length === 0) return;
+  lightboxIndex = index;
+  showLightboxImage();
+  els.lightbox.hidden = false;
+}
+
+function showLightboxImage() {
+  els.lightbox.querySelector('img').src = lightboxUrls[lightboxIndex] ?? '';
+  els.lightboxCounter.hidden = lightboxUrls.length < 2;
+  els.lightboxCounter.textContent = `${lightboxIndex + 1} / ${lightboxUrls.length}`;
+}
+
+function lightboxNav(dir) {
+  if (lightboxUrls.length < 2) return;
+  lightboxIndex = (lightboxIndex + dir + lightboxUrls.length) % lightboxUrls.length;
+  showLightboxImage();
+}
+
+function closeLightbox() {
+  els.lightbox.hidden = true;
+  els.lightbox.querySelector('img').src = '';
+}
+
+let lightboxTouchX = 0;
+let lightboxTouchY = 0;
+let lightboxSwiped = false;
+
+function initLightbox() {
+  els.lightbox.addEventListener('click', () => {
+    if (lightboxSwiped) { lightboxSwiped = false; return; }
+    closeLightbox();
+  });
+  els.lightboxClose.addEventListener('click', closeLightbox);
+
+  // 横スワイプで前後の画像へ（縦方向の動きが主ならスクロールとみなして無視）
+  els.lightbox.addEventListener('touchstart', (e) => {
+    lightboxTouchX = e.touches[0].clientX;
+    lightboxTouchY = e.touches[0].clientY;
+  }, { passive: true });
+  els.lightbox.addEventListener('touchend', (e) => {
+    const dx = e.changedTouches[0].clientX - lightboxTouchX;
+    const dy = e.changedTouches[0].clientY - lightboxTouchY;
+    if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
+      lightboxSwiped = true;
+      lightboxNav(dx < 0 ? 1 : -1);
+    }
+  }, { passive: true });
+
+  document.addEventListener('keydown', (e) => {
+    if (els.lightbox.hidden) return;
+    if (e.key === 'Escape') closeLightbox();
+    else if (e.key === 'ArrowRight') { e.preventDefault(); lightboxNav(1); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); lightboxNav(-1); }
   });
 }
 
@@ -1241,7 +1415,11 @@ initTheme();
 initForm();
 initUpload();
 initSelection();
+initLightbox();
 els.btnExec.addEventListener('click', execute);
 updateOrientVis();
 updateExecState();
 restoreWorkspace();
+fetchHistory();
+// タブに戻ってきたら他画面・他端末での変更を取り込む
+document.addEventListener('visibilitychange', () => { if (!document.hidden) fetchHistory(); });
