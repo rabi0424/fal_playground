@@ -14,6 +14,7 @@ const BOTS = [
 // 名前欄の初期候補（アルファベット順）。datalist なので入力で絞り込まれ、
 // 自由入力もできる。候補は固定で、過去の入力が増えていくことはない
 const NAME_PRESETS = [
+  'Asher Angel',
   'Chris Pratt',
   'Henry Cavill',
   'Jaehyun (NCT)',
@@ -22,6 +23,7 @@ const NAME_PRESETS = [
   'Robert Pattinson',
   'Taeyong (NCT)',
   'Tom Holland',
+  'Vinnie Hacker',
   '新田真剣佑',
   '吉沢亮',
 ];
