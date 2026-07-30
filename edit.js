@@ -11,6 +11,21 @@ const BOTS = [
   { id: '__custom__', name: 'カスタム…' },
 ];
 
+// 名前欄の初期候補（アルファベット順）。datalist なので入力で絞り込まれ、
+// 自由入力もできる。候補は固定で、過去の入力が増えていくことはない
+const NAME_PRESETS = [
+  'Chris Pratt',
+  'Henry Cavill',
+  'Jaehyun (NCT)',
+  'Jay (ENHYPEN)',
+  'Jeno (NCT)',
+  'Robert Pattinson',
+  'Taeyong (NCT)',
+  'Tom Holland',
+  '新田真剣佑',
+  '吉沢亮',
+];
+
 // 選択枠の比率プリセット。orient（縦/横）で w:h を入れ替えて使う
 const RATIOS = {
   free: null,
@@ -64,6 +79,7 @@ const els = {
   editPrompt: $('#editPrompt'),
   promptPreview: $('#promptPreview'),
   nameInput: $('#nameInput'),
+  namePresets: $('#namePresets'),
   botSelect: $('#botSelect'),
   customBotField: $('#customBotField'),
   customBot: $('#customBot'),
@@ -851,8 +867,15 @@ async function execute() {
   if (running || !img || !hasSel) return;
   const bot = currentBot();
   const model = currentModel();
-  const prompt = applyNameToPrompt(els.editPrompt.value.trim());
+  const rawPrompt = els.editPrompt.value.trim();
+  const prompt = applyNameToPrompt(rawPrompt);
   if (!prompt || !/^[\w.-]{1,64}$/.test(model)) return;
+
+  // {NAME} タグがあるのに名前欄が空のときだけ、置換されないまま送ってよいか確認する
+  if (rawPrompt.includes('{NAME}') && els.nameInput.value.trim() === '') {
+    const ok = confirm('プロンプトに {NAME} が含まれていますが、名前欄が空です。\n置換せずにこのまま送信しますか？');
+    if (!ok) return;
+  }
 
   setEditError('');
   hideResult();
@@ -1132,6 +1155,11 @@ function initForm() {
     opt.value = b.id;
     opt.textContent = b.name;
     els.botSelect.appendChild(opt);
+  }
+  for (const n of NAME_PRESETS) {
+    const opt = document.createElement('option');
+    opt.value = n;
+    els.namePresets.appendChild(opt);
   }
   restoreForm();
   updateBotFields();
