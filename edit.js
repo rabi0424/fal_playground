@@ -63,6 +63,7 @@ const els = {
   dimBadge: $('#dimBadge'),
   editPrompt: $('#editPrompt'),
   promptPreview: $('#promptPreview'),
+  nameInput: $('#nameInput'),
   botSelect: $('#botSelect'),
   customBotField: $('#customBotField'),
   customBot: $('#customBot'),
@@ -782,6 +783,13 @@ function createOverlay(cropCanvas, aiImgEl) {
 
 /* ---------- pipeline ---------- */
 
+// プロンプト中の {NAME}（カッコ含む）を名前欄の入力で置換する。
+// 名前が未入力のときは置換せずそのまま送る
+function applyNameToPrompt(prompt) {
+  const name = els.nameInput.value.trim();
+  return name ? prompt.replaceAll('{NAME}', name) : prompt;
+}
+
 function currentBot() {
   return BOTS.find((b) => b.id === els.botSelect.value) || BOTS[0];
 }
@@ -843,7 +851,7 @@ async function execute() {
   if (running || !img || !hasSel) return;
   const bot = currentBot();
   const model = currentModel();
-  const prompt = els.editPrompt.value.trim();
+  const prompt = applyNameToPrompt(els.editPrompt.value.trim());
   if (!prompt || !/^[\w.-]{1,64}$/.test(model)) return;
 
   setEditError('');
@@ -1030,6 +1038,7 @@ async function resumeJob() {
 function saveForm() {
   localStorage.setItem(LS_FORM, JSON.stringify({
     prompt: els.editPrompt.value,
+    name: els.nameInput.value,
     bot: els.botSelect.value,
     customBot: els.customBot.value,
     quality: els.qualitySelect.value,
@@ -1047,6 +1056,7 @@ function restoreForm() {
   } catch { /* 壊れていたら既定値のまま */ }
   if (!saved) return;
   if (typeof saved.prompt === 'string') els.editPrompt.value = saved.prompt;
+  if (typeof saved.name === 'string') els.nameInput.value = saved.name;
   if (BOTS.some((b) => b.id === saved.bot)) els.botSelect.value = saved.bot;
   if (typeof saved.customBot === 'string') els.customBot.value = saved.customBot;
   if (['low', 'medium', 'high'].includes(saved.quality)) els.qualitySelect.value = saved.quality;
@@ -1133,6 +1143,7 @@ function initForm() {
   els.customBot.addEventListener('input', () => { updateExecState(); saveForm(); });
   els.qualitySelect.addEventListener('change', saveForm);
   els.editPrompt.addEventListener('input', () => { updateExecState(); updatePromptPreview(); saveForm(); });
+  els.nameInput.addEventListener('input', saveForm);
   els.blendSlider.addEventListener('input', () => { els.blendVal.textContent = els.blendSlider.value; saveForm(); });
   els.colorSlider.addEventListener('input', () => { els.colorVal.textContent = els.colorSlider.value; saveForm(); });
 }
