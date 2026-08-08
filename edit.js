@@ -11,6 +11,23 @@ const BOTS = [
   { id: '__custom__', name: 'カスタム…' },
 ];
 
+// 名前欄の初期候補（アルファベット順）。datalist なので入力で絞り込まれ、
+// 自由入力もできる。候補は固定で、過去の入力が増えていくことはない
+const NAME_PRESETS = [
+  'Asher Angel',
+  'Chris Pratt',
+  'Henry Cavill',
+  'Jaehyun (NCT)',
+  'Jay (ENHYPEN)',
+  'Jeno (NCT)',
+  'Robert Pattinson',
+  'Taeyong (NCT)',
+  'Tom Holland',
+  'Vinnie Hacker',
+  '新田真剣佑',
+  '吉沢亮',
+];
+
 // 選択枠の比率プリセット。orient（縦/横）で w:h を入れ替えて使う
 const RATIOS = {
   free: null,
@@ -63,6 +80,8 @@ const els = {
   dimBadge: $('#dimBadge'),
   editPrompt: $('#editPrompt'),
   promptPreview: $('#promptPreview'),
+  nameInput: $('#nameInput'),
+  namePresets: $('#namePresets'),
   botSelect: $('#botSelect'),
   customBotField: $('#customBotField'),
   customBot: $('#customBot'),
@@ -86,6 +105,10 @@ const els = {
   dlCrop: $('#dlCrop'),
   dlAi: $('#dlAi'),
   dlOverlay: $('#dlOverlay'),
+  gallery: $('#gallery'),
+  lightbox: $('#lightbox'),
+  lightboxClose: $('#lightboxClose'),
+  lightboxCounter: $('#lightboxCounter'),
 };
 
 function sleep(ms) {
@@ -782,6 +805,13 @@ function createOverlay(cropCanvas, aiImgEl) {
 
 /* ---------- pipeline ---------- */
 
+// プロンプト中の {NAME}（カッコ含む）を名前欄の入力で置換する。
+// 名前が未入力のときは置換せずそのまま送る
+function applyNameToPrompt(prompt) {
+  const name = els.nameInput.value.trim();
+  return name ? prompt.replaceAll('{NAME}', name) : prompt;
+}
+
 function currentBot() {
   return BOTS.find((b) => b.id === els.botSelect.value) || BOTS[0];
 }
@@ -843,8 +873,15 @@ async function execute() {
   if (running || !img || !hasSel) return;
   const bot = currentBot();
   const model = currentModel();
-  const prompt = els.editPrompt.value.trim();
+  const rawPrompt = els.editPrompt.value.trim();
+  const prompt = applyNameToPrompt(rawPrompt);
   if (!prompt || !/^[\w.-]{1,64}$/.test(model)) return;
+
+  // {NAME} タグがあるのに名前欄が空のときだけ、置換されないまま送ってよいか確認する
+  if (rawPrompt.includes('{NAME}') && els.nameInput.value.trim() === '') {
+    const ok = confirm('プロンプトに {NAME} が含まれていますが、名前欄が空です。\n置換せずにこのまま送信しますか？');
+    if (!ok) return;
+  }
 
   setEditError('');
   hideResult();
@@ -955,6 +992,9 @@ async function awaitAndComposite(job) {
   } catch {
     // 履歴保存の失敗は結果表示を妨げない（画像自体は R2 に保存済み）
   }
+  // 下部の履歴ギャラリーにも即時反映する
+  historyItems = [record, ...historyItems.filter((r) => r.id !== record.id)];
+  renderGallery();
 
   localStorage.removeItem(LS_JOB);
   setStatus('');
@@ -963,6 +1003,173 @@ async function awaitAndComposite(job) {
     aiUrl: result.url,
     cropUri: cropCanvas.toDataURL('image/png'),
     overlayUri: overlayCanvas.toDataURL('image/png'),
+  });
+}
+
+/* ---------- history gallery（トップと同じサーバー履歴を表示） ---------- */
+
+let historyItems = [];
+
+// R2 反映直後などで読めないことがあるので軽くリトライする（app.js と同じ）
+function loadThumb(imgEl, url, maxRetries = 5) {
+  if (!url) { imgEl.src = ''; return; }
+  let attempts = 0;
+  imgEl.addEventListener('error', () => {
+    if (attempts >= maxRetries) return;
+    attempts += 1;
+    setTimeout(() => {
+      imgEl.removeAttribute('src');
+      imgEl.src = url;
+    }, 400 * attempts);
+  });
+  imgEl.src = url;
+}
+
+function galleryThumbUrl(record) {
+  if (record.type === 'compare') {
+    return record.variants?.find((v) => v.images?.length)?.images[0]?.url ?? '';
+  }
+  return record.images?.[0]?.url ?? '';
+}
+
+// 拡大表示に使う URL 一覧（←/→・スワイプで切替できる）
+function galleryImageUrls(record) {
+  if (record.type === 'compare') {
+    return (record.variants ?? []).flatMap((v) => (v.images ?? []).map((i) => i.url));
+  }
+  return (record.images ?? []).map((i) => i.url);
+}
+
+async function fetchHistory() {
+  let res;
+  try {
+    res = await fetch('/api/history');
+  } catch {
+    return; // オフラインなどは表示中のまま
+  }
+  if (!res.ok || isHtmlResponse(res)) return;
+  const list = await res.json().catch(() => null);
+  if (!Array.isArray(list)) return;
+  historyItems = list;
+  renderGallery();
+}
+
+function renderGallery() {
+  els.gallery.innerHTML = '';
+
+  if (historyItems.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'gallery-empty';
+    empty.textContent = 'まだ履歴はありません';
+    els.gallery.appendChild(empty);
+    return;
+  }
+
+  for (const record of historyItems) {
+    const item = document.createElement('div');
+    item.className = 'gallery-item';
+
+    const thumb = document.createElement('img');
+    thumb.className = 'thumb';
+    thumb.alt = record.prompt ?? '';
+    thumb.loading = 'lazy';
+    loadThumb(thumb, galleryThumbUrl(record));
+    thumb.addEventListener('click', () => openLightbox(galleryImageUrls(record)));
+    item.appendChild(thumb);
+
+    const body = document.createElement('div');
+    body.className = 'body';
+
+    const promptText = document.createElement('div');
+    promptText.className = 'prompt-text';
+    promptText.textContent = record.prompt ?? '';
+    promptText.title = record.prompt ?? '';
+    body.appendChild(promptText);
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = (record.model ?? '').replace(/^fal-ai\//, '');
+    body.appendChild(meta);
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'ghost-btn small';
+    deleteBtn.textContent = '削除';
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      historyItems = historyItems.filter((r) => r.id !== record.id);
+      fetch(`/api/history/${encodeURIComponent(record.id)}`, { method: 'DELETE' }).catch(() => {});
+      renderGallery();
+    });
+    actions.appendChild(deleteBtn);
+    body.appendChild(actions);
+
+    item.appendChild(body);
+    els.gallery.appendChild(item);
+  }
+}
+
+/* ---------- lightbox（app.js の簡略版） ---------- */
+
+let lightboxUrls = [];
+let lightboxIndex = 0;
+
+function openLightbox(urls, index = 0) {
+  lightboxUrls = Array.isArray(urls) ? urls : [urls];
+  if (lightboxUrls.length === 0) return;
+  lightboxIndex = index;
+  showLightboxImage();
+  els.lightbox.hidden = false;
+}
+
+function showLightboxImage() {
+  els.lightbox.querySelector('img').src = lightboxUrls[lightboxIndex] ?? '';
+  els.lightboxCounter.hidden = lightboxUrls.length < 2;
+  els.lightboxCounter.textContent = `${lightboxIndex + 1} / ${lightboxUrls.length}`;
+}
+
+function lightboxNav(dir) {
+  if (lightboxUrls.length < 2) return;
+  lightboxIndex = (lightboxIndex + dir + lightboxUrls.length) % lightboxUrls.length;
+  showLightboxImage();
+}
+
+function closeLightbox() {
+  els.lightbox.hidden = true;
+  els.lightbox.querySelector('img').src = '';
+}
+
+let lightboxTouchX = 0;
+let lightboxTouchY = 0;
+let lightboxSwiped = false;
+
+function initLightbox() {
+  els.lightbox.addEventListener('click', () => {
+    if (lightboxSwiped) { lightboxSwiped = false; return; }
+    closeLightbox();
+  });
+  els.lightboxClose.addEventListener('click', closeLightbox);
+
+  // 横スワイプで前後の画像へ（縦方向の動きが主ならスクロールとみなして無視）
+  els.lightbox.addEventListener('touchstart', (e) => {
+    lightboxTouchX = e.touches[0].clientX;
+    lightboxTouchY = e.touches[0].clientY;
+  }, { passive: true });
+  els.lightbox.addEventListener('touchend', (e) => {
+    const dx = e.changedTouches[0].clientX - lightboxTouchX;
+    const dy = e.changedTouches[0].clientY - lightboxTouchY;
+    if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
+      lightboxSwiped = true;
+      lightboxNav(dx < 0 ? 1 : -1);
+    }
+  }, { passive: true });
+
+  document.addEventListener('keydown', (e) => {
+    if (els.lightbox.hidden) return;
+    if (e.key === 'Escape') closeLightbox();
+    else if (e.key === 'ArrowRight') { e.preventDefault(); lightboxNav(1); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); lightboxNav(-1); }
   });
 }
 
@@ -1030,6 +1237,7 @@ async function resumeJob() {
 function saveForm() {
   localStorage.setItem(LS_FORM, JSON.stringify({
     prompt: els.editPrompt.value,
+    name: els.nameInput.value,
     bot: els.botSelect.value,
     customBot: els.customBot.value,
     quality: els.qualitySelect.value,
@@ -1047,6 +1255,7 @@ function restoreForm() {
   } catch { /* 壊れていたら既定値のまま */ }
   if (!saved) return;
   if (typeof saved.prompt === 'string') els.editPrompt.value = saved.prompt;
+  if (typeof saved.name === 'string') els.nameInput.value = saved.name;
   if (BOTS.some((b) => b.id === saved.bot)) els.botSelect.value = saved.bot;
   if (typeof saved.customBot === 'string') els.customBot.value = saved.customBot;
   if (['low', 'medium', 'high'].includes(saved.quality)) els.qualitySelect.value = saved.quality;
@@ -1123,6 +1332,11 @@ function initForm() {
     opt.textContent = b.name;
     els.botSelect.appendChild(opt);
   }
+  for (const n of NAME_PRESETS) {
+    const opt = document.createElement('option');
+    opt.value = n;
+    els.namePresets.appendChild(opt);
+  }
   restoreForm();
   updateBotFields();
   updatePromptPreview();
@@ -1133,6 +1347,7 @@ function initForm() {
   els.customBot.addEventListener('input', () => { updateExecState(); saveForm(); });
   els.qualitySelect.addEventListener('change', saveForm);
   els.editPrompt.addEventListener('input', () => { updateExecState(); updatePromptPreview(); saveForm(); });
+  els.nameInput.addEventListener('input', saveForm);
   els.blendSlider.addEventListener('input', () => { els.blendVal.textContent = els.blendSlider.value; saveForm(); });
   els.colorSlider.addEventListener('input', () => { els.colorVal.textContent = els.colorSlider.value; saveForm(); });
 }
@@ -1200,7 +1415,11 @@ initTheme();
 initForm();
 initUpload();
 initSelection();
+initLightbox();
 els.btnExec.addEventListener('click', execute);
 updateOrientVis();
 updateExecState();
 restoreWorkspace();
+fetchHistory();
+// タブに戻ってきたら他画面・他端末での変更を取り込む
+document.addEventListener('visibilitychange', () => { if (!document.hidden) fetchHistory(); });

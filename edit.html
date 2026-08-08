@@ -66,6 +66,11 @@
           <textarea id="editPrompt" rows="4" placeholder="選択した範囲をどう編集するか英語で記述..." spellcheck="false"></textarea>
         </div>
       </details>
+      <label class="field">
+        <span class="label">名前 <em>（プロンプト中の {NAME} をこの名前で置換して送信します）</em></span>
+        <input id="nameInput" type="text" list="namePresets" placeholder="例: Tom Holland" spellcheck="false">
+        <datalist id="namePresets"></datalist>
+      </label>
       <div class="row">
         <label class="field">
           <span class="label">AI モデル（Poe ボット）</span>
@@ -139,7 +144,20 @@
     </div>
 
   </section>
+
+  <section class="gallery-section">
+    <div class="gallery-head">
+      <h2>履歴</h2>
+    </div>
+    <div id="gallery" class="gallery"></div>
+  </section>
 </main>
+
+<div id="lightbox" class="lightbox" hidden>
+  <button id="lightboxClose" class="lightbox-close mobile-only" type="button" aria-label="閉じる">✕</button>
+  <img alt="">
+  <div id="lightboxCounter" class="lightbox-counter mobile-only" hidden></div>
+</div>
 
 <script src="edit.js"></script>
 </body>
