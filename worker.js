@@ -27,6 +27,157 @@ const POE_API_URL = 'https://api.poe.com/v1/chat/completions';
 // /api/upload で受け付ける画像の上限（デコード後のバイト数）
 const UPLOAD_MAX_BYTES = 40 * 1024 * 1024;
 
+/* ---------- Civitai → Hugging Face LoRA 取り込み ---------- */
+// Civitai のモデルページ URL / ダウンロード URL から LoRA をダウンロードし、
+// R2 に一時保存 → Hugging Face リポジトリへ LFS アップロード → コミットする。
+// 処理は他のジョブと同じく Durable Object の alarm でサーバー側完結
+//（ただし生成ジョブのポーリングを妨げないよう専用の DO インスタンスで動かす）。
+// 必要な Secret: HF_TOKEN（write 権限）、CIVITAI_TOKEN（DL はほぼログイン必須）
+
+const HF_BASE = 'https://huggingface.co';
+// civitai.com と既知のミラー（civitai.red 系）を許可する
+const CIVITAI_HOSTS = /(^|\.)(civitai\.(com|red)|civitaired\.\w+)$/;
+const LORA_STAGING_PREFIX = 'lora-staging/';
+const LORA_IMPORT_MAX_ATTEMPTS = 4; // ジョブ全体の実行回数上限（途中断は続きから再開する）
+const LORA_MAX_BYTES = 4 * 1024 * 1024 * 1024; // 4GB。LoRA としては十分すぎる上限
+
+// Civitai の URL を解釈する。対応形式:
+//   https://civitai.com/models/{modelId}(?modelVersionId={vid})
+//   https://civitai.com/api/download/models/{vid}(?...)
+function civitaiParseUrl(raw) {
+  let u;
+  try {
+    u = new URL(String(raw ?? ''));
+  } catch {
+    return null;
+  }
+  if (u.protocol !== 'https:' || !CIVITAI_HOSTS.test(u.hostname)) return null;
+  let m = u.pathname.match(/^\/api\/download\/models\/(\d+)/);
+  if (m) return { origin: u.origin, versionId: m[1], directUrl: u.toString() };
+  m = u.pathname.match(/^\/models\/(\d+)/);
+  if (m) {
+    const vid = u.searchParams.get('modelVersionId');
+    return { origin: u.origin, modelId: m[1], versionId: /^\d+$/.test(vid ?? '') ? vid : null };
+  }
+  return null;
+}
+
+// Civitai 公開 API の呼び出し。ミラー URL が渡された場合はそのホストを試した後
+// 本家 civitai.com にフォールバックする（ミラーの API 互換性が不明なため）
+async function civitaiApi(path, origin, env) {
+  const headers = { 'User-Agent': 'fal-playground' };
+  if (env.CIVITAI_TOKEN) headers.Authorization = `Bearer ${env.CIVITAI_TOKEN}`;
+  const origins = [...new Set([origin, 'https://civitai.com'])];
+  let lastErr;
+  for (const o of origins) {
+    try {
+      const res = await fetch(`${o}/api/v1${path}`, { headers });
+      if (res.ok) return await res.json();
+      lastErr = new Error(`Civitai API error ${res.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
+// HF のファイルパスとして安全な名前に整える（.safetensors を保証する）
+function sanitizeLoraFileName(name) {
+  let s = String(name ?? '').replace(/[^\w.-]+/g, '_').replace(/^[_.]+/, '').slice(0, 200);
+  s = s.replace(/\.safetensors$/i, '');
+  if (!s.replace(/[_.-]/g, '')) s = 'civitai-model'; // 非 ASCII 名などで空になった場合
+  return `${s}.safetensors`;
+}
+
+// URL からモデル情報とダウンロード対象ファイルを解決する。
+// ダウンロード URL 直指定でメタデータが取れない場合は最小限の情報で返す
+//（ファイル名は DL 時の Content-Disposition で補う）
+async function civitaiResolve(rawUrl, env) {
+  const parsed = civitaiParseUrl(rawUrl);
+  if (!parsed) {
+    throw new Error('URL を解釈できません（civitai.com のモデルページ URL またはダウンロード URL を入力してください）');
+  }
+  let version = null;
+  try {
+    if (parsed.versionId) {
+      version = await civitaiApi(`/model-versions/${parsed.versionId}`, parsed.origin, env);
+    } else {
+      const model = await civitaiApi(`/models/${parsed.modelId}`, parsed.origin, env);
+      version = model?.modelVersions?.[0] ?? null;
+      if (!version) throw new Error('モデルバージョンが見つかりません');
+      // /models/{id} の応答内バージョンには model 情報が無いので補う
+      version.model = { name: model.name, type: model.type };
+    }
+  } catch (err) {
+    // ダウンロード URL 直指定ならメタデータなしで続行できる
+    if (!parsed.directUrl) throw err;
+  }
+
+  if (!version) {
+    return {
+      versionId: parsed.versionId,
+      modelName: null,
+      modelType: null,
+      versionName: null,
+      baseModel: null,
+      fileName: null,
+      sizeKB: null,
+      sha256: null,
+      downloadUrl: parsed.directUrl,
+      metaWarning: 'メタデータを取得できませんでした（ファイル名・ハッシュ検証なしで取り込みます）',
+    };
+  }
+
+  const files = version.files ?? [];
+  const file = files.find((f) => f.primary)
+    ?? files.find((f) => f.metadata?.format === 'SafeTensor')
+    ?? files[0];
+  if (!file) throw new Error('このバージョンにダウンロード可能なファイルがありません');
+
+  return {
+    versionId: String(version.id ?? parsed.versionId ?? ''),
+    modelName: version.model?.name ?? null,
+    modelType: version.model?.type ?? null,
+    versionName: version.name ?? null,
+    baseModel: version.baseModel ?? null,
+    fileName: sanitizeLoraFileName(file.name),
+    sizeKB: file.sizeKB ?? null,
+    sha256: (file.hashes?.SHA256 ?? '').toLowerCase() || null,
+    downloadUrl: parsed.directUrl ?? file.downloadUrl
+      ?? `${parsed.origin}/api/download/models/${version.id}`,
+    metaWarning: null,
+  };
+}
+
+function hfAuthHeaders(env) {
+  return env.HF_TOKEN ? { Authorization: `Bearer ${env.HF_TOKEN}` } : {};
+}
+
+// HF リポジトリのファイル一覧（LFS の oid 付き）。expand 付きの応答はページング
+// されるので Link ヘッダの rel="next" を辿って全件集める。
+// 失敗時は { status } を投げる（404 = リポジトリなし等をルート側で区別するため）
+async function fetchHfTree(repo, env) {
+  const entries = [];
+  let next = `${HF_BASE}/api/models/${repo}/tree/main?recursive=true&expand=true`;
+  for (let page = 0; page < 20 && next; page++) {
+    const res = await fetch(next, {
+      headers: { 'User-Agent': 'fal-playground', ...hfAuthHeaders(env) },
+    });
+    if (!res.ok) {
+      if (entries.length > 0) break; // 途中で失敗したら取れた分だけ返す
+      const err = new Error(`HF tree error ${res.status}`);
+      err.status = res.status;
+      err.body = await res.text();
+      throw err;
+    }
+    const batch = await res.json();
+    if (Array.isArray(batch)) entries.push(...batch);
+    const link = res.headers.get('Link') || '';
+    next = link.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
+  }
+  return entries;
+}
+
 /* ---------- PNG メタデータ焼き込み ---------- */
 // 生成設定の JSON を PNG の iTXt チャンクとして埋め込む（ComfyUI がワークフローを
 // 画像に焼き込むのと同じ発想）。ダウンロードした画像ファイルだけから設定を確認できる
@@ -271,14 +422,17 @@ export class SyncState extends DurableObject {
     };
   }
 
-  // 未完了ジョブを順に処理する（順次実行なので Modal 側のウォーム状態も保ちやすい）
+  // 未完了ジョブを順に処理する（順次実行なので Modal 側のウォーム状態も保ちやすい）。
+  // lora:job: は数分かかりうるため専用の DO インスタンス（'lora-import'）にのみ
+  // 登録され、singleton 側の生成ジョブのポーリングを妨げない
   async alarm() {
     let pendingLeft = false;
-    for (const prefix of ['krea2:job:', 'poe:job:']) {
+    for (const prefix of ['krea2:job:', 'poe:job:', 'lora:job:']) {
       const jobs = await this.ctx.storage.list({ prefix });
       for (const [key, job] of jobs) {
         if (job.status !== 'pending') continue;
         if (prefix === 'poe:job:') await this.runPoeJob(key, job);
+        else if (prefix === 'lora:job:') await this.runLoraImportJob(key, job);
         else await this.runKrea2Job(key, job);
         const after = await this.ctx.storage.get(key);
         if (after?.status === 'pending') pendingLeft = true;
@@ -506,6 +660,339 @@ export class SyncState extends DurableObject {
       'Modal-Secret': this.env.MODAL_PROXY_SECRET,
     };
   }
+
+  /* ---- Civitai → HF LoRA 取り込みジョブ ---- */
+  // 専用 DO インスタンス（'lora-import'）で動く前提。ステップごとに進捗を保存し、
+  // 途中で落ちても次の alarm で続きから再開する（download は最初からやり直し）
+
+  async startLoraImport(id, sourceUrl, repo) {
+    const key = `lora:job:${id}`;
+    if (await this.ctx.storage.get(key)) return; // 同 id の再送は無視（多重取り込み防止）
+
+    const jobs = await this.ctx.storage.list({ prefix: 'lora:job:' });
+    for (const [k, j] of jobs) {
+      if (Date.now() - j.created > JOB_TTL_MS) await this.ctx.storage.delete(k);
+    }
+    // 取り残された一時ファイルの掃除（失敗ジョブの分など）
+    try {
+      const staged = await this.env.IMAGES.list({ prefix: LORA_STAGING_PREFIX });
+      for (const obj of staged.objects) {
+        if (Date.now() - obj.uploaded.getTime() > 24 * 60 * 60 * 1000) {
+          await this.env.IMAGES.delete(obj.key);
+        }
+      }
+    } catch { /* 掃除の失敗は無視 */ }
+
+    await this.ctx.storage.put(key, {
+      status: 'pending',
+      step: 'resolve',
+      sourceUrl,
+      repo,
+      meta: null,
+      size: null,
+      sha256: null,
+      etags: {},
+      attempts: 0,
+      created: Date.now(),
+    });
+    if ((await this.ctx.storage.getAlarm()) === null) {
+      await this.ctx.storage.setAlarm(Date.now() + 50);
+    }
+  }
+
+  async getLoraImport(id) {
+    const job = await this.ctx.storage.get(`lora:job:${id}`);
+    if (!job) return null;
+    return {
+      status: job.status,
+      step: job.step,
+      fileName: job.meta?.fileName ?? null,
+      hfUrl: job.hfUrl ?? null,
+      skipped: job.skipped ?? false,
+      error: job.error ?? null,
+    };
+  }
+
+  async failLoraImport(key, job, message) {
+    job.status = 'error';
+    job.error = message;
+    await this.ctx.storage.put(key, job);
+    await this.deleteLoraStaging(key);
+  }
+
+  async deleteLoraStaging(key) {
+    try {
+      await this.env.IMAGES.delete(`${LORA_STAGING_PREFIX}${key.slice('lora:job:'.length)}`);
+    } catch { /* 消せなくても 24h 後の掃除で回収される */ }
+  }
+
+  // ステップを進められるだけ進める。ネットワーク断などの例外は pending のまま抜けて
+  // 次の alarm で再試行する（attempts 上限で打ち切り）
+  async runLoraImportJob(key, job) {
+    try {
+      if (job.attempts >= LORA_IMPORT_MAX_ATTEMPTS) {
+        await this.failLoraImport(key, job, '取り込みを完了できませんでした（エラーが続いています）');
+        return;
+      }
+      job.attempts += 1;
+      await this.ctx.storage.put(key, job);
+
+      while (job.status === 'pending') {
+        if (job.step === 'resolve') await this.loraStepResolve(key, job);
+        else if (job.step === 'download') await this.loraStepDownload(key, job);
+        else if (job.step === 'upload') await this.loraStepUpload(key, job);
+        else if (job.step === 'commit') await this.loraStepCommit(key, job);
+        else {
+          await this.failLoraImport(key, job, `不明なステップです: ${job.step}`);
+          return;
+        }
+      }
+    } catch {
+      // pending のまま次の alarm で再試行
+    }
+  }
+
+  // メタデータ解決と、アップロード済みチェック（同一 SHA256 が既にあれば登録だけで済む）
+  async loraStepResolve(key, job) {
+    job.meta = await civitaiResolve(job.sourceUrl, this.env);
+
+    let tree;
+    try {
+      tree = await fetchHfTree(job.repo, this.env);
+    } catch (err) {
+      if (err.status === 401 || err.status === 404) {
+        await this.failLoraImport(key, job,
+          `アップロード先リポジトリ ${job.repo} にアクセスできません（HTTP ${err.status}。ID の誤りか、HF_TOKEN の権限不足です）`);
+        return;
+      }
+      throw err; // ネットワーク断などは再試行
+    }
+    if (job.meta.sha256) {
+      const hit = tree.find((e) => e.type === 'file' && e.lfs?.oid === job.meta.sha256);
+      if (hit) {
+        job.status = 'done';
+        job.skipped = true;
+        job.meta.fileName = hit.path;
+        job.hfUrl = `${HF_BASE}/${job.repo}/resolve/main/${encodeURIComponent(hit.path)}`;
+        await this.ctx.storage.put(key, job);
+        return;
+      }
+    }
+    job.step = 'download';
+    await this.ctx.storage.put(key, job);
+  }
+
+  // Civitai からダウンロードして R2 に一時保存しつつ SHA256 を計算する。
+  // 認可ヘッダは civitai 系ホストにのみ付け、S3 等へのリダイレクト先には渡さない
+  async loraStepDownload(key, job) {
+    let dlUrl = job.meta.downloadUrl;
+    let res = null;
+    for (let hop = 0; hop < 5; hop++) {
+      const headers = { 'User-Agent': 'fal-playground' };
+      if (this.env.CIVITAI_TOKEN && CIVITAI_HOSTS.test(new URL(dlUrl).hostname)) {
+        headers.Authorization = `Bearer ${this.env.CIVITAI_TOKEN}`;
+      }
+      res = await fetch(dlUrl, { headers, redirect: 'manual' });
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get('Location');
+        if (!loc) break;
+        dlUrl = new URL(loc, dlUrl).toString();
+        continue;
+      }
+      break;
+    }
+    if (res.status === 401 || res.status === 403) {
+      await this.failLoraImport(key, job,
+        'Civitai がダウンロードを拒否しました（CIVITAI_TOKEN が未設定・無効か、Early Access 中のモデルです）');
+      return;
+    }
+    if (!res.ok) {
+      await this.failLoraImport(key, job, `Civitai からのダウンロードに失敗しました（HTTP ${res.status}）`);
+      return;
+    }
+
+    const size = Number(res.headers.get('Content-Length'));
+    if (!Number.isFinite(size) || size <= 0) {
+      await this.failLoraImport(key, job, 'ダウンロード応答にサイズ情報がなく取り込めません');
+      return;
+    }
+    if (size > LORA_MAX_BYTES) {
+      await this.failLoraImport(key, job, `ファイルが大きすぎます（${(size / 1024 ** 3).toFixed(1)} GB）`);
+      return;
+    }
+    if (!job.meta.fileName) {
+      const cd = res.headers.get('Content-Disposition') || '';
+      const m = cd.match(/filename\*?="?([^";]+)"?/);
+      let name = m ? m[1].replace(/^UTF-8''/i, '') : `civitai-${job.meta.versionId ?? 'model'}`;
+      try {
+        name = decodeURIComponent(name);
+      } catch { /* エンコードが壊れていればそのまま使う */ }
+      job.meta.fileName = sanitizeLoraFileName(name);
+    }
+
+    // R2 への保存と SHA256 計算を 1 パスで行う。DigestStream への write を
+    // TransformStream 内で await することで、バッファを溜めずに両者へ流す
+    const digester = new crypto.DigestStream('SHA-256');
+    const writer = digester.getWriter();
+    const stream = res.body
+      .pipeThrough(new TransformStream({
+        async transform(chunk, controller) {
+          await writer.write(chunk);
+          controller.enqueue(chunk);
+        },
+        async flush() {
+          await writer.close();
+        },
+      }))
+      .pipeThrough(new FixedLengthStream(size));
+    await this.env.IMAGES.put(`${LORA_STAGING_PREFIX}${key.slice('lora:job:'.length)}`, stream);
+
+    const sha256 = [...new Uint8Array(await digester.digest)]
+      .map((b) => b.toString(16).padStart(2, '0')).join('');
+    if (job.meta.sha256 && sha256 !== job.meta.sha256) {
+      await this.failLoraImport(key, job, 'ダウンロードしたファイルの SHA256 が Civitai の公称値と一致しません');
+      return;
+    }
+    job.size = size;
+    job.sha256 = sha256;
+    job.step = 'upload';
+    await this.ctx.storage.put(key, job);
+  }
+
+  // HF の LFS プロトコルでアップロードする: batch API で転送先を取得し、
+  // multipart（応答 header の chunk_size + 連番 URL）なら分割 PUT + 完了通知、
+  // そうでなければ単発 PUT。verify アクションがあれば最後に呼ぶ
+  async loraStepUpload(key, job) {
+    const stagingKey = `${LORA_STAGING_PREFIX}${key.slice('lora:job:'.length)}`;
+    const lfsHeaders = {
+      Accept: 'application/vnd.git-lfs+json',
+      'Content-Type': 'application/vnd.git-lfs+json',
+      ...hfAuthHeaders(this.env),
+    };
+    const batchRes = await fetch(`${HF_BASE}/${job.repo}.git/info/lfs/objects/batch`, {
+      method: 'POST',
+      headers: lfsHeaders,
+      body: JSON.stringify({
+        operation: 'upload',
+        transfers: ['basic', 'multipart'],
+        objects: [{ oid: job.sha256, size: job.size }],
+        hash_algo: 'sha256',
+      }),
+    });
+    if (!batchRes.ok) {
+      if (batchRes.status >= 400 && batchRes.status < 500) {
+        await this.failLoraImport(key, job,
+          `Hugging Face LFS API がリクエストを拒否しました（HTTP ${batchRes.status}: ${(await batchRes.text()).slice(0, 200)}）`);
+        return;
+      }
+      throw new Error(`LFS batch error ${batchRes.status}`);
+    }
+    const object = (await batchRes.json())?.objects?.[0];
+    if (object?.error) {
+      await this.failLoraImport(key, job, `Hugging Face LFS error: ${object.error.message ?? 'unknown'}`);
+      return;
+    }
+
+    const upload = object?.actions?.upload;
+    if (upload) {
+      const header = upload.header ?? {};
+      const chunkSize = Number(header.chunk_size);
+      if (Number.isFinite(chunkSize) && chunkSize > 0) {
+        // multipart: header の連番キーが各パートの PUT 先 URL
+        const parts = Object.keys(header)
+          .filter((k) => /^\d+$/.test(k))
+          .sort((a, b) => Number(a) - Number(b));
+        for (const part of parts) {
+          if (job.etags[part]) continue; // 再開時はアップロード済みパートを飛ばす
+          const offset = (Number(part) - 1) * chunkSize;
+          const length = Math.min(chunkSize, job.size - offset);
+          const obj = await this.env.IMAGES.get(stagingKey, { range: { offset, length } });
+          if (!obj) {
+            // 一時ファイルが消えている（R2 掃除など）。download からやり直す
+            job.step = 'download';
+            job.etags = {};
+            await this.ctx.storage.put(key, job);
+            return;
+          }
+          const putRes = await fetch(header[part], {
+            method: 'PUT',
+            body: obj.body.pipeThrough(new FixedLengthStream(length)),
+          });
+          if (!putRes.ok) throw new Error(`part ${part} upload error ${putRes.status}`);
+          job.etags[part] = putRes.headers.get('ETag') ?? '';
+          await this.ctx.storage.put(key, job); // パートごとに進捗を保存して再開可能にする
+        }
+        const completeRes = await fetch(upload.href, {
+          method: 'POST',
+          headers: lfsHeaders,
+          body: JSON.stringify({
+            oid: job.sha256,
+            parts: parts.map((p) => ({ partNumber: Number(p), etag: job.etags[p] })),
+          }),
+        });
+        if (!completeRes.ok) throw new Error(`multipart complete error ${completeRes.status}`);
+      } else {
+        // basic: 応答の header をそのまま付けて単発 PUT
+        const obj = await this.env.IMAGES.get(stagingKey);
+        if (!obj) {
+          job.step = 'download';
+          await this.ctx.storage.put(key, job);
+          return;
+        }
+        const putRes = await fetch(upload.href, {
+          method: 'PUT',
+          headers: { ...header },
+          body: obj.body.pipeThrough(new FixedLengthStream(job.size)),
+        });
+        if (!putRes.ok) throw new Error(`upload error ${putRes.status}`);
+      }
+
+      const verify = object.actions?.verify;
+      if (verify) {
+        const verifyRes = await fetch(verify.href, {
+          method: 'POST',
+          headers: { ...lfsHeaders, ...(verify.header ?? {}) },
+          body: JSON.stringify({ oid: job.sha256, size: job.size }),
+        });
+        if (!verifyRes.ok) throw new Error(`verify error ${verifyRes.status}`);
+      }
+    }
+    // actions が無い場合は同一オブジェクトがサーバー側に既にある（コミットだけでよい）
+
+    job.step = 'commit';
+    await this.ctx.storage.put(key, job);
+  }
+
+  // commit API（NDJSON）で LFS ポインタをリポジトリに記録して完了
+  async loraStepCommit(key, job) {
+    const summaryName = job.meta.modelName
+      ? `${job.meta.modelName}${job.meta.versionName ? ` (${job.meta.versionName})` : ''}`
+      : job.meta.fileName;
+    const lines = [
+      { key: 'header', value: { summary: `Upload ${summaryName} from Civitai` } },
+      {
+        key: 'lfsFile',
+        value: { path: job.meta.fileName, algo: 'sha256', oid: job.sha256, size: job.size },
+      },
+    ];
+    const res = await fetch(`${HF_BASE}/api/models/${job.repo}/commit/main`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-ndjson', ...hfAuthHeaders(this.env) },
+      body: lines.map((l) => JSON.stringify(l)).join('\n'),
+    });
+    if (!res.ok) {
+      if (res.status >= 400 && res.status < 500) {
+        await this.failLoraImport(key, job,
+          `Hugging Face へのコミットに失敗しました（HTTP ${res.status}: ${(await res.text()).slice(0, 200)}）`);
+        return;
+      }
+      throw new Error(`commit error ${res.status}`);
+    }
+    job.status = 'done';
+    job.hfUrl = `${HF_BASE}/${job.repo}/resolve/main/${encodeURIComponent(job.meta.fileName)}`;
+    await this.ctx.storage.put(key, job);
+    await this.deleteLoraStaging(key);
+  }
 }
 
 export default {
@@ -523,25 +1010,83 @@ export default {
       const repo = url.searchParams.get('repo') || '';
       if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return new Response('Invalid repo', { status: 400 });
       // expand=true で各ファイルの最終コミット日時（lastCommit.date）も取得する
-      //（クライアント側で「追加日の新しい順」に並べるため）。expand 付きの応答は
-      // ページングされるので、Link ヘッダの rel="next" を辿って全件集める
-      const entries = [];
-      let next = `https://huggingface.co/api/models/${repo}/tree/main?recursive=true&expand=true`;
-      for (let page = 0; page < 20 && next; page++) {
-        const res = await fetch(next, { headers: { 'User-Agent': 'fal-playground' } });
-        if (!res.ok) {
-          if (entries.length > 0) break; // 途中で失敗したら取れた分だけ返す
-          return new Response(res.body, {
-            status: res.status,
-            headers: { 'Content-Type': 'application/json' },
-          });
-        }
-        const batch = await res.json();
-        if (Array.isArray(batch)) entries.push(...batch);
-        const link = res.headers.get('Link') || '';
-        next = link.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
+      //（クライアント側で「追加日の新しい順」に並べるため）
+      try {
+        return Response.json(await fetchHfTree(repo, env));
+      } catch (err) {
+        return new Response(err.body ?? err.message, {
+          status: err.status ?? 502,
+          headers: { 'Content-Type': 'application/json' },
+        });
       }
-      return Response.json(entries);
+    }
+
+    // Civitai URL の事前確認（取り込みダイアログのプレビュー用）。モデル情報と、
+    // アップロード先リポジトリに同じ内容・同じ名前が既にあるかを返す
+    if (url.pathname === '/api/civitai/resolve') {
+      if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
+      const repo = url.searchParams.get('repo') || '';
+      if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return new Response('Invalid repo', { status: 400 });
+      let meta;
+      try {
+        meta = await civitaiResolve(url.searchParams.get('url'), env);
+      } catch (err) {
+        return new Response(err.message, { status: 422 });
+      }
+      let alreadyUploaded = null;
+      let nameExists = false;
+      let repoError = null;
+      try {
+        const tree = await fetchHfTree(repo, env);
+        if (meta.sha256) {
+          const hit = tree.find((e) => e.type === 'file' && e.lfs?.oid === meta.sha256);
+          if (hit) alreadyUploaded = `https://huggingface.co/${repo}/resolve/main/${encodeURIComponent(hit.path)}`;
+        }
+        nameExists = meta.fileName != null
+          && tree.some((e) => e.type === 'file' && e.path === meta.fileName);
+      } catch (err) {
+        repoError = `アップロード先リポジトリ ${repo} にアクセスできません（HTTP ${err.status ?? '?'}）`;
+      }
+      return Response.json({ ...meta, alreadyUploaded, nameExists, repoError });
+    }
+
+    // Civitai → HF 取り込みジョブの投入。ダウンロード〜アップロードは数分かかり
+    // うるので、生成ジョブとは別の DO インスタンスの alarm で処理する
+    if (url.pathname === '/api/lora-import') {
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+      if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });
+      if (!env.HF_TOKEN) {
+        return new Response('HF_TOKEN is not configured（Worker の Secret に Hugging Face の write トークンを設定してください）', { status: 500 });
+      }
+      let payload;
+      try {
+        payload = await request.json();
+      } catch {
+        return new Response('Invalid JSON', { status: 400 });
+      }
+      const { jobId, url: sourceUrl, repo } = payload ?? {};
+      if (typeof jobId !== 'string' || !/^[0-9a-f]{32}$/.test(jobId)) {
+        return new Response('jobId is required', { status: 422 });
+      }
+      if (!civitaiParseUrl(sourceUrl)) {
+        return new Response('url は civitai.com のモデルページ URL またはダウンロード URL を指定してください', { status: 422 });
+      }
+      if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
+        return new Response('repo は owner/repo の形式で指定してください', { status: 422 });
+      }
+      const importStub = env.STATE.get(env.STATE.idFromName('lora-import'));
+      await importStub.startLoraImport(jobId, sourceUrl, repo);
+      return Response.json({ queued: true, jobId });
+    }
+
+    // 取り込みジョブの状態取得（クライアントはこれをポーリングする）
+    const loraJobMatch = url.pathname.match(/^\/api\/lora-import\/job\/([0-9a-f]{32})$/);
+    if (loraJobMatch) {
+      if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
+      const importStub = env.STATE.get(env.STATE.idFromName('lora-import'));
+      const job = await importStub.getLoraImport(loraJobMatch[1]);
+      if (!job) return new Response('Job not found', { status: 404 });
+      return Response.json(job);
     }
 
     // fal API のプロキシ。API キー（Secret の FAL_KEY）はここで付与し、ブラウザには

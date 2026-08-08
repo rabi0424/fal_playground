@@ -46,6 +46,7 @@ const LS_LORAS = 'fal_lora_library';
 const LS_ARENA = 'fal_arena'; // 比較アリーナ（arena.js）のデータ。同期のためここでも扱う
 const LS_FORM = 'fal_form_state';
 const LS_JOB = 'fal_active_job';
+const LS_CIVITAI_JOB = 'fal_civitai_job'; // 進行中の Civitai 取り込みジョブ
 const LORA_URL_OPTION = '__url__';
 const POLL_INTERVAL_MS = 900;
 
@@ -75,6 +76,15 @@ const els = {
   hfError: $('#hfError'),
   hfList: $('#hfList'),
   hfAddBtn: $('#hfAddBtn'),
+  civitaiOpenBtn: $('#civitaiOpenBtn'),
+  civitaiDialog: $('#civitaiDialog'),
+  civitaiUrlInput: $('#civitaiUrlInput'),
+  civitaiResolveBtn: $('#civitaiResolveBtn'),
+  civitaiRepoInput: $('#civitaiRepoInput'),
+  civitaiPreview: $('#civitaiPreview'),
+  civitaiStatus: $('#civitaiStatus'),
+  civitaiError: $('#civitaiError'),
+  civitaiStartBtn: $('#civitaiStartBtn'),
   compareToggle: $('#compareToggle'),
   compareField: $('#compareField'),
   variantList: $('#variantList'),
@@ -676,6 +686,227 @@ function initHfDialog() {
       .map((cb) => cb.value);
     for (const url of urls) registerLora(url);
   });
+}
+
+/* ---------- Civitai import ---------- */
+// Civitai の URL からモデルをサーバー側で HF リポジトリへ取り込み、完了したら
+// LoRA ライブラリに登録する。実処理は Worker のジョブなのでタブを閉じても継続する。
+// 進行中のジョブ ID は localStorage に控え、再訪時にポーリングを再開する
+
+const CIVITAI_STEP_LABELS = {
+  resolve: 'モデル情報を確認中…',
+  download: 'Civitai からダウンロード中…（サイズにより数分かかります）',
+  upload: 'Hugging Face へアップロード中…（サイズにより数分かかります）',
+  commit: 'リポジトリへコミット中…',
+};
+const CIVITAI_POLL_MS = 2000;
+
+let civitaiResolved = null; // 「確認」で取得したメタデータ（URL・repo 変更で無効化）
+let civitaiPolling = false;
+
+function civitaiSetStatus(text) {
+  els.civitaiStatus.hidden = !text;
+  els.civitaiStatus.textContent = text || '';
+}
+
+function civitaiSetError(text) {
+  els.civitaiError.hidden = !text;
+  els.civitaiError.textContent = text || '';
+}
+
+function civitaiActiveJob() {
+  try {
+    return JSON.parse(localStorage.getItem(LS_CIVITAI_JOB));
+  } catch {
+    return null;
+  }
+}
+
+function civitaiSyncStartBtn() {
+  const busy = civitaiActiveJob() != null;
+  els.civitaiStartBtn.disabled = busy || !civitaiResolved || !!civitaiResolved.repoError;
+  els.civitaiStartBtn.textContent = civitaiResolved?.alreadyUploaded
+    ? 'ライブラリに登録' : '取り込み開始';
+}
+
+function civitaiRenderPreview(meta) {
+  els.civitaiPreview.innerHTML = '';
+  const row = (label, value) => {
+    if (!value) return;
+    const div = document.createElement('div');
+    div.className = 'civitai-row';
+    const l = document.createElement('span');
+    l.className = 'civitai-row-label';
+    l.textContent = label;
+    div.append(l, document.createTextNode(value));
+    els.civitaiPreview.appendChild(div);
+  };
+  const note = (text, warn = false) => {
+    if (!text) return;
+    const div = document.createElement('div');
+    div.className = warn ? 'civitai-note warn' : 'civitai-note';
+    div.textContent = text;
+    els.civitaiPreview.appendChild(div);
+  };
+
+  row('モデル', meta.modelName ?? '（不明）');
+  row('バージョン', [meta.versionName, meta.baseModel].filter(Boolean).join(' ・ '));
+  const size = meta.sizeKB ? `${(meta.sizeKB / 1024).toFixed(0)} MB` : '';
+  row('ファイル', [meta.fileName ?? '（DL 時に決定）', size].filter(Boolean).join(' ・ '));
+
+  if (meta.modelType && meta.modelType !== 'LORA') {
+    note(`モデル種類が LORA ではありません（${meta.modelType}）`, true);
+  }
+  note(meta.metaWarning, true);
+  note(meta.repoError, true);
+  if (meta.alreadyUploaded) {
+    note('同じ内容のファイルが既にリポジトリにあります。アップロードは行わず登録だけします');
+  } else if (meta.nameExists) {
+    note('同名のファイルがリポジトリにあります（内容が違うため上書きされます）', true);
+  }
+  els.civitaiPreview.hidden = false;
+}
+
+async function civitaiResolveUrl() {
+  const rawUrl = els.civitaiUrlInput.value.trim();
+  const repo = parseHfRepo(els.civitaiRepoInput.value);
+  civitaiResolved = null;
+  els.civitaiPreview.hidden = true;
+  civitaiSyncStartBtn();
+  if (!rawUrl) {
+    civitaiSetError('Civitai の URL を入力してください');
+    return;
+  }
+  if (!repo) {
+    civitaiSetError('アップロード先を owner/repo の形式で入力してください');
+    return;
+  }
+  civitaiSetError('');
+  civitaiSetStatus('モデル情報を取得中…');
+  try {
+    const res = await fetch(`/api/civitai/resolve?url=${encodeURIComponent(rawUrl)}&repo=${encodeURIComponent(repo)}`);
+    if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+    civitaiResolved = await res.json();
+  } catch (err) {
+    civitaiSetStatus('');
+    civitaiSetError(`確認に失敗しました: ${err.message}`);
+    return;
+  }
+  civitaiSetStatus('');
+  civitaiRenderPreview(civitaiResolved);
+  civitaiSyncStartBtn();
+}
+
+async function civitaiStartImport() {
+  if (!civitaiResolved) return;
+
+  // 同じ内容が既にあるならアップロードせず登録だけで完了
+  if (civitaiResolved.alreadyUploaded) {
+    registerLora(civitaiResolved.alreadyUploaded);
+    civitaiSetStatus('既存のファイルを LoRA ライブラリに登録しました');
+    return;
+  }
+
+  const rawUrl = els.civitaiUrlInput.value.trim();
+  const repo = parseHfRepo(els.civitaiRepoInput.value);
+  if (!rawUrl || !repo) return;
+  const jobId = makeModalJobId();
+  civitaiSetError('');
+  civitaiSetStatus('取り込みジョブを開始しています…');
+  els.civitaiStartBtn.disabled = true;
+  try {
+    const res = await fetch('/api/lora-import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId, url: rawUrl, repo }),
+    });
+    if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+  } catch (err) {
+    civitaiSetStatus('');
+    civitaiSetError(`開始できませんでした: ${err.message}`);
+    civitaiSyncStartBtn();
+    return;
+  }
+  localStorage.setItem(LS_CIVITAI_JOB, JSON.stringify({ jobId, ts: Date.now() }));
+  civitaiPollJob();
+}
+
+// 進行中ジョブのポーリング。完了時はダイアログが閉じていても登録まで済ませる
+async function civitaiPollJob() {
+  if (civitaiPolling) return;
+  const active = civitaiActiveJob();
+  if (!active) return;
+  civitaiPolling = true;
+  try {
+    while (true) {
+      let res;
+      try {
+        res = await fetch(`/api/lora-import/job/${active.jobId}`);
+      } catch {
+        await sleep(CIVITAI_POLL_MS * 2); // ネットワーク断はそのまま再試行
+        continue;
+      }
+      if (res.status === 404) {
+        // ジョブ保持期間（1 時間）切れなど。結果は分からないので静かに諦める
+        localStorage.removeItem(LS_CIVITAI_JOB);
+        civitaiSetStatus('');
+        break;
+      }
+      if (!res.ok) {
+        await sleep(CIVITAI_POLL_MS * 2);
+        continue;
+      }
+      const job = await res.json();
+      if (job.status === 'done') {
+        localStorage.removeItem(LS_CIVITAI_JOB);
+        registerLora(job.hfUrl);
+        civitaiSetStatus(job.skipped
+          ? `既にアップロード済みだったため登録のみ行いました: ${loraDisplayName(job.hfUrl)}`
+          : `取り込みが完了し、LoRA ライブラリに登録しました: ${loraDisplayName(job.hfUrl)}`);
+        break;
+      }
+      if (job.status === 'error') {
+        localStorage.removeItem(LS_CIVITAI_JOB);
+        civitaiSetStatus('');
+        civitaiSetError(job.error || '取り込みに失敗しました');
+        break;
+      }
+      civitaiSetStatus(CIVITAI_STEP_LABELS[job.step] ?? '処理中…');
+      await sleep(CIVITAI_POLL_MS);
+    }
+  } finally {
+    civitaiPolling = false;
+    civitaiSyncStartBtn();
+  }
+}
+
+function initCivitaiDialog() {
+  els.civitaiOpenBtn.addEventListener('click', () => {
+    civitaiSetError('');
+    if (!civitaiActiveJob()) civitaiSetStatus('');
+    els.civitaiRepoInput.value ||= HF_DEFAULT_REPO;
+    civitaiSyncStartBtn();
+    els.civitaiDialog.showModal();
+    civitaiPollJob(); // 進行中ジョブがあれば表示を再開する
+  });
+
+  els.civitaiResolveBtn.addEventListener('click', civitaiResolveUrl);
+  els.civitaiStartBtn.addEventListener('click', civitaiStartImport);
+
+  // URL・リポジトリを変えたら確認からやり直す（プレビューと開始ボタンを無効化）
+  for (const input of [els.civitaiUrlInput, els.civitaiRepoInput]) {
+    input.addEventListener('input', () => {
+      civitaiResolved = null;
+      els.civitaiPreview.hidden = true;
+      civitaiSyncStartBtn();
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        civitaiResolveUrl();
+      }
+    });
+  }
 }
 
 /* ---------- LoRA compare ---------- */
@@ -1969,6 +2200,7 @@ function scheduleSaveForm() {
 
 initTheme();
 initHfDialog();
+initCivitaiDialog();
 initForm();
 restoreFormState();
 
@@ -2101,3 +2333,7 @@ els.prompt.addEventListener('keydown', (e) => {
 
 // 前回の生成が完了待ちのまま離脱していたら再開する
 resumeActiveJobs();
+
+// Civitai 取り込みが進行中のまま離脱していたらポーリングを再開する
+//（完了時の LoRA 登録はダイアログを開いていなくても行われる）
+civitaiPollJob();

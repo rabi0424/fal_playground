@@ -40,6 +40,7 @@
       <div class="lora-actions">
         <button id="addLoraBtn" class="ghost-btn small" type="button">＋ LoRA を追加</button>
         <button id="hfOpenBtn" class="ghost-btn small" type="button">Hugging Face から一括登録</button>
+        <button id="civitaiOpenBtn" class="ghost-btn small" type="button">Civitai から取り込み</button>
       </div>
       <label class="compare-toggle">
         <input type="checkbox" id="compareToggle"> LoRA 比較モード
@@ -155,6 +156,32 @@
     <div class="key-actions">
       <button value="cancel" class="ghost-btn" formnovalidate>閉じる</button>
       <button value="add" id="hfAddBtn" class="primary-btn" disabled>選択した 0 件を登録</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="civitaiDialog" class="key-dialog civitai-dialog">
+  <form method="dialog" class="key-form">
+    <h2>Civitai から LoRA を取り込み</h2>
+    <p class="hint">
+      Civitai のモデルページ URL（modelVersionId 付き可）またはダウンロード URL を入力すると、
+      モデルを Hugging Face リポジトリへアップロードして LoRA ライブラリに登録します。<br>
+      公開リポジトリへのアップロードは再配布に当たります。モデルのライセンスを確認してください。
+    </p>
+    <div class="civitai-search">
+      <input id="civitaiUrlInput" type="text" placeholder="https://civitai.com/models/..." spellcheck="false" autocomplete="off">
+      <button id="civitaiResolveBtn" class="ghost-btn" type="button">確認</button>
+    </div>
+    <label class="field">
+      <span class="label">アップロード先リポジトリ（owner/repo）</span>
+      <input id="civitaiRepoInput" type="text" spellcheck="false" autocomplete="off">
+    </label>
+    <div id="civitaiPreview" class="civitai-preview" hidden></div>
+    <div id="civitaiStatus" class="status" hidden></div>
+    <div id="civitaiError" class="error" hidden></div>
+    <div class="key-actions">
+      <button value="cancel" class="ghost-btn" formnovalidate>閉じる</button>
+      <button id="civitaiStartBtn" class="primary-btn" type="button" disabled>取り込み開始</button>
     </div>
   </form>
 </dialog>
