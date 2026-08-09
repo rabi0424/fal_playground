@@ -193,6 +193,9 @@
       <span class="label">アップロード先リポジトリ（owner/repo）</span>
       <input id="civitaiRepoInput" type="text" spellcheck="false" autocomplete="off">
     </label>
+    <label class="civitai-meta-check" title="トリガーワード・説明・サンプルの生成設定などを .civitai.json としてモデルの隣に保存します（画像本体は保存しません）">
+      <input type="checkbox" id="civitaiMetaToggle" checked> サイトの情報（トリガーワード等）を JSON で一緒に保存する
+    </label>
     <div id="civitaiPreview" class="civitai-preview" hidden></div>
     <div id="civitaiStatus" class="status" hidden></div>
     <div id="civitaiError" class="error" hidden></div>

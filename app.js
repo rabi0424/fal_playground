@@ -84,6 +84,7 @@ const els = {
   civitaiUrlInput: $('#civitaiUrlInput'),
   civitaiResolveBtn: $('#civitaiResolveBtn'),
   civitaiRepoInput: $('#civitaiRepoInput'),
+  civitaiMetaToggle: $('#civitaiMetaToggle'),
   civitaiPreview: $('#civitaiPreview'),
   civitaiStatus: $('#civitaiStatus'),
   civitaiError: $('#civitaiError'),
@@ -728,8 +729,10 @@ function civitaiActiveJob() {
 function civitaiSyncStartBtn() {
   const busy = civitaiActiveJob() != null;
   els.civitaiStartBtn.disabled = busy || !civitaiResolved || !!civitaiResolved.repoError;
-  els.civitaiStartBtn.textContent = civitaiResolved?.alreadyUploaded
-    ? 'ライブラリに登録' : '取り込み開始';
+  // 本体もJSONも新規作業が不要なときだけ「登録」表記にする
+  const registerOnly = civitaiResolved?.alreadyUploaded
+    && (!els.civitaiMetaToggle.checked || civitaiResolved.metaFileExists || !civitaiResolved.metaDoc);
+  els.civitaiStartBtn.textContent = registerOnly ? 'ライブラリに登録' : '取り込み開始';
 }
 
 function civitaiRenderPreview(meta) {
@@ -757,13 +760,56 @@ function civitaiRenderPreview(meta) {
   const size = meta.sizeKB ? `${(meta.sizeKB / 1024).toFixed(0)} MB` : '';
   row('ファイル', [meta.fileName ?? '（DL 時に決定）', size].filter(Boolean).join(' ・ '));
 
+  // 保存対象のサイト情報（トリガーワード等）。使い物になるかここで判断できるよう、
+  // 要点を整形して出しつつ、保存される JSON 全文も畳んで見られるようにする
+  const doc = meta.metaDoc;
+  if (doc) {
+    const words = doc.version?.trainedWords ?? [];
+    row('トリガー', words.length ? words.join(' / ') : '（登録なし）');
+    const byline = [
+      doc.model?.creator ? `作者: ${doc.model.creator}` : null,
+      doc.model?.tags?.length ? doc.model.tags.slice(0, 6).join(', ') : null,
+    ].filter(Boolean).join(' ・ ');
+    row('作者・タグ', byline);
+    const sampleCount = doc.images?.length ?? 0;
+    row('サンプル', sampleCount
+      ? `生成設定つき ${sampleCount} 件（URL と設定のみ保存・画像本体は保存しません）` : '');
+
+    // 説明文は HTML で来るのでテキスト化して先頭だけ見せる
+    const descHtml = doc.version?.description || doc.model?.description || '';
+    if (descHtml) {
+      const text = new DOMParser().parseFromString(descHtml, 'text/html').body.textContent
+        .replace(/\s+/g, ' ').trim();
+      if (text) {
+        const div = document.createElement('div');
+        div.className = 'civitai-desc';
+        div.textContent = text.length > 300 ? `${text.slice(0, 300)}…` : text;
+        els.civitaiPreview.appendChild(div);
+      }
+    }
+
+    const details = document.createElement('details');
+    details.className = 'civitai-json';
+    const summary = document.createElement('summary');
+    summary.textContent = '保存される JSON を表示';
+    details.appendChild(summary);
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(doc, null, 2);
+    details.appendChild(pre);
+    els.civitaiPreview.appendChild(details);
+  } else {
+    note('サイト情報を取得できなかったため、JSON の保存はありません', true);
+  }
+
   if (meta.modelType && meta.modelType !== 'LORA') {
     note(`モデル種類が LORA ではありません（${meta.modelType}）`, true);
   }
   note(meta.metaWarning, true);
   note(meta.repoError, true);
   if (meta.alreadyUploaded) {
-    note('同じ内容のファイルが既にリポジトリにあります。アップロードは行わず登録だけします');
+    note(doc && !meta.metaFileExists
+      ? '同じ内容のファイルが既にリポジトリにあります（本体はスキップし、JSON の保存と登録だけ行います）'
+      : '同じ内容のファイルが既にリポジトリにあります。アップロードは行わず登録だけします');
   } else if (meta.nameExists) {
     note('同名のファイルがリポジトリにあります（内容が違うため上書きされます）', true);
   }
@@ -802,9 +848,12 @@ async function civitaiResolveUrl() {
 
 async function civitaiStartImport() {
   if (!civitaiResolved) return;
+  const saveMeta = els.civitaiMetaToggle.checked;
 
-  // 同じ内容が既にあるならアップロードせず登録だけで完了
-  if (civitaiResolved.alreadyUploaded) {
+  // 同じ内容が既にあり、JSON も保存済み（または保存しない設定）なら登録だけで完了。
+  // JSON が未保存で保存 ON のときはジョブに進み、サーバー側で JSON のみコミットされる
+  if (civitaiResolved.alreadyUploaded
+    && (!saveMeta || civitaiResolved.metaFileExists || !civitaiResolved.metaDoc)) {
     registerLora(civitaiResolved.alreadyUploaded);
     civitaiSetStatus('既存のファイルを LoRA ライブラリに登録しました');
     return;
@@ -821,7 +870,7 @@ async function civitaiStartImport() {
     const res = await fetch('/api/lora-import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId, url: rawUrl, repo }),
+      body: JSON.stringify({ jobId, url: rawUrl, repo, saveMeta }),
     });
     if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
   } catch (err) {
@@ -864,7 +913,7 @@ async function civitaiPollJob() {
         localStorage.removeItem(LS_CIVITAI_JOB);
         registerLora(job.hfUrl);
         civitaiSetStatus(job.skipped
-          ? `既にアップロード済みだったため登録のみ行いました: ${loraDisplayName(job.hfUrl)}`
+          ? `既にアップロード済みだったため本体は省略し、登録を行いました: ${loraDisplayName(job.hfUrl)}`
           : `取り込みが完了し、LoRA ライブラリに登録しました: ${loraDisplayName(job.hfUrl)}`);
         break;
       }
@@ -888,6 +937,7 @@ function initCivitaiDialog() {
     civitaiSetError('');
     if (!civitaiActiveJob()) civitaiSetStatus('');
     els.civitaiRepoInput.value ||= HF_DEFAULT_REPO;
+    els.civitaiMetaToggle.checked = true; // JSON 保存は開くたびに既定の ON へ戻す
     civitaiSyncStartBtn();
     els.civitaiDialog.showModal();
     civitaiPollJob(); // 進行中ジョブがあれば表示を再開する
@@ -895,6 +945,7 @@ function initCivitaiDialog() {
 
   els.civitaiResolveBtn.addEventListener('click', civitaiResolveUrl);
   els.civitaiStartBtn.addEventListener('click', civitaiStartImport);
+  els.civitaiMetaToggle.addEventListener('change', civitaiSyncStartBtn);
 
   // URL・リポジトリを変えたら確認からやり直す（プレビューと開始ボタンを無効化）
   for (const input of [els.civitaiUrlInput, els.civitaiRepoInput]) {

@@ -89,24 +89,87 @@ function sanitizeLoraFileName(name) {
   return `${s}.safetensors`;
 }
 
+// .safetensors と対で保存するサイト情報 JSON のパス（foo.safetensors → foo.civitai.json）
+function civitaiMetaJsonPath(fileName) {
+  return fileName.replace(/\.safetensors$/i, '') + '.civitai.json';
+}
+
+// 取り込み時点の Civitai の情報を JSON として保存するための文書を組み立てる。
+// トリガーワード・説明・サンプル画像の生成パラメータなど「後から使い方を調べる」
+// ための情報を残す。画像本体は保存しない（URL と生成設定のみ）。
+// ジョブレコード（DO storage の 128KiB 制限）に載せるため各フィールドは切り詰める
+function buildCivitaiMetaDoc(version, model, sourceUrl) {
+  const clip = (s, n) => (typeof s === 'string' && s !== '' ? s.slice(0, n) : null);
+  return {
+    savedAt: new Date().toISOString(),
+    source: sourceUrl,
+    modelId: model?.id ?? version.modelId ?? null,
+    versionId: version.id ?? null,
+    model: {
+      name: model?.name ?? version.model?.name ?? null,
+      type: model?.type ?? version.model?.type ?? null,
+      nsfw: model?.nsfw ?? version.model?.nsfw ?? null,
+      creator: model?.creator?.username ?? null,
+      tags: (model?.tags ?? []).slice(0, 30),
+      description: clip(model?.description, 8000),
+    },
+    version: {
+      name: version.name ?? null,
+      baseModel: version.baseModel ?? null,
+      trainedWords: version.trainedWords ?? [],
+      publishedAt: version.publishedAt ?? null,
+      description: clip(version.description, 8000),
+      stats: version.stats ?? null,
+      files: (version.files ?? []).map((f) => ({
+        name: f.name ?? null,
+        sizeKB: f.sizeKB ?? null,
+        sha256: f.hashes?.SHA256 ?? null,
+        primary: !!f.primary,
+      })),
+    },
+    images: (version.images ?? []).slice(0, 8).map((img) => ({
+      url: img.url ?? null,
+      width: img.width ?? null,
+      height: img.height ?? null,
+      ...(img.meta && typeof img.meta === 'object' ? {
+        meta: {
+          prompt: clip(img.meta.prompt, 1500),
+          negativePrompt: clip(img.meta.negativePrompt, 1000),
+          steps: img.meta.steps ?? null,
+          sampler: img.meta.sampler ?? null,
+          cfgScale: img.meta.cfgScale ?? null,
+          seed: img.meta.seed ?? null,
+        },
+      } : {}),
+    })),
+  };
+}
+
 // URL からモデル情報とダウンロード対象ファイルを解決する。
 // ダウンロード URL 直指定でメタデータが取れない場合は最小限の情報で返す
-//（ファイル名は DL 時の Content-Disposition で補う）
+//（ファイル名は DL 時の Content-Disposition で補う）。
+// 返り値の doc は保存用のサイト情報 JSON（取得できなければ null）
 async function civitaiResolve(rawUrl, env) {
   const parsed = civitaiParseUrl(rawUrl);
   if (!parsed) {
     throw new Error('URL を解釈できません（civitai.com のモデルページ URL またはダウンロード URL を入力してください）');
   }
   let version = null;
+  let model = null;
   try {
     if (parsed.versionId) {
       version = await civitaiApi(`/model-versions/${parsed.versionId}`, parsed.origin, env);
+      // モデル本体の説明・タグ・作者はバージョン API に無いので別途取得（任意）
+      const modelId = version?.modelId ?? null;
+      if (modelId) {
+        try {
+          model = await civitaiApi(`/models/${modelId}`, parsed.origin, env);
+        } catch { /* モデル情報は無くても続行できる */ }
+      }
     } else {
-      const model = await civitaiApi(`/models/${parsed.modelId}`, parsed.origin, env);
+      model = await civitaiApi(`/models/${parsed.modelId}`, parsed.origin, env);
       version = model?.modelVersions?.[0] ?? null;
       if (!version) throw new Error('モデルバージョンが見つかりません');
-      // /models/{id} の応答内バージョンには model 情報が無いので補う
-      version.model = { name: model.name, type: model.type };
     }
   } catch (err) {
     // ダウンロード URL 直指定ならメタデータなしで続行できる
@@ -125,6 +188,7 @@ async function civitaiResolve(rawUrl, env) {
       sha256: null,
       downloadUrl: parsed.directUrl,
       metaWarning: 'メタデータを取得できませんでした（ファイル名・ハッシュ検証なしで取り込みます）',
+      doc: null,
     };
   }
 
@@ -136,8 +200,8 @@ async function civitaiResolve(rawUrl, env) {
 
   return {
     versionId: String(version.id ?? parsed.versionId ?? ''),
-    modelName: version.model?.name ?? null,
-    modelType: version.model?.type ?? null,
+    modelName: model?.name ?? version.model?.name ?? null,
+    modelType: model?.type ?? version.model?.type ?? null,
     versionName: version.name ?? null,
     baseModel: version.baseModel ?? null,
     fileName: sanitizeLoraFileName(file.name),
@@ -146,6 +210,7 @@ async function civitaiResolve(rawUrl, env) {
     downloadUrl: parsed.directUrl ?? file.downloadUrl
       ?? `${parsed.origin}/api/download/models/${version.id}`,
     metaWarning: null,
+    doc: buildCivitaiMetaDoc(version, model, rawUrl),
   };
 }
 
@@ -670,7 +735,7 @@ export class SyncState extends DurableObject {
   // 専用 DO インスタンス（'lora-import'）で動く前提。ステップごとに進捗を保存し、
   // 途中で落ちても次の alarm で続きから再開する（download は最初からやり直し）
 
-  async startLoraImport(id, sourceUrl, repo) {
+  async startLoraImport(id, sourceUrl, repo, saveMeta) {
     const key = `lora:job:${id}`;
     if (await this.ctx.storage.get(key)) return; // 同 id の再送は無視（多重取り込み防止）
 
@@ -693,7 +758,9 @@ export class SyncState extends DurableObject {
       step: 'resolve',
       sourceUrl,
       repo,
+      saveMeta: saveMeta !== false,
       meta: null,
+      metaDoc: null,
       size: null,
       sha256: null,
       etags: {},
@@ -759,7 +826,9 @@ export class SyncState extends DurableObject {
 
   // メタデータ解決と、アップロード済みチェック（同一 SHA256 が既にあれば登録だけで済む）
   async loraStepResolve(key, job) {
-    job.meta = await civitaiResolve(job.sourceUrl, this.env);
+    const { doc, ...meta } = await civitaiResolve(job.sourceUrl, this.env);
+    job.meta = meta;
+    job.metaDoc = job.saveMeta ? doc : null;
 
     let tree;
     try {
@@ -775,10 +844,17 @@ export class SyncState extends DurableObject {
     if (job.meta.sha256) {
       const hit = tree.find((e) => e.type === 'file' && e.lfs?.oid === job.meta.sha256);
       if (hit) {
-        job.status = 'done';
         job.skipped = true;
         job.meta.fileName = hit.path;
         job.hfUrl = `${HF_BASE}/${job.repo}/resolve/main/${encodeURIComponent(hit.path)}`;
+        // 本体はアップロード済みでもサイト情報 JSON が無ければコミットだけ行う
+        //（メタデータの後付け取り込みにもなる）
+        if (job.metaDoc && !tree.some((e) => e.path === civitaiMetaJsonPath(hit.path))) {
+          job.metaOnly = true;
+          job.step = 'commit';
+        } else {
+          job.status = 'done';
+        }
         await this.ctx.storage.put(key, job);
         return;
       }
@@ -968,18 +1044,34 @@ export class SyncState extends DurableObject {
     await this.ctx.storage.put(key, job);
   }
 
-  // commit API（NDJSON）で LFS ポインタをリポジトリに記録して完了
+  // commit API（NDJSON）で LFS ポインタとサイト情報 JSON をリポジトリに記録して完了。
+  // metaOnly のとき（本体はアップロード済みで JSON が無いだけ）は JSON のみコミットする
   async loraStepCommit(key, job) {
     const summaryName = job.meta.modelName
       ? `${job.meta.modelName}${job.meta.versionName ? ` (${job.meta.versionName})` : ''}`
       : job.meta.fileName;
     const lines = [
-      { key: 'header', value: { summary: `Upload ${summaryName} from Civitai` } },
       {
-        key: 'lfsFile',
-        value: { path: job.meta.fileName, algo: 'sha256', oid: job.sha256, size: job.size },
+        key: 'header',
+        value: { summary: `${job.metaOnly ? 'Add metadata for' : 'Upload'} ${summaryName} from Civitai` },
       },
     ];
+    if (!job.metaOnly) {
+      lines.push({
+        key: 'lfsFile',
+        value: { path: job.meta.fileName, algo: 'sha256', oid: job.sha256, size: job.size },
+      });
+    }
+    if (job.metaDoc) {
+      lines.push({
+        key: 'file',
+        value: {
+          path: civitaiMetaJsonPath(job.meta.fileName),
+          content: bytesToBase64(new TextEncoder().encode(JSON.stringify(job.metaDoc, null, 2))),
+          encoding: 'base64',
+        },
+      });
+    }
     const res = await fetch(`${HF_BASE}/api/models/${job.repo}/commit/main`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-ndjson', ...hfAuthHeaders(this.env) },
@@ -1032,27 +1124,32 @@ export default {
       if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
       const repo = url.searchParams.get('repo') || '';
       if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return new Response('Invalid repo', { status: 400 });
-      let meta;
+      let resolved;
       try {
-        meta = await civitaiResolve(url.searchParams.get('url'), env);
+        resolved = await civitaiResolve(url.searchParams.get('url'), env);
       } catch (err) {
         return new Response(err.message, { status: 422 });
       }
+      const { doc, ...meta } = resolved;
       let alreadyUploaded = null;
       let nameExists = false;
+      let metaFileExists = false;
       let repoError = null;
       try {
         const tree = await fetchHfTree(repo, env);
         if (meta.sha256) {
           const hit = tree.find((e) => e.type === 'file' && e.lfs?.oid === meta.sha256);
-          if (hit) alreadyUploaded = `https://huggingface.co/${repo}/resolve/main/${encodeURIComponent(hit.path)}`;
+          if (hit) {
+            alreadyUploaded = `https://huggingface.co/${repo}/resolve/main/${encodeURIComponent(hit.path)}`;
+            metaFileExists = tree.some((e) => e.path === civitaiMetaJsonPath(hit.path));
+          }
         }
         nameExists = meta.fileName != null
           && tree.some((e) => e.type === 'file' && e.path === meta.fileName);
       } catch (err) {
         repoError = `アップロード先リポジトリ ${repo} にアクセスできません（HTTP ${err.status ?? '?'}）`;
       }
-      return Response.json({ ...meta, alreadyUploaded, nameExists, repoError });
+      return Response.json({ ...meta, metaDoc: doc, alreadyUploaded, nameExists, metaFileExists, repoError });
     }
 
     // Civitai → HF 取り込みジョブの投入。ダウンロード〜アップロードは数分かかり
@@ -1079,8 +1176,9 @@ export default {
       if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
         return new Response('repo は owner/repo の形式で指定してください', { status: 422 });
       }
+      const saveMeta = payload.saveMeta !== false; // 既定はサイト情報 JSON も保存する
       const importStub = env.STATE.get(env.STATE.idFromName('lora-import'));
-      await importStub.startLoraImport(jobId, sourceUrl, repo);
+      await importStub.startLoraImport(jobId, sourceUrl, repo, saveMeta);
       return Response.json({ queued: true, jobId });
     }
 

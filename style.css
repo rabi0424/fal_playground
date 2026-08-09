@@ -1125,6 +1125,43 @@ button:focus-visible, a.ghost-btn:focus-visible {
 
 .civitai-note.warn { color: var(--danger); }
 
+.civitai-meta-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.civitai-meta-check input {
+  width: auto;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+
+.civitai-desc { color: var(--muted); font-size: 12px; }
+
+.civitai-json summary {
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.civitai-json pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.5;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* ---------- mobile (iPhone 16: 393pt / Plus・Pro Max: 430pt) ---------- */
 .mobile-only { display: none; }
 
