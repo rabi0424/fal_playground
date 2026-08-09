@@ -1435,7 +1435,7 @@ export default {
       }
       delete payload.jobId;
 
-      // エンドポイントはクライアントの endpoint フィールド（"exp" / "gpusnap" / "prod"）で切り替える。
+      // エンドポイントはクライアントの endpoint フィールド（"exp" / "gpusnap" / "prod" / "ckpt"）で切り替える。
       // URL 自体はクライアントから受け取らず、ここの許可リストでのみ解決する。既定は実験版
       const endpoints = {
         exp: env.KREA2_ENDPOINT_EXP
@@ -1444,6 +1444,8 @@ export default {
           || 'https://rabitteru--krea2-comfy-api-gpusnap-comfyapi-generate.modal.run',
         prod: env.KREA2_ENDPOINT
           || 'https://rabitteru--krea2-comfy-api-comfyapi-generate.modal.run',
+        ckpt: env.KREA2_ENDPOINT_CKPT
+          || 'https://rabitteru--krea2-comfy-api-ckpt-comfyapi-generate.modal.run',
       };
       const endpoint = endpoints[payload.endpoint] ?? endpoints.exp;
       delete payload.endpoint; // Modal API には存在しないフィールドなので転送しない

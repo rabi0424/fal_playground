@@ -114,11 +114,20 @@ LoRA 欄の「Civitai から取り込み」で、Civitai のモデルページ U
 
 ## Modal 自前ホスト版 Krea 2
 
-モデル選択の「Krea 2 [turbo] 自前ホスト（Modal 実験版 / GPUスナップ版 / 本番）」は、fal ではなく Modal 上の [modal_comfy](https://github.com/rabi0424/modal_comfy) API で生成します。実験版（CPU スナップショット）・GPU スナップショット版（`krea2-comfy-api-gpusnap`）・本番（安定版）はモデル選択で切り替えられ、標準は実験版です。エンドポイントの URL 自体を変えたい場合は、Worker の環境変数で上書きできます（未設定なら modal_comfy の既定 URL）:
+モデル選択の「Krea 2 [turbo] 自前ホスト（Modal 実験版 / GPUスナップ版 / 本番 / チェックポイント指定版）」は、fal ではなく Modal 上の [modal_comfy](https://github.com/rabi0424/modal_comfy) API で生成します。実験版（CPU スナップショット）・GPU スナップショット版（`krea2-comfy-api-gpusnap`）・本番（安定版）・チェックポイント指定版（`krea2-comfy-api-ckpt`）はモデル選択で切り替えられ、標準は実験版です。エンドポイントの URL 自体を変えたい場合は、Worker の環境変数で上書きできます（未設定なら modal_comfy の既定 URL）:
 
 - `KREA2_ENDPOINT_EXP` = 実験版の URL
 - `KREA2_ENDPOINT_GPUSNAP` = GPU スナップショット版の URL
 - `KREA2_ENDPOINT` = 本番の URL
+- `KREA2_ENDPOINT_CKPT` = チェックポイント指定版の URL
+
+### チェックポイント指定版
+
+チェックポイント指定版を選ぶと「チェックポイント」入力欄が出ます。Modal Volume の `unet/` にあるファイル名（拡張子省略可）を入れるとその UNet で生成し、空欄なら既定（`Krea-2-Turbo-Q8_0.gguf`）を使います。
+
+- 指定できるのは **Volume に取り込み済みのファイルだけ**です。LoRA と違い自動ダウンロードはされません（10GB 超クラスのため）。追加は modal_comfy の GitHub Actions「Download Checkpoint」で HF リポジトリから取り込みます（アプリの再デプロイは不要）
+- 存在しない名前を指定するとエラーになり、利用可能なファイルの一覧がエラーメッセージに表示されます
+- `.gguf` は GGUF ローダー、`.safetensors` は ComfyUI 標準の UNET ローダーで読み込まれます（Krea 2 系アーキテクチャのもの以外は動きません）
 
 ### 使い方のメモ
 

@@ -30,6 +30,11 @@
       <input id="customModel" type="text" placeholder="fal-ai/..." spellcheck="false">
     </label>
 
+    <label class="field" id="ckptField" hidden title="Modal Volume の unet/ にあるファイル名を指定します（拡張子省略可）。存在しない名前を指定すると、エラーに利用可能な一覧が表示されます。追加は modal_comfy の Download Checkpoint ワークフローで行います">
+      <span class="label">チェックポイント <em>（Volume 内のファイル名・空なら既定）</em></span>
+      <input id="ckptName" type="text" placeholder="Krea-2-Turbo-Q8_0.gguf（既定）" spellcheck="false" autocomplete="off">
+    </label>
+
     <label class="field prompt-field">
       <span class="label">プロンプト</span>
       <textarea id="prompt" rows="6" placeholder="生成したい画像を英語で記述..." spellcheck="false"></textarea>

@@ -4,16 +4,20 @@
 
 // Modal 自前ホスト版 Krea 2（modal_comfy リポジトリ）。fal ではなく
 // Worker のプロキシ（/api/krea2/generate）経由で生成する。
-// エンドポイントは実験版（exp）・GPU スナップショット版（gpusnap）・本番の 3 系統があり、標準は実験版
+// エンドポイントは実験版（exp）・GPU スナップショット版（gpusnap）・本番・
+// チェックポイント指定版（ckpt）の 4 系統があり、標準は実験版
 const MODAL_KREA2_EXP_ID = 'modal/krea2-turbo-exp';
 const MODAL_KREA2_GPUSNAP_ID = 'modal/krea2-turbo-gpusnap';
 const MODAL_KREA2_ID = 'modal/krea2-turbo';
+const MODAL_KREA2_CKPT_ID = 'modal/krea2-turbo-ckpt';
 
 const MODELS = [
   { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA', sizeParam: 'image_size', lora: true, maxLoras: 3 },
   { id: MODAL_KREA2_EXP_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 実験版）', sizeParam: 'image_size', lora: true, provider: 'modal', modalEndpoint: 'exp' },
   { id: MODAL_KREA2_GPUSNAP_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal GPUスナップ版）', sizeParam: 'image_size', lora: true, provider: 'modal', modalEndpoint: 'gpusnap' },
   { id: MODAL_KREA2_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 本番）', sizeParam: 'image_size', lora: true, provider: 'modal', modalEndpoint: 'prod' },
+  // ckpt: Modal Volume 内のチェックポイント（UNet）を生成ごとに指定できる版
+  { id: MODAL_KREA2_CKPT_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal チェックポイント指定版）', sizeParam: 'image_size', lora: true, provider: 'modal', modalEndpoint: 'ckpt', ckpt: true },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -65,6 +69,8 @@ const els = {
   modelSelect: $('#modelSelect'),
   customModelField: $('#customModelField'),
   customModel: $('#customModel'),
+  ckptField: $('#ckptField'),
+  ckptName: $('#ckptName'),
   prompt: $('#prompt'),
   loraField: $('#loraField'),
   loraLabel: $('#loraLabel'),
@@ -298,6 +304,7 @@ function initForm() {
 function updateModelFields() {
   const model = MODELS.find((m) => m.id === els.modelSelect.value) || MODELS[0];
   els.customModelField.hidden = model.id !== '__custom__';
+  els.ckptField.hidden = !model.ckpt;
   els.loraField.hidden = !model.lora;
 
   // Modal 版は fal のキュー API を使わないため比較モード非対応
@@ -1643,8 +1650,14 @@ async function modalAwaitJob(job, jobId) {
 
 async function generateModal(model, prompt) {
   const input = buildModalInput(prompt);
-  // 実験版 / 本番の切り替え。URL は Worker 側の許可リストで解決される
+  // 実験版 / 本番などの切り替え。URL は Worker 側の許可リストで解決される
   input.endpoint = model.modalEndpoint;
+  // チェックポイント指定版: Volume 内のファイル名をそのまま渡す（空なら既定）。
+  // 存在しない名前はサーバーが 404 + 利用可能一覧で返すのでここでは検証しない
+  if (model.ckpt) {
+    const ckpt = els.ckptName.value.trim();
+    if (ckpt) input.checkpoint = ckpt;
+  }
   if (input.cfg !== undefined && (input.cfg < 0 || input.cfg > 1)) {
     setError('この API のガイダンス（cfg）は 0〜1 の範囲で指定してください');
     return;
@@ -2408,6 +2421,7 @@ function saveFormState() {
   const state = {
     model: els.modelSelect.value,
     customModel: els.customModel.value,
+    ckptName: els.ckptName.value,
     prompt: els.prompt.value,
     size: els.sizeSelect.value,
     customWidth: els.customWidth.value,
@@ -2432,6 +2446,7 @@ function restoreFormState() {
 
   if (s.model) els.modelSelect.value = s.model;
   els.customModel.value = s.customModel || '';
+  els.ckptName.value = s.ckptName || '';
   els.prompt.value = s.prompt || '';
   updateModelFields();
 
