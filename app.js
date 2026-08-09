@@ -930,11 +930,15 @@ function isModalRecord(record) {
   return typeof record?.model === 'string' && record.model.startsWith('modal/');
 }
 
+// 統計に採用する 1 枚あたり所要時間の上限。現実の生成でこれを超えることはなく、
+// 超過分は補正しきれなかった待ち時間や放置されたタブなどの異常値とみなして捨てる
+const STATS_MAX_SEC = 30 * 60;
+
 // モデル ID → 1 枚あたりの所要秒のサンプル配列
 function collectStatsSamples() {
   const samples = new Map();
   const add = (model, sec) => {
-    if (!Number.isFinite(sec) || sec <= 0) return;
+    if (!Number.isFinite(sec) || sec <= 0 || sec > STATS_MAX_SEC) return;
     if (!samples.has(model)) samples.set(model, []);
     samples.get(model).push(sec);
   };
