@@ -482,6 +482,22 @@ function unregisterLora(path) {
   refreshLoraSelects();
 }
 
+// 過去の Civitai 取り込み（アップロード済み判定）がサブフォルダのパスを %2F に
+// エンコードした URL で登録していた不具合の補正。%2F だと HF 一括登録経由の
+// URL と食い違い、Modal 生成へ渡る LoRA 名が変わって効かなくなる
+(function normalizeLoraLibrary() {
+  const library = loadLoraLibrary();
+  let changed = false;
+  for (const item of library) {
+    if (/^https:\/\/huggingface\.co\/.*%2F/i.test(item.path)) {
+      item.path = item.path.replace(/%2F/gi, '/');
+      item.name = loraDisplayName(item.path);
+      changed = true;
+    }
+  }
+  if (changed) saveLoraLibrary(library);
+})();
+
 // プルダウンでの表示順: 名前順。名前に含まれる数字（末尾のバージョン番号
 // 0005000 など）は数値として比較し、同じ LoRA の別バージョンが小さい順に並ぶ。
 // 登録データ（localStorage）の順序は変えず表示時にだけ並び替える

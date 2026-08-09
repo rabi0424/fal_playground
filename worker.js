@@ -94,6 +94,13 @@ function civitaiMetaJsonPath(fileName) {
   return fileName.replace(/\.safetensors$/i, '') + '.civitai.json';
 }
 
+// HF の resolve URL を組み立てる。パス全体を encodeURIComponent すると
+// サブフォルダの「/」が %2F になり、HF 一括登録経由の URL と食い違って
+// Modal 生成へ渡る LoRA 名が変わってしまうため、セグメント単位でエンコードする
+function hfResolveUrl(repo, path) {
+  return `${HF_BASE}/${repo}/resolve/main/${path.split('/').map(encodeURIComponent).join('/')}`;
+}
+
 // 取り込み時点の Civitai の情報を JSON として保存するための文書を組み立てる。
 // トリガーワード・説明・サンプル画像の生成パラメータなど「後から使い方を調べる」
 // ための情報を残す。画像本体は保存しない（URL と生成設定のみ）。
@@ -866,7 +873,7 @@ export class SyncState extends DurableObject {
       if (hit) {
         job.skipped = true;
         job.meta.fileName = hit.path;
-        job.hfUrl = `${HF_BASE}/${job.repo}/resolve/main/${encodeURIComponent(hit.path)}`;
+        job.hfUrl = hfResolveUrl(job.repo, hit.path);
         // 本体はアップロード済みでもサイト情報 JSON が無ければコミットだけ行う
         //（メタデータの後付け取り込みにもなる）
         if (job.metaDoc && !tree.some((e) => e.path === civitaiMetaJsonPath(hit.path))) {
@@ -1118,7 +1125,7 @@ export class SyncState extends DurableObject {
       throw new Error(`commit error ${res.status}`);
     }
     job.status = 'done';
-    job.hfUrl = `${HF_BASE}/${job.repo}/resolve/main/${encodeURIComponent(job.meta.fileName)}`;
+    job.hfUrl = hfResolveUrl(job.repo, job.meta.fileName);
     await this.ctx.storage.put(key, job);
     await this.deleteLoraStaging(key);
   }
@@ -1172,7 +1179,7 @@ export default {
         if (meta.sha256) {
           const hit = tree.find((e) => e.type === 'file' && e.lfs?.oid === meta.sha256);
           if (hit) {
-            alreadyUploaded = `https://huggingface.co/${repo}/resolve/main/${encodeURIComponent(hit.path)}`;
+            alreadyUploaded = hfResolveUrl(repo, hit.path);
             metaFileExists = tree.some((e) => e.path === civitaiMetaJsonPath(hit.path));
           }
         }
