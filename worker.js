@@ -1005,7 +1005,7 @@ export class SyncState extends DurableObject {
     if (size > maxBytes) {
       await this.failLoraImport(key, job, job.kind === 'ckpt'
         ? `ファイルが大きすぎます（${(size / 1024 ** 3).toFixed(1)} GB）。Civitai 経由の取り込みは約 ${CKPT_MAX_BYTES / 1024 ** 3} GB までです`
-        : `ファイルが大きすぎます（${(size / 1024 ** 3).toFixed(1)} GB）`);
+        : `ファイルが大きすぎます（${(size / 1024 ** 3).toFixed(1)} GB）。LoRA の取り込みは ${LORA_MAX_BYTES / 1024 ** 3} GB までです。チェックポイントを取り込む場合は、チェックポイント指定版モデルのチェックポイント欄にある「Civitai から取り込み」を使ってください`);
       return;
     }
     if (!job.meta.fileName) {
