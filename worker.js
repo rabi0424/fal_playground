@@ -40,10 +40,13 @@ const CIVITAI_HOSTS = /(^|\.)(civitai\.(com|red)|civitaired\.\w+)$/;
 const LORA_STAGING_PREFIX = 'lora-staging/';
 const LORA_IMPORT_MAX_ATTEMPTS = 4; // ジョブ全体の実行回数上限（途中断は続きから再開する）
 const LORA_MAX_BYTES = 4 * 1024 * 1024 * 1024; // 4GB。LoRA としては十分すぎる上限
-// チェックポイント取り込みの上限。R2 の単発アップロード上限（約 4.995 GiB）の内側に
-// 収める。これを超えるチェックポイントは Civitai 経由では取り込めない（HF にある
-// ものなら直接登録すれば Modal が取り込むのでサイズ制限なし）
-const CKPT_MAX_BYTES = 4900 * 1024 * 1024;
+// チェックポイント取り込みの上限。R2 ステージングは multipart 保存に対応しているので
+// 本質的な上限ではなく、異常なサイズの取り込みを弾くための安全弁
+const CKPT_MAX_BYTES = 24 * 1024 * 1024 * 1024;
+// R2 の単発 PUT で安全に置けるサイズ。これを超えるステージングは multipart で保存する
+const R2_SINGLE_PUT_MAX = 4 * 1024 * 1024 * 1024;
+// multipart のパートサイズ（R2 の仕様で最後のパート以外は同一サイズである必要がある）
+const R2_PART_SIZE = 256 * 1024 * 1024;
 
 // Civitai の URL を解釈する。対応形式:
 //   https://civitai.com/models/{modelId}(?modelVersionId={vid})
@@ -758,7 +761,10 @@ export class SyncState extends DurableObject {
 
     const jobs = await this.ctx.storage.list({ prefix: 'lora:job:' });
     for (const [k, j] of jobs) {
-      if (Date.now() - j.created > JOB_TTL_MS) await this.ctx.storage.delete(k);
+      if (Date.now() - j.created > JOB_TTL_MS) {
+        await this.abortStagingMultipart(k, j); // やりかけの multipart は破棄してから消す
+        await this.ctx.storage.delete(k);
+      }
     }
     // 取り残された一時ファイルの掃除（失敗ジョブの分など）
     try {
@@ -827,14 +833,73 @@ export class SyncState extends DurableObject {
   async failLoraImport(key, job, message) {
     job.status = 'error';
     job.error = message;
+    await this.abortStagingMultipart(key, job);
     await this.ctx.storage.put(key, job);
     await this.deleteLoraStaging(key);
   }
 
+  loraStagingKey(key) {
+    return `${LORA_STAGING_PREFIX}${key.slice('lora:job:'.length)}`;
+  }
+
   async deleteLoraStaging(key) {
     try {
-      await this.env.IMAGES.delete(`${LORA_STAGING_PREFIX}${key.slice('lora:job:'.length)}`);
+      await this.env.IMAGES.delete(this.loraStagingKey(key));
     } catch { /* 消せなくても 24h 後の掃除で回収される */ }
+  }
+
+  // やりかけの multipart ステージングを破棄する（未使用なら no-op）。
+  // 完了しなかった multipart のパートは R2 の一覧に出ないまま容量を消費し続ける
+  // ため、リトライ・失敗・ジョブ掃除の各所で明示的に破棄する
+  async abortStagingMultipart(key, job) {
+    if (!job?.stagingUploadId) return;
+    try {
+      await this.env.IMAGES.resumeMultipartUpload(this.loraStagingKey(key), job.stagingUploadId).abort();
+    } catch { /* 既に完了・破棄済みならそれで良い */ }
+    job.stagingUploadId = null;
+  }
+
+  // R2 の単発 PUT 上限を超えるファイルをステージングへ multipart で保存する。
+  // 入力ストリームをパートサイズごとに区切り、順番に uploadPart へ流す
+  //（メモリにパートを溜めない。各パートの書き込みはアップロードの進みに合わせて
+  // バックプレッシャーがかかる）
+  async putStagingMultipart(key, job, stream, size) {
+    await this.abortStagingMultipart(key, job); // 前回の試行の残骸があれば先に破棄
+    const upload = await this.env.IMAGES.createMultipartUpload(this.loraStagingKey(key));
+    job.stagingUploadId = upload.uploadId;
+    await this.ctx.storage.put(key, job);
+
+    const reader = stream.getReader();
+    let leftover = null;
+    const parts = [];
+    const partCount = Math.ceil(size / R2_PART_SIZE);
+    for (let n = 1; n <= partCount; n++) {
+      const len = Math.min(R2_PART_SIZE, size - (n - 1) * R2_PART_SIZE);
+      const { readable, writable } = new FixedLengthStream(len);
+      const putPromise = upload.uploadPart(n, readable);
+      const writer = writable.getWriter();
+      let written = 0;
+      while (written < len) {
+        let chunk = leftover;
+        leftover = null;
+        if (!chunk) {
+          const { done, value } = await reader.read();
+          if (done) throw new Error('ステージング中にダウンロードが途切れました');
+          chunk = value;
+        }
+        if (chunk.byteLength > len - written) {
+          leftover = chunk.subarray(len - written);
+          chunk = chunk.subarray(0, len - written);
+        }
+        await writer.write(chunk);
+        written += chunk.byteLength;
+      }
+      await writer.close();
+      parts.push(await putPromise);
+    }
+    await upload.complete(parts);
+    job.stagingUploadId = null;
+    await this.ctx.storage.put(key, job);
   }
 
   // ステップを進められるだけ進める。ネットワーク断などの例外は pending のまま抜けて
@@ -939,7 +1004,7 @@ export class SyncState extends DurableObject {
     const maxBytes = job.kind === 'ckpt' ? CKPT_MAX_BYTES : LORA_MAX_BYTES;
     if (size > maxBytes) {
       await this.failLoraImport(key, job, job.kind === 'ckpt'
-        ? `ファイルが大きすぎます（${(size / 1024 ** 3).toFixed(1)} GB）。Civitai 経由の取り込みは約 4.8 GB までです。Hugging Face にあるモデルなら URL 登録で直接使えます（サイズ制限なし）`
+        ? `ファイルが大きすぎます（${(size / 1024 ** 3).toFixed(1)} GB）。Civitai 経由の取り込みは約 ${CKPT_MAX_BYTES / 1024 ** 3} GB までです`
         : `ファイルが大きすぎます（${(size / 1024 ** 3).toFixed(1)} GB）`);
       return;
     }
@@ -973,7 +1038,12 @@ export class SyncState extends DurableObject {
       }))
       .pipeThrough(this.loraProgressStream(key, job))
       .pipeThrough(new FixedLengthStream(size));
-    await this.env.IMAGES.put(`${LORA_STAGING_PREFIX}${key.slice('lora:job:'.length)}`, stream);
+    // R2 の単発 PUT 上限を超えるサイズ（大きいチェックポイント等）は multipart で保存する
+    if (size > R2_SINGLE_PUT_MAX) {
+      await this.putStagingMultipart(key, job, stream, size);
+    } else {
+      await this.env.IMAGES.put(this.loraStagingKey(key), stream);
+    }
 
     const sha256 = [...new Uint8Array(await digester.digest)]
       .map((b) => b.toString(16).padStart(2, '0')).join('');

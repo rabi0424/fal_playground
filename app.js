@@ -1143,7 +1143,7 @@ function openCivitaiDialog(mode) {
     ? 'Civitai からチェックポイントを取り込み'
     : 'Civitai から LoRA を取り込み';
   els.civitaiHint.innerHTML = (mode === 'ckpt'
-    ? 'Civitai のモデルページ URL（modelVersionId 付き可）またはダウンロード URL を入力すると、モデルを Hugging Face リポジトリへ取り込んでチェックポイントライブラリに登録します（約 4.8 GB まで）。<br>'
+    ? 'Civitai のモデルページ URL（modelVersionId 付き可）またはダウンロード URL を入力すると、モデルを Hugging Face リポジトリへ取り込んでチェックポイントライブラリに登録します（約 24 GB まで・サイズにより数分〜数十分）。<br>'
     : 'Civitai のモデルページ URL（modelVersionId 付き可）またはダウンロード URL を入力すると、モデルを Hugging Face リポジトリへアップロードして LoRA ライブラリに登録します。<br>')
     + '公開リポジトリへのアップロードは再配布に当たります。モデルのライセンスを確認してください。';
   civitaiSetError('');
