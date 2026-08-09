@@ -1078,45 +1078,111 @@ function formatSec(s) {
   return `${s >= 100 ? s.toFixed(0) : s.toFixed(1)}s`;
 }
 
-function renderStatsHistogram(values) {
-  const wrap = document.createElement('div');
+// 1-2-5 系列に切り上げた、目盛に使えるきりのいい刻み幅
+function niceStep(raw) {
+  const pow = 10 ** Math.floor(Math.log10(raw));
+  const m = raw / pow;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * pow;
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function svgEl(name, attrs, textContent) {
+  const el = document.createElementNS(SVG_NS, name);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (textContent !== undefined) el.textContent = textContent;
+  return el;
+}
+
+// 秒サンプルの分布ヒストグラム。ビン境界をきりのいい秒数に揃え、
+// 件数グリッド・秒目盛・中央値マーカー・ビン単位のホバーを付けた SVG を返す
+function renderStatsHistogram(values, median, width) {
+  const PAD_L = 30;
+  const PAD_R = 8;
+  const PAD_T = 16;
+  const PAD_B = 18;
+  const PLOT_H = 96;
+  const W = Math.max(width, 240);
+  const H = PAD_T + PLOT_H + PAD_B;
+  const plotW = W - PAD_L - PAD_R;
+  const baseY = PAD_T + PLOT_H;
+
   const min = Math.min(...values);
   const max = Math.max(...values);
-  const bins = Math.min(16, Math.max(5, Math.ceil(Math.sqrt(values.length))));
-  const width = Math.max((max - min) / bins, 0.05);
+
+  // ビン数の目安（サンプル数の平方根、5〜12）から 1-2-5 系列の幅に丸め、
+  // 両端をその倍数まで広げる。全サンプル同値のときは値の大きさから幅を決める
+  const targetBins = Math.min(12, Math.max(5, Math.ceil(Math.sqrt(values.length))));
+  const rawStep = (max - min) / targetBins;
+  const step = niceStep(rawStep > 0 ? rawStep : Math.max(max / 20, 0.1));
+  const lo = Math.floor(min / step) * step;
+  const hi = Math.max(Math.ceil(max / step) * step, lo + step);
+  const bins = Math.round((hi - lo) / step);
   const counts = new Array(bins).fill(0);
-  for (const v of values) {
-    counts[Math.min(bins - 1, Math.floor((v - min) / width))] += 1;
-  }
+  for (const v of values) counts[Math.min(bins - 1, Math.floor((v - lo) / step))] += 1;
   const peak = Math.max(...counts);
 
-  const hist = document.createElement('div');
-  hist.className = 'stats-hist';
-  counts.forEach((c, i) => {
-    const bin = document.createElement('div');
-    bin.className = 'stats-bin';
-    bin.title = `${formatSec(min + i * width)}〜${formatSec(min + (i + 1) * width)}: ${c} 件`;
-    const bar = document.createElement('span');
-    bar.style.height = c === 0 ? '0' : `${Math.max(6, (c / peak) * 100)}%`;
-    bin.appendChild(bar);
-    hist.appendChild(bin);
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${W} ${H}`,
+    class: 'stats-chart',
+    role: 'img',
+    'aria-label': '生成時間の分布',
   });
-  wrap.appendChild(hist);
 
-  const axis = document.createElement('div');
-  axis.className = 'stats-axis';
-  const lo = document.createElement('span');
-  lo.textContent = formatSec(min);
-  const hi = document.createElement('span');
-  hi.textContent = formatSec(max);
-  axis.append(lo, hi);
-  wrap.appendChild(axis);
-  return wrap;
+  // 件数の横グリッド（きりのいい整数刻み）と左の目盛
+  const yStep = Math.max(1, Math.round(niceStep(peak / 4)));
+  const yMax = Math.ceil(peak / yStep) * yStep;
+  for (let t = yStep; t <= yMax; t += yStep) {
+    const y = baseY - (t / yMax) * PLOT_H;
+    svg.appendChild(svgEl('line', { x1: PAD_L, y1: y, x2: W - PAD_R, y2: y, class: 'grid' }));
+    svg.appendChild(svgEl('text', { x: PAD_L - 6, y: y + 3, 'text-anchor': 'end', class: 'tick' }, `${t}`));
+  }
+  svg.appendChild(svgEl('line', { x1: PAD_L, y1: baseY, x2: W - PAD_R, y2: baseY, class: 'baseline' }));
+
+  // 横軸の秒目盛: ビン境界のうち、ラベルが重ならない間隔で間引いて表示する
+  const secText = (v) => `${step < 1 ? v.toFixed(1) : Math.round(v)}s`;
+  const everyNth = Math.ceil(bins / Math.max(2, Math.floor(plotW / 56)));
+  for (let i = 0; i <= bins; i += everyNth) {
+    const x = PAD_L + (i / bins) * plotW;
+    svg.appendChild(svgEl('text', { x, y: baseY + 14, 'text-anchor': 'middle', class: 'tick' }, secText(lo + i * step)));
+  }
+
+  // バー: 隣と 2px の地色ギャップを空け、上端だけ丸める（付け根は角のまま）
+  const bw = plotW / bins;
+  const barW = Math.max(bw - 2, 1);
+  counts.forEach((count, i) => {
+    if (count === 0) return;
+    const x = PAD_L + i * bw + (bw - barW) / 2;
+    const h = (count / yMax) * PLOT_H;
+    const y = baseY - h;
+    const r = Math.min(3, barW / 2, h);
+    svg.appendChild(svgEl('path', {
+      class: 'bar',
+      d: `M ${x} ${baseY} V ${y + r} Q ${x} ${y} ${x + r} ${y} H ${x + barW - r} Q ${x + barW} ${y} ${x + barW} ${y + r} V ${baseY} Z`,
+    }));
+  });
+
+  // 中央値マーカー: 縦線とラベルで分布上の位置を示す（値は上の数値欄にもある）
+  const mx = PAD_L + Math.min(Math.max((median - lo) / (hi - lo), 0), 1) * plotW;
+  svg.appendChild(svgEl('line', { x1: mx, y1: PAD_T - 2, x2: mx, y2: baseY, class: 'median-line' }));
+  const labelX = Math.min(Math.max(mx, PAD_L + 20), W - PAD_R - 20);
+  svg.appendChild(svgEl('text', { x: labelX, y: PAD_T - 6, 'text-anchor': 'middle', class: 'median-label' }, '中央値'));
+
+  // ホバー: ビンの全高を当たり判定にして範囲と件数をツールチップで出す
+  counts.forEach((count, i) => {
+    const hit = svgEl('rect', { x: PAD_L + i * bw, y: PAD_T, width: bw, height: PLOT_H, class: 'hit' });
+    hit.appendChild(svgEl('title', {}, `${secText(lo + i * step)}〜${secText(lo + (i + 1) * step)}: ${count} 件`));
+    svg.appendChild(hit);
+  });
+
+  return svg;
 }
 
 function renderStats() {
   els.statsBody.innerHTML = '';
   const samples = collectStatsSamples();
+  // ヒストグラムの幅はダイアログを開いた後の実測値に合わせる
+  const chartW = els.statsBody.clientWidth || 480;
 
   // 表示順: モデル一覧の並び → それ以外（カスタムモデルなど）は名前順
   const known = MODELS.map((m) => m.id).filter((id) => samples.has(id));
@@ -1134,6 +1200,7 @@ function renderStats() {
     const values = samples.get(id).sort((a, b) => a - b);
     const n = values.length;
     const mean = values.reduce((sum, v) => sum + v, 0) / n;
+    const median = statsQuantile(values, 0.5);
 
     const group = document.createElement('div');
     group.className = 'stats-group';
@@ -1155,22 +1222,23 @@ function renderStats() {
     };
     nums.append(
       stat('平均', formatSec(mean)),
-      stat('中央値', formatSec(statsQuantile(values, 0.5))),
+      stat('中央値', formatSec(median)),
       stat('最短', formatSec(values[0])),
       stat('最長', formatSec(values[n - 1])),
       stat('件数', `${n}`),
     );
     group.appendChild(nums);
 
-    group.appendChild(renderStatsHistogram(values));
+    group.appendChild(renderStatsHistogram(values, median, chartW));
     els.statsBody.appendChild(group);
   }
 }
 
 function initStatsDialog() {
   els.statsBtn.addEventListener('click', () => {
-    renderStats();
+    // ヒストグラムの幅を実測するため、ダイアログを開いてから描画する
     els.statsDialog.showModal();
+    renderStats();
   });
 }
 
@@ -1730,8 +1798,8 @@ function finishModal(job) {
   removeActiveJob(job);
   const done = job.entries.filter((e) => e.result);
   if (done.length === 0) return;
-  // サーバーが記録した実処理時間（DO のキュー待ちを含まない）。統計で使う。
-  // elapsed（クライアント計測・待ち時間込み）は表示互換のためそのまま残す
+  // サーバーが記録した実処理時間（DO のキュー待ちを含まない）。統計と表示で使う。
+  // elapsed（クライアント計測・待ち時間込み）は旧記録との互換と待ち込みの補足表示のため残す
   const procMs = done.map((e) => e.result.elapsedMs).filter((v) => Number.isFinite(v) && v > 0);
   const record = {
     id: `modal_${Date.now()}`,
@@ -1927,6 +1995,19 @@ function loadImage(imgEl, url, maxRetries = 5) {
   imgEl.src = url;
 }
 
+// 履歴レコードの所要時間表示。Modal 版はサーバー計測の実処理時間（procMs、
+// DO のキュー待ちを含まない）があればそれを主表示にする。従来のクライアント
+// 計測値（elapsed、待ち時間込み）は、差が大きいときだけ補足として添える
+function recordElapsedText(record) {
+  if (!Array.isArray(record.procMs) || record.procMs.length === 0) return `${record.elapsed}s`;
+  const totalSec = record.procMs.reduce((sum, ms) => sum + ms, 0) / 1000;
+  const per = record.procMs.length > 1 ? `（${(totalSec / record.procMs.length).toFixed(1)}s/枚）` : '';
+  // 数秒の差はポーリング間隔や送信処理の誤差なので、待ちが明らかなときだけ見せる
+  const wall = parseFloat(record.elapsed);
+  const wait = Number.isFinite(wall) && wall - totalSec >= 5 ? ` ・ 待ち込み ${record.elapsed}s` : '';
+  return `生成 ${totalSec.toFixed(1)}s${per}${wait}`;
+}
+
 function renderDetail(record) {
   selectedId = record.id;
   els.detail.innerHTML = '';
@@ -2003,7 +2084,7 @@ function renderDetail(record) {
   const loraText = record.loras?.length
     ? ` ・ LoRA: ${record.loras.map((l) => loraDisplayName(l.path)).join(', ')}`
     : '';
-  metaLine.textContent = `${record.model}${loraText} ・ ${record.elapsed}s${record.seed !== null ? ` ・ seed: ${record.seed}` : ''}`;
+  metaLine.textContent = `${record.model}${loraText} ・ ${recordElapsedText(record)}${record.seed !== null ? ` ・ seed: ${record.seed}` : ''}`;
   meta.appendChild(metaLine);
 
   const detailActions = document.createElement('div');

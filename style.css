@@ -1073,37 +1073,18 @@ button:focus-visible, a.ghost-btn:focus-visible {
 
 .stats-nums strong { color: var(--text); font-weight: 600; }
 
-.stats-hist {
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 64px;
-  border-bottom: 1px solid var(--border);
-}
+/* SVG ヒストグラム。幅は描画時に実測した viewBox に合わせて縮尺する */
+.stats-chart { display: block; width: 100%; height: auto; }
+.stats-chart .grid { stroke: var(--hairline); }
+.stats-chart .baseline { stroke: var(--border); }
+.stats-chart .bar { fill: var(--accent); }
+.stats-chart .tick { fill: var(--muted); font-size: 10px; }
+.stats-chart .median-line { stroke: var(--muted); }
+.stats-chart .median-label { fill: var(--muted); font-size: 10px; font-weight: 600; }
 
-/* ビン全体を当たり判定にする（バーが低くてもツールチップを出せる） */
-.stats-bin {
-  flex: 1;
-  display: flex;
-  align-items: flex-end;
-  height: 100%;
-  border-radius: 3px 3px 0 0;
-}
-
-.stats-bin:hover { background: var(--bg); }
-
-.stats-bin span {
-  width: 100%;
-  background: var(--accent);
-  border-radius: 3px 3px 0 0;
-}
-
-.stats-axis {
-  display: flex;
-  justify-content: space-between;
-  font-size: 11px;
-  color: var(--muted);
-}
+/* ビンの全高を当たり判定にする（バーが低くてもツールチップを出せる） */
+.stats-chart .hit { fill: transparent; }
+.stats-chart .hit:hover { fill: var(--hairline); }
 
 /* ---------- Civitai import ---------- */
 .civitai-dialog { width: min(560px, 92vw); }
