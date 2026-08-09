@@ -59,6 +59,9 @@ const MOBILE_MQ = window.matchMedia('(max-width: 430px)');
 
 const els = {
   themeBtn: $('#themeBtn'),
+  statsBtn: $('#statsBtn'),
+  statsDialog: $('#statsDialog'),
+  statsBody: $('#statsBody'),
   modelSelect: $('#modelSelect'),
   customModelField: $('#customModelField'),
   customModel: $('#customModel'),
@@ -909,6 +912,170 @@ function initCivitaiDialog() {
   }
 }
 
+/* ---------- 生成時間の統計 ---------- */
+// アクセスポイント（モデル）別に、履歴から画像 1 枚あたりの生成所要時間を集計する。
+//
+// Modal 版はサーバーの Durable Object が全ジョブを順次処理するため、連続投入時の
+// クライアント計測値（record.elapsed）には先行ジョブの処理待ちが含まれる。
+// - 新しい記録: サーバーが実処理時間（record.procMs、ジョブごとの ms 配列）を
+//   記録するのでそれをそのまま使う
+// - 古い記録: 完了時刻（ts）と所要秒（elapsed）から送信時刻を逆算し、直前の
+//   Modal 記録の完了時刻と重なる分（= 待ち時間）を差し引いて補正する。
+//   Modal のジョブはエンドポイントによらず同じ DO で順次処理されるため、
+//   補正のキューは全 Modal 記録をまとめて 1 本として扱う。
+//   途中の履歴が削除されていると重なりを検出できず、待ち時間が残ることがある
+// fal はリクエストが並列に処理されるためこの補正は適用できない（キュー待ち込みの実測値）
+
+function isModalRecord(record) {
+  return typeof record?.model === 'string' && record.model.startsWith('modal/');
+}
+
+// モデル ID → 1 枚あたりの所要秒のサンプル配列
+function collectStatsSamples() {
+  const samples = new Map();
+  const add = (model, sec) => {
+    if (!Number.isFinite(sec) || sec <= 0) return;
+    if (!samples.has(model)) samples.set(model, []);
+    samples.get(model).push(sec);
+  };
+
+  const history = loadHistory().filter((r) => Number.isFinite(r?.ts));
+
+  // Modal: 完了時刻順に並べて順次キューを再構成する
+  const modal = history.filter(isModalRecord).sort((a, b) => a.ts - b.ts);
+  let prevEnd = 0;
+  for (const r of modal) {
+    const count = Math.max(1, r.images?.length ?? 1);
+    if (Array.isArray(r.procMs) && r.procMs.length > 0) {
+      for (const ms of r.procMs) add(r.model, ms / 1000);
+    } else {
+      const elapsedMs = parseFloat(r.elapsed) * 1000;
+      if (elapsedMs > 0) {
+        const start = Math.max(r.ts - elapsedMs, prevEnd);
+        const span = r.ts - start;
+        // 複数枚の記録は 1 ジョブずつ順に処理された合計なので枚数で割り、
+        // 新記録（枚数ぶんのサンプル）と重みを揃えるため枚数回カウントする
+        for (let i = 0; i < count; i++) add(r.model, span / count / 1000);
+      }
+    }
+    prevEnd = Math.max(prevEnd, r.ts);
+  }
+
+  // fal ほか: 比較レコード（variants）は所要時間を持たないので対象外
+  for (const r of history) {
+    if (isModalRecord(r) || Array.isArray(r.variants)) continue;
+    add(r.model, parseFloat(r.elapsed));
+  }
+  return samples;
+}
+
+function statsQuantile(sorted, q) {
+  const pos = (sorted.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+function formatSec(s) {
+  return `${s >= 100 ? s.toFixed(0) : s.toFixed(1)}s`;
+}
+
+function renderStatsHistogram(values) {
+  const wrap = document.createElement('div');
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const bins = Math.min(16, Math.max(5, Math.ceil(Math.sqrt(values.length))));
+  const width = Math.max((max - min) / bins, 0.05);
+  const counts = new Array(bins).fill(0);
+  for (const v of values) {
+    counts[Math.min(bins - 1, Math.floor((v - min) / width))] += 1;
+  }
+  const peak = Math.max(...counts);
+
+  const hist = document.createElement('div');
+  hist.className = 'stats-hist';
+  counts.forEach((c, i) => {
+    const bin = document.createElement('div');
+    bin.className = 'stats-bin';
+    bin.title = `${formatSec(min + i * width)}〜${formatSec(min + (i + 1) * width)}: ${c} 件`;
+    const bar = document.createElement('span');
+    bar.style.height = c === 0 ? '0' : `${Math.max(6, (c / peak) * 100)}%`;
+    bin.appendChild(bar);
+    hist.appendChild(bin);
+  });
+  wrap.appendChild(hist);
+
+  const axis = document.createElement('div');
+  axis.className = 'stats-axis';
+  const lo = document.createElement('span');
+  lo.textContent = formatSec(min);
+  const hi = document.createElement('span');
+  hi.textContent = formatSec(max);
+  axis.append(lo, hi);
+  wrap.appendChild(axis);
+  return wrap;
+}
+
+function renderStats() {
+  els.statsBody.innerHTML = '';
+  const samples = collectStatsSamples();
+
+  // 表示順: モデル一覧の並び → それ以外（カスタムモデルなど）は名前順
+  const known = MODELS.map((m) => m.id).filter((id) => samples.has(id));
+  const others = [...samples.keys()].filter((id) => !known.includes(id)).sort();
+
+  if (known.length + others.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'stats-empty';
+    empty.textContent = '所要時間つきの生成履歴がまだありません';
+    els.statsBody.appendChild(empty);
+    return;
+  }
+
+  for (const id of [...known, ...others]) {
+    const values = samples.get(id).sort((a, b) => a - b);
+    const n = values.length;
+    const mean = values.reduce((sum, v) => sum + v, 0) / n;
+
+    const group = document.createElement('div');
+    group.className = 'stats-group';
+
+    const title = document.createElement('div');
+    title.className = 'stats-title';
+    title.textContent = MODELS.find((m) => m.id === id)?.name ?? id;
+    group.appendChild(title);
+
+    const nums = document.createElement('div');
+    nums.className = 'stats-nums';
+    const stat = (label, value) => {
+      const s = document.createElement('span');
+      s.append(`${label} `);
+      const strong = document.createElement('strong');
+      strong.textContent = value;
+      s.appendChild(strong);
+      return s;
+    };
+    nums.append(
+      stat('平均', formatSec(mean)),
+      stat('中央値', formatSec(statsQuantile(values, 0.5))),
+      stat('最短', formatSec(values[0])),
+      stat('最長', formatSec(values[n - 1])),
+      stat('件数', `${n}`),
+    );
+    group.appendChild(nums);
+
+    group.appendChild(renderStatsHistogram(values));
+    els.statsBody.appendChild(group);
+  }
+}
+
+function initStatsDialog() {
+  els.statsBtn.addEventListener('click', () => {
+    renderStats();
+    els.statsDialog.showModal();
+  });
+}
+
 /* ---------- LoRA compare ---------- */
 
 let compareMode = false;
@@ -1453,7 +1620,7 @@ async function runModalJobFrom(job) {
     } finally {
       clearInterval(ticker);
     }
-    entry.result = { url: r.url, seed: r.seed };
+    entry.result = { url: r.url, seed: r.seed, elapsedMs: r.elapsedMs ?? null };
     saveActiveJob(job);
   }
 
@@ -1465,6 +1632,9 @@ function finishModal(job) {
   removeActiveJob(job);
   const done = job.entries.filter((e) => e.result);
   if (done.length === 0) return;
+  // サーバーが記録した実処理時間（DO のキュー待ちを含まない）。統計で使う。
+  // elapsed（クライアント計測・待ち時間込み）は表示互換のためそのまま残す
+  const procMs = done.map((e) => e.result.elapsedMs).filter((v) => Number.isFinite(v) && v > 0);
   const record = {
     id: `modal_${Date.now()}`,
     ts: Date.now(),
@@ -1474,6 +1644,7 @@ function finishModal(job) {
     loras: job.loras,
     seed: done[0].result.seed,
     elapsed: ((Date.now() - job.startedAt) / 1000).toFixed(1),
+    ...(procMs.length > 0 ? { procMs } : {}),
     images: done.map((e) => ({ url: e.result.url, width: job.input.width, height: job.input.height })),
   };
   addHistoryRecord(record);
@@ -2201,6 +2372,7 @@ function scheduleSaveForm() {
 initTheme();
 initHfDialog();
 initCivitaiDialog();
+initStatsDialog();
 initForm();
 restoreFormState();
 

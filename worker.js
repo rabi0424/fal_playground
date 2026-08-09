@@ -418,6 +418,7 @@ export class SyncState extends DurableObject {
       status: job.status,
       url: job.url ?? null,
       seed: job.seed ?? null,
+      elapsedMs: job.elapsedMs ?? null, // 実処理時間（DO のキュー待ちを含まない）
       error: job.error ?? null,
     };
   }
@@ -598,8 +599,11 @@ export class SyncState extends DurableObject {
           await this.ctx.storage.put(key, job);
           return;
         }
-        // 途中で落ちても際限なく再送されないよう、送信前に回数を記録する
+        // 途中で落ちても際限なく再送されないよう、送信前に回数を記録する。
+        // submittedAt は実処理時間（elapsedMs）の起点。DO のキューで先行ジョブを
+        // 待っていた時間を含まない、Modal 呼び出し自体の所要時間を測るため
         job.attempts += 1;
+        job.submittedAt = Date.now();
         await this.ctx.storage.put(key, job);
         res = await fetch(job.endpoint, {
           method: 'POST',
@@ -647,6 +651,7 @@ export class SyncState extends DurableObject {
       job.status = 'done';
       job.url = `/api/image/${imageId}`;
       job.seed = seed;
+      job.elapsedMs = job.submittedAt ? Date.now() - job.submittedAt : null;
       await this.ctx.storage.put(key, job);
     } catch {
       // ネットワーク断など。pending のまま次の alarm で再試行する
