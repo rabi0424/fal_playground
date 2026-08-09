@@ -42,7 +42,7 @@ const LORA_IMPORT_MAX_ATTEMPTS = 4; // ジョブ全体の実行回数上限（�
 const LORA_MAX_BYTES = 4 * 1024 * 1024 * 1024; // 4GB。LoRA としては十分すぎる上限
 // チェックポイント取り込みの上限。R2 ステージングは multipart 保存に対応しているので
 // 本質的な上限ではなく、異常なサイズの取り込みを弾くための安全弁
-const CKPT_MAX_BYTES = 24 * 1024 * 1024 * 1024;
+const CKPT_MAX_BYTES = 30 * 1024 * 1024 * 1024;
 // R2 の単発 PUT で安全に置けるサイズ。これを超えるステージングは multipart で保存する
 const R2_SINGLE_PUT_MAX = 4 * 1024 * 1024 * 1024;
 // multipart のパートサイズ（R2 の仕様で最後のパート以外は同一サイズである必要がある）
