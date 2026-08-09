@@ -40,6 +40,10 @@ const CIVITAI_HOSTS = /(^|\.)(civitai\.(com|red)|civitaired\.\w+)$/;
 const LORA_STAGING_PREFIX = 'lora-staging/';
 const LORA_IMPORT_MAX_ATTEMPTS = 4; // ジョブ全体の実行回数上限（途中断は続きから再開する）
 const LORA_MAX_BYTES = 4 * 1024 * 1024 * 1024; // 4GB。LoRA としては十分すぎる上限
+// チェックポイント取り込みの上限。R2 の単発アップロード上限（約 4.995 GiB）の内側に
+// 収める。これを超えるチェックポイントは Civitai 経由では取り込めない（HF にある
+// ものなら直接登録すれば Modal が取り込むのでサイズ制限なし）
+const CKPT_MAX_BYTES = 4900 * 1024 * 1024;
 
 // Civitai の URL を解釈する。対応形式:
 //   https://civitai.com/models/{modelId}(?modelVersionId={vid})
@@ -677,10 +681,14 @@ export class SyncState extends DurableObject {
         job.attempts += 1;
         job.submittedAt = Date.now();
         await this.ctx.storage.put(key, job);
+        // チェックポイント指定時は HF トークンを添え、非公開リポジトリからの
+        // 取り込みも Modal 側でできるようにする（ジョブ記録には保存しない）
+        const body = { ...job.payload };
+        if (body.checkpoint && this.env.HF_TOKEN) body.hf_token = this.env.HF_TOKEN;
         res = await fetch(job.endpoint, {
           method: 'POST',
           headers: { ...this.modalHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify(job.payload),
+          body: JSON.stringify(body),
           redirect: 'manual',
         });
       }
@@ -710,7 +718,9 @@ export class SyncState extends DurableObject {
       const meta = {
         app: 'fal playground',
         source: 'krea2-modal',
-        endpoint: job.endpoint.includes('-exp-') ? 'exp' : 'prod',
+        endpoint: job.endpoint.includes('-exp-') ? 'exp'
+          : job.endpoint.includes('-gpusnap-') ? 'gpusnap'
+            : job.endpoint.includes('-ckpt-') ? 'ckpt' : 'prod',
         ...job.payload,
         seed: seed ?? job.payload.seed ?? null,
         created: new Date(job.created).toISOString(),
@@ -742,7 +752,7 @@ export class SyncState extends DurableObject {
   // 専用 DO インスタンス（'lora-import'）で動く前提。ステップごとに進捗を保存し、
   // 途中で落ちても次の alarm で続きから再開する（download は最初からやり直し）
 
-  async startLoraImport(id, sourceUrl, repo, saveMeta) {
+  async startLoraImport(id, sourceUrl, repo, saveMeta, kind = 'lora') {
     const key = `lora:job:${id}`;
     if (await this.ctx.storage.get(key)) return; // 同 id の再送は無視（多重取り込み防止）
 
@@ -765,6 +775,7 @@ export class SyncState extends DurableObject {
       step: 'resolve',
       sourceUrl,
       repo,
+      kind, // 'lora' | 'ckpt'（サイズ上限の切り替えに使う。登録先はクライアント側で判断）
       saveMeta: saveMeta !== false,
       meta: null,
       metaDoc: null,
@@ -785,6 +796,7 @@ export class SyncState extends DurableObject {
     return {
       status: job.status,
       step: job.step,
+      kind: job.kind ?? 'lora',
       fileName: job.meta?.fileName ?? null,
       hfUrl: job.hfUrl ?? null,
       skipped: job.skipped ?? false,
@@ -924,8 +936,11 @@ export class SyncState extends DurableObject {
       await this.failLoraImport(key, job, 'ダウンロード応答にサイズ情報がなく取り込めません');
       return;
     }
-    if (size > LORA_MAX_BYTES) {
-      await this.failLoraImport(key, job, `ファイルが大きすぎます（${(size / 1024 ** 3).toFixed(1)} GB）`);
+    const maxBytes = job.kind === 'ckpt' ? CKPT_MAX_BYTES : LORA_MAX_BYTES;
+    if (size > maxBytes) {
+      await this.failLoraImport(key, job, job.kind === 'ckpt'
+        ? `ファイルが大きすぎます（${(size / 1024 ** 3).toFixed(1)} GB）。Civitai 経由の取り込みは約 4.8 GB までです。Hugging Face にあるモデルなら URL 登録で直接使えます（サイズ制限なし）`
+        : `ファイルが大きすぎます（${(size / 1024 ** 3).toFixed(1)} GB）`);
       return;
     }
     if (!job.meta.fileName) {
@@ -1216,8 +1231,9 @@ export default {
         return new Response('repo は owner/repo の形式で指定してください', { status: 422 });
       }
       const saveMeta = payload.saveMeta !== false; // 既定はサイト情報 JSON も保存する
+      const kind = payload.kind === 'ckpt' ? 'ckpt' : 'lora';
       const importStub = env.STATE.get(env.STATE.idFromName('lora-import'));
-      await importStub.startLoraImport(jobId, sourceUrl, repo, saveMeta);
+      await importStub.startLoraImport(jobId, sourceUrl, repo, saveMeta, kind);
       return Response.json({ queued: true, jobId });
     }
 

@@ -33,6 +33,7 @@ const SIZES = [
 
 const LS_THEME = 'fal_theme';
 const LS_LORAS = 'fal_lora_library';
+const LS_CKPTS = 'fal_ckpt_library'; // 本体のチェックポイントライブラリ（同期のためここでも扱う）
 const LS_ARENA = 'fal_arena';
 const LS_SYNC_TS = 'fal_sync_ts';
 
@@ -248,11 +249,11 @@ function participantShortNames(session) {
   return map;
 }
 
-/* ---------- device sync（app.js と同じ仕組み・セクションは loras + arena） ---------- */
+/* ---------- device sync（app.js と同じ仕組み） ---------- */
 // 注意: /api/state はドキュメント全体を置き換えるため、本体（app.js）側の
-// SYNC_SECTIONS にも 'arena' を追加してある。ここでも両セクションを送る
+// SYNC_SECTIONS と同じセクション一覧をここでも送る（欠けると本体のデータが消える）
 
-const SYNC_SECTIONS = { loras: LS_LORAS, arena: LS_ARENA };
+const SYNC_SECTIONS = { loras: LS_LORAS, arena: LS_ARENA, ckpts: LS_CKPTS };
 const SYNC_PUSH_DELAY_MS = 2000;
 
 let syncPushTimer = null;

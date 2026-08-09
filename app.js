@@ -47,12 +47,16 @@ const LS_HISTORY = 'fal_history'; // サーバー履歴の表示用キャッシ�
 const LS_HISTORY_MIGRATED = 'fal_history_migrated';
 const LS_THEME = 'fal_theme';
 const LS_LORAS = 'fal_lora_library';
+const LS_CKPTS = 'fal_ckpt_library'; // Modal チェックポイント指定版のライブラリ
 const LS_ARENA = 'fal_arena'; // 比較アリーナ（arena.js）のデータ。同期のためここでも扱う
 const LS_FORM = 'fal_form_state';
 const LS_JOB = 'fal_active_job';
 const LS_CIVITAI_JOB = 'fal_civitai_job'; // 進行中の Civitai 取り込みジョブ
 const LORA_URL_OPTION = '__url__';
 const POLL_INTERVAL_MS = 900;
+
+// Modal チェックポイント指定版の既定チェックポイント（modal_comfy の UNET_FILE）
+const DEFAULT_CKPT_NAME = 'Krea-2-Turbo-Q8_0.gguf';
 
 /* ---------- helpers ---------- */
 
@@ -70,7 +74,15 @@ const els = {
   customModelField: $('#customModelField'),
   customModel: $('#customModel'),
   ckptField: $('#ckptField'),
-  ckptName: $('#ckptName'),
+  ckptSelect: $('#ckptSelect'),
+  ckptPath: $('#ckptPath'),
+  ckptUnregBtn: $('#ckptUnregBtn'),
+  ckptHfBtn: $('#ckptHfBtn'),
+  ckptCivitaiBtn: $('#ckptCivitaiBtn'),
+  hfTitle: $('#hfTitle'),
+  hfHint: $('#hfHint'),
+  civitaiTitle: $('#civitaiTitle'),
+  civitaiHint: $('#civitaiHint'),
   prompt: $('#prompt'),
   loraField: $('#loraField'),
   loraLabel: $('#loraLabel'),
@@ -571,12 +583,128 @@ function collectLoras() {
   return collectLorasFrom(els.loraList);
 }
 
+/* ---------- checkpoint library (Modal チェックポイント指定版) ---------- */
+// LoRA ライブラリと同じ考え方で、HF の resolve URL（または Volume 内のファイル名）を
+// 登録しておき、生成時は checkpoint フィールドとして Modal API に渡す。
+// URL 指定の場合、初回使用時に Modal 側が HF から Volume へ取り込んでキャッシュする
+
+function loadCkptLibrary() {
+  try {
+    return JSON.parse(localStorage.getItem(LS_CKPTS)) || [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCkptLibrary(items) {
+  localStorage.setItem(LS_CKPTS, JSON.stringify(items));
+  syncMarkDirty('ckpts');
+}
+
+// チェックポイントは .gguf / .safetensors の区別が重要なので拡張子ごと表示する
+function ckptDisplayName(path) {
+  const seg = path.split('?')[0].split('/').filter(Boolean).pop() || path;
+  try {
+    return decodeURIComponent(seg);
+  } catch {
+    return seg;
+  }
+}
+
+function registerCkpt(path) {
+  const library = loadCkptLibrary();
+  if (!library.some((item) => item.path === path)) {
+    library.push({ name: ckptDisplayName(path), path });
+    saveCkptLibrary(library);
+  }
+  populateCkptSelect(els.ckptSelect.value);
+}
+
+function unregisterCkpt(path) {
+  saveCkptLibrary(loadCkptLibrary().filter((item) => item.path !== path));
+  populateCkptSelect(els.ckptSelect.value);
+}
+
+function sortedCkptLibrary() {
+  return [...loadCkptLibrary()].sort((a, b) =>
+    a.name.localeCompare(b.name, 'ja', { numeric: true, sensitivity: 'base' }));
+}
+
+// 「既定」+ 登録済みチェックポイント + 「URL / ファイル名を入力…」でプルダウンを構成
+function populateCkptSelect(selected) {
+  const select = els.ckptSelect;
+  const want = selected ?? '';
+  select.innerHTML = '';
+  const defOpt = document.createElement('option');
+  defOpt.value = '';
+  defOpt.textContent = `既定（${DEFAULT_CKPT_NAME}）`;
+  select.appendChild(defOpt);
+  for (const item of sortedCkptLibrary()) {
+    const opt = document.createElement('option');
+    opt.value = item.path;
+    opt.textContent = item.name;
+    opt.title = item.path;
+    select.appendChild(opt);
+  }
+  const urlOpt = document.createElement('option');
+  urlOpt.value = LORA_URL_OPTION;
+  urlOpt.textContent = 'URL / ファイル名を入力…';
+  select.appendChild(urlOpt);
+  select.value = want;
+  if (select.value !== want) select.value = ''; // 登録解除などで消えた項目は既定へ
+  syncCkptRow();
+}
+
+function syncCkptRow() {
+  const urlMode = els.ckptSelect.value === LORA_URL_OPTION;
+  els.ckptPath.hidden = !urlMode;
+  // 既定・直接入力では「登録解除」を出さない
+  els.ckptUnregBtn.hidden = urlMode || els.ckptSelect.value === '';
+}
+
+// 生成に使うチェックポイント指定（空文字なら既定 = フィールド省略）
+function selectedCkpt() {
+  const v = els.ckptSelect.value;
+  if (v === LORA_URL_OPTION) return els.ckptPath.value.trim();
+  return v;
+}
+
+function initCkptField() {
+  populateCkptSelect('');
+  els.ckptSelect.addEventListener('change', syncCkptRow);
+
+  // URL を入力したら自動登録して、その項目を選択状態にする
+  //（素のファイル名は登録せずそのまま送る: Volume に既にあるものを指す用途）
+  els.ckptPath.addEventListener('change', () => {
+    const value = els.ckptPath.value.trim();
+    if (!/^https:\/\//i.test(value)) return;
+    registerCkpt(value);
+    populateCkptSelect(value);
+    els.ckptPath.value = '';
+  });
+
+  els.ckptUnregBtn.addEventListener('click', () => {
+    const current = els.ckptSelect.value;
+    if (current === '' || current === LORA_URL_OPTION) return;
+    unregisterCkpt(current);
+    populateCkptSelect('');
+  });
+
+  els.ckptHfBtn.addEventListener('click', () => openHfDialog('ckpt'));
+  els.ckptCivitaiBtn.addEventListener('click', () => openCivitaiDialog('ckpt'));
+}
+
 /* ---------- Hugging Face bulk import ---------- */
-// 公開リポジトリの .safetensors を一覧表示し、選択したものを LoRA ライブラリに
-// 一括登録する。登録のみで、現在の LoRA 設定行には追加しない
+// 公開リポジトリのモデルファイルを一覧表示し、選択したものをライブラリに
+// 一括登録する。登録のみで、現在の LoRA 設定行には追加しない。
+// LoRA モード（.safetensors → LoRA ライブラリ）とチェックポイントモード
+// （.safetensors / .gguf → チェックポイントライブラリ）を兼ねる
 
 // 既定のリポジトリ。ダイアログを開くたびにこの値へ戻す
 const HF_DEFAULT_REPO = 'tottie2215/temp_str';
+const HF_DEFAULT_CKPT_REPO = 'Abiray/Krea-2-Turbo-GGUF';
+
+let hfMode = 'lora'; // 'lora' | 'ckpt'
 
 function parseHfRepo(raw) {
   const s = raw.trim().replace(/^https?:\/\/huggingface\.co\//, '');
@@ -627,9 +755,12 @@ async function loadHfRepo() {
   }
   hfSetStatus('');
 
-  const files = entries.filter((e) => e.type === 'file' && /\.safetensors$/i.test(e.path));
+  const pattern = hfMode === 'ckpt' ? /\.(safetensors|gguf)$/i : /\.safetensors$/i;
+  const files = entries.filter((e) => e.type === 'file' && pattern.test(e.path));
   if (files.length === 0) {
-    hfSetError('このリポジトリに .safetensors ファイルは見つかりませんでした');
+    hfSetError(hfMode === 'ckpt'
+      ? 'このリポジトリに .safetensors / .gguf ファイルは見つかりませんでした'
+      : 'このリポジトリに .safetensors ファイルは見つかりませんでした');
     return;
   }
 
@@ -637,7 +768,8 @@ async function loadHfRepo() {
   const dateOf = (f) => Date.parse(f.lastCommit?.date ?? '') || 0;
   files.sort((a, b) => dateOf(b) - dateOf(a));
 
-  const registered = new Set(loadLoraLibrary().map((l) => l.path));
+  const library = hfMode === 'ckpt' ? loadCkptLibrary() : loadLoraLibrary();
+  const registered = new Set(library.map((l) => l.path));
   for (const f of files) {
     const url = `https://huggingface.co/${repo}/resolve/main/${f.path}`;
     const done = registered.has(url);
@@ -682,18 +814,27 @@ function hfApplyFilter() {
   }
 }
 
+function openHfDialog(mode) {
+  hfMode = mode;
+  els.hfTitle.textContent = mode === 'ckpt'
+    ? 'Hugging Face からチェックポイントを一括登録'
+    : 'Hugging Face から LoRA を一括登録';
+  els.hfHint.innerHTML = mode === 'ckpt'
+    ? '公開リポジトリの ID（owner/repo）または URL を入力すると、含まれる .safetensors / .gguf を一覧表示します。<br>選択したものはチェックポイントライブラリに登録され、初回使用時に Modal Volume へ取り込まれます。'
+    : '公開リポジトリの ID（owner/repo）または URL を入力すると、含まれる .safetensors を一覧表示します。<br>選択したものは LoRA ライブラリに登録されます（現在の LoRA 設定行には追加されません）。';
+  hfSetError('');
+  hfSetStatus('');
+  // 開くたびに既定リポジトリ・絞り込みへ戻して自動で読み込む
+  els.hfRepoInput.value = mode === 'ckpt' ? HF_DEFAULT_CKPT_REPO : HF_DEFAULT_REPO;
+  els.hfFilterInput.value = '';
+  els.hfList.innerHTML = '';
+  hfUpdateAddBtn();
+  els.hfDialog.showModal();
+  loadHfRepo();
+}
+
 function initHfDialog() {
-  els.hfOpenBtn.addEventListener('click', () => {
-    hfSetError('');
-    hfSetStatus('');
-    // 開くたびに既定リポジトリ・絞り込みへ戻して自動で読み込む
-    els.hfRepoInput.value = HF_DEFAULT_REPO;
-    els.hfFilterInput.value = '';
-    els.hfList.innerHTML = '';
-    hfUpdateAddBtn();
-    els.hfDialog.showModal();
-    loadHfRepo();
-  });
+  els.hfOpenBtn.addEventListener('click', () => openHfDialog('lora'));
 
   els.hfLoadBtn.addEventListener('click', loadHfRepo);
   els.hfFilterInput.addEventListener('input', hfApplyFilter);
@@ -712,7 +853,7 @@ function initHfDialog() {
     if (els.hfDialog.returnValue !== 'add') return;
     const urls = [...els.hfList.querySelectorAll('input:checked:not(:disabled)')]
       .map((cb) => cb.value);
-    for (const url of urls) registerLora(url);
+    for (const url of urls) (hfMode === 'ckpt' ? registerCkpt : registerLora)(url);
   });
 }
 
@@ -731,6 +872,18 @@ const CIVITAI_POLL_MS = 2000;
 
 let civitaiResolved = null; // 「確認」で取得したメタデータ（URL・repo 変更で無効化）
 let civitaiPolling = false;
+let civitaiMode = 'lora'; // 'lora' | 'ckpt'（取り込み完了時の登録先ライブラリ）
+
+// ジョブはページを跨いで完了しうるので、登録先はダイアログの状態ではなく
+// localStorage のジョブ記録に控えた kind から決める
+function civitaiRegisterTo(kind, hfUrl) {
+  if (kind === 'ckpt') {
+    registerCkpt(hfUrl);
+    return `チェックポイントライブラリに登録しました: ${ckptDisplayName(hfUrl)}`;
+  }
+  registerLora(hfUrl);
+  return `LoRA ライブラリに登録しました: ${loraDisplayName(hfUrl)}`;
+}
 
 // done: true で完了表示（スピナーを止めてチェックマークにする）
 function civitaiSetStatus(text, done = false) {
@@ -841,8 +994,9 @@ function civitaiRenderPreview(meta) {
     note('サイト情報を取得できなかったため、JSON の保存はありません', true);
   }
 
-  if (meta.modelType && meta.modelType !== 'LORA') {
-    note(`モデル種類が LORA ではありません（${meta.modelType}）`, true);
+  const expectedType = civitaiMode === 'ckpt' ? 'Checkpoint' : 'LORA';
+  if (meta.modelType && meta.modelType !== expectedType) {
+    note(`モデル種類が ${expectedType} ではありません（${meta.modelType}）`, true);
   }
   note(meta.metaWarning, true);
   note(meta.repoError, true);
@@ -894,8 +1048,7 @@ async function civitaiStartImport() {
   // JSON が未保存で保存 ON のときはジョブに進み、サーバー側で JSON のみコミットされる
   if (civitaiResolved.alreadyUploaded
     && (!saveMeta || civitaiResolved.metaFileExists || !civitaiResolved.metaDoc)) {
-    registerLora(civitaiResolved.alreadyUploaded);
-    civitaiSetStatus('既存のファイルを LoRA ライブラリに登録しました', true);
+    civitaiSetStatus(`既存のファイルを${civitaiRegisterTo(civitaiMode, civitaiResolved.alreadyUploaded)}`, true);
     return;
   }
 
@@ -910,7 +1063,7 @@ async function civitaiStartImport() {
     const res = await fetch('/api/lora-import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId, url: rawUrl, repo, saveMeta }),
+      body: JSON.stringify({ jobId, url: rawUrl, repo, saveMeta, kind: civitaiMode }),
     });
     if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
   } catch (err) {
@@ -919,7 +1072,7 @@ async function civitaiStartImport() {
     civitaiSyncStartBtn();
     return;
   }
-  localStorage.setItem(LS_CIVITAI_JOB, JSON.stringify({ jobId, ts: Date.now() }));
+  localStorage.setItem(LS_CIVITAI_JOB, JSON.stringify({ jobId, ts: Date.now(), kind: civitaiMode }));
   civitaiPollJob();
 }
 
@@ -953,10 +1106,10 @@ async function civitaiPollJob() {
       if (job.status === 'done') {
         localStorage.removeItem(LS_CIVITAI_JOB);
         civitaiSetProgress(null, null);
-        registerLora(job.hfUrl);
+        const registered = civitaiRegisterTo(active.kind === 'ckpt' ? 'ckpt' : 'lora', job.hfUrl);
         civitaiSetStatus(job.skipped
-          ? `既にアップロード済みだったため本体は省略し、登録を行いました: ${loraDisplayName(job.hfUrl)}`
-          : `取り込みが完了し、LoRA ライブラリに登録しました: ${loraDisplayName(job.hfUrl)}`, true);
+          ? `既にアップロード済みだったため本体は省略し、登録だけ行いました（${registered}）`
+          : `取り込みが完了し、${registered}`, true);
         break;
       }
       if (job.status === 'error') {
@@ -979,19 +1132,34 @@ async function civitaiPollJob() {
   }
 }
 
+function openCivitaiDialog(mode) {
+  // モードが変わったら前回の確認結果は使い回さない（登録先・警告表示が異なる）
+  if (civitaiMode !== mode) {
+    civitaiResolved = null;
+    els.civitaiPreview.hidden = true;
+  }
+  civitaiMode = mode;
+  els.civitaiTitle.textContent = mode === 'ckpt'
+    ? 'Civitai からチェックポイントを取り込み'
+    : 'Civitai から LoRA を取り込み';
+  els.civitaiHint.innerHTML = (mode === 'ckpt'
+    ? 'Civitai のモデルページ URL（modelVersionId 付き可）またはダウンロード URL を入力すると、モデルを Hugging Face リポジトリへ取り込んでチェックポイントライブラリに登録します（約 4.8 GB まで）。<br>'
+    : 'Civitai のモデルページ URL（modelVersionId 付き可）またはダウンロード URL を入力すると、モデルを Hugging Face リポジトリへアップロードして LoRA ライブラリに登録します。<br>')
+    + '公開リポジトリへのアップロードは再配布に当たります。モデルのライセンスを確認してください。';
+  civitaiSetError('');
+  if (!civitaiActiveJob()) {
+    civitaiSetStatus('');
+    civitaiSetProgress(null, null);
+  }
+  els.civitaiRepoInput.value ||= HF_DEFAULT_REPO;
+  els.civitaiMetaToggle.checked = true; // JSON 保存は開くたびに既定の ON へ戻す
+  civitaiSyncStartBtn();
+  els.civitaiDialog.showModal();
+  civitaiPollJob(); // 進行中ジョブがあれば表示を再開する
+}
+
 function initCivitaiDialog() {
-  els.civitaiOpenBtn.addEventListener('click', () => {
-    civitaiSetError('');
-    if (!civitaiActiveJob()) {
-      civitaiSetStatus('');
-      civitaiSetProgress(null, null);
-    }
-    els.civitaiRepoInput.value ||= HF_DEFAULT_REPO;
-    els.civitaiMetaToggle.checked = true; // JSON 保存は開くたびに既定の ON へ戻す
-    civitaiSyncStartBtn();
-    els.civitaiDialog.showModal();
-    civitaiPollJob(); // 進行中ジョブがあれば表示を再開する
-  });
+  els.civitaiOpenBtn.addEventListener('click', () => openCivitaiDialog('lora'));
 
   els.civitaiResolveBtn.addEventListener('click', civitaiResolveUrl);
   els.civitaiStartBtn.addEventListener('click', civitaiStartImport);
@@ -1575,6 +1743,9 @@ function finishSingle(job, r) {
 // 呼び出しの認証には端末間同期と同じトークン（SYNC_TOKEN）を使う
 
 const MODAL_TIMEOUT_MS = 300_000; // INTEGRATION.md 推奨: 300 秒以上
+// チェックポイント指定時は初回に Modal 側で HF からの取り込み（10GB 超もありうる）が
+// 走るため、Modal の関数タイムアウト（600 秒）+ 余裕まで待つ
+const MODAL_CKPT_TIMEOUT_MS = 660_000;
 const MODAL_POLL_INTERVAL_MS = 2000;
 
 function buildModalInput(prompt) {
@@ -1624,6 +1795,7 @@ async function modalSubmit(body) {
 // ジョブ完了までポーリングする。一時的な接続エラー（オフライン・タブ休止から
 // の復帰直後など）は無視して次のポーリングで拾う
 async function modalAwaitJob(job, jobId) {
+  const timeoutMs = job.input?.checkpoint ? MODAL_CKPT_TIMEOUT_MS : MODAL_TIMEOUT_MS;
   const pollStart = Date.now();
   while (true) {
     await sleep(MODAL_POLL_INTERVAL_MS);
@@ -1642,8 +1814,8 @@ async function modalAwaitJob(job, jobId) {
 
     // タイムアウト判定はポーリング結果を確認した後に行う（タブ休止からの復帰時、
     // 完了済みならタイムアウトにせず結果を採用できる）
-    if (Date.now() - pollStart > MODAL_TIMEOUT_MS) {
-      throw new Error(`${MODAL_TIMEOUT_MS / 1000} 秒以内に完了しませんでした。Modal ダッシュボードでアプリの状態を確認してください`);
+    if (Date.now() - pollStart > timeoutMs) {
+      throw new Error(`${timeoutMs / 1000} 秒以内に完了しませんでした。Modal ダッシュボードでアプリの状態を確認してください`);
     }
   }
 }
@@ -1652,10 +1824,11 @@ async function generateModal(model, prompt) {
   const input = buildModalInput(prompt);
   // 実験版 / 本番などの切り替え。URL は Worker 側の許可リストで解決される
   input.endpoint = model.modalEndpoint;
-  // チェックポイント指定版: Volume 内のファイル名をそのまま渡す（空なら既定）。
-  // 存在しない名前はサーバーが 404 + 利用可能一覧で返すのでここでは検証しない
+  // チェックポイント指定版: 選択中のチェックポイント（HF URL または Volume 内の
+  // ファイル名）を渡す（空なら既定）。存在しない指定はサーバーが 404 +
+  // 利用可能一覧で返すのでここでは検証しない
   if (model.ckpt) {
-    const ckpt = els.ckptName.value.trim();
+    const ckpt = selectedCkpt();
     if (ckpt) input.checkpoint = ckpt;
   }
   if (input.cfg !== undefined && (input.cfg < 0 || input.cfg > 1)) {
@@ -2292,6 +2465,17 @@ function reuseRecord(record) {
   if (!known) els.customModel.value = record.model;
   updateModelFields();
 
+  // チェックポイント指定版はチェックポイントも復元する（未登録の URL なら登録する）
+  const recordCkpt = record.input?.checkpoint ?? '';
+  if (recordCkpt && /^https:\/\//i.test(recordCkpt)) registerCkpt(recordCkpt);
+  populateCkptSelect(recordCkpt);
+  if (els.ckptSelect.value !== recordCkpt) {
+    // ライブラリに無いファイル名指定は直接入力モードで復元する
+    populateCkptSelect(recordCkpt ? LORA_URL_OPTION : '');
+    els.ckptPath.value = recordCkpt;
+    syncCkptRow();
+  }
+
   if (record.type === 'compare') {
     setCompareMode(true);
     els.loraList.innerHTML = '';
@@ -2318,7 +2502,7 @@ function reuseRecord(record) {
 // /api/state はドキュメント全体を置き換えるため、比較アリーナ（arena.html）の
 // セクションもここに含めて送る（含めないと本体の送信でアリーナのデータが消える）
 const LS_SYNC_TS = 'fal_sync_ts';
-const SYNC_SECTIONS = { loras: LS_LORAS, arena: LS_ARENA };
+const SYNC_SECTIONS = { loras: LS_LORAS, arena: LS_ARENA, ckpts: LS_CKPTS };
 const SYNC_PUSH_DELAY_MS = 2000;
 
 let syncPushTimer = null;
@@ -2385,7 +2569,10 @@ async function syncPull() {
   }
   saveSyncTs(ts);
 
-  if (changed) refreshLoraSelects();
+  if (changed) {
+    refreshLoraSelects();
+    populateCkptSelect(els.ckptSelect.value);
+  }
   if (needPush) syncPush();
 }
 
@@ -2421,7 +2608,8 @@ function saveFormState() {
   const state = {
     model: els.modelSelect.value,
     customModel: els.customModel.value,
-    ckptName: els.ckptName.value,
+    ckptSelect: els.ckptSelect.value,
+    ckptPath: els.ckptPath.value,
     prompt: els.prompt.value,
     size: els.sizeSelect.value,
     customWidth: els.customWidth.value,
@@ -2446,7 +2634,9 @@ function restoreFormState() {
 
   if (s.model) els.modelSelect.value = s.model;
   els.customModel.value = s.customModel || '';
-  els.ckptName.value = s.ckptName || '';
+  populateCkptSelect(s.ckptSelect || '');
+  els.ckptPath.value = s.ckptPath || '';
+  syncCkptRow();
   els.prompt.value = s.prompt || '';
   updateModelFields();
 
@@ -2486,6 +2676,7 @@ initTheme();
 initHfDialog();
 initCivitaiDialog();
 initStatsDialog();
+initCkptField();
 initForm();
 restoreFormState();
 
