@@ -638,6 +638,18 @@ button:focus-visible, a.ghost-btn:focus-visible {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* 完了メッセージ用: スピナーを回し続けず、チェックマークに置き換える */
+.status.done::before {
+  content: "✓";
+  width: auto;
+  height: auto;
+  border: none;
+  border-radius: 0;
+  animation: none;
+  color: var(--success);
+  font-weight: 700;
+}
+
 .error {
   font-size: 13px;
   color: var(--danger);
@@ -1020,6 +1032,177 @@ button:focus-visible, a.ghost-btn:focus-visible {
 
 .hf-item.registered { opacity: 0.55; cursor: default; }
 
+/* ---------- generation time stats ---------- */
+.stats-dialog { width: min(560px, 92vw); }
+
+.stats-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-height: 60vh;
+  max-height: 60svh;
+  overflow-y: auto;
+}
+
+/* スクロール領域はフォーカス可能なため、既定の無骨なリングではなく
+   キーボード操作時のみアプリ共通のアクセントリングを出す */
+.stats-body:focus { outline: none; }
+.stats-body:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+.stats-empty { color: var(--muted); font-size: 13px; }
+
+.stats-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stats-title { font-size: 13px; font-weight: 600; }
+
+.stats-nums {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.stats-nums strong { color: var(--text); font-weight: 600; }
+
+.stats-hist {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 64px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ビン全体を当たり判定にする（バーが低くてもツールチップを出せる） */
+.stats-bin {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  height: 100%;
+  border-radius: 3px 3px 0 0;
+}
+
+.stats-bin:hover { background: var(--bg); }
+
+.stats-bin span {
+  width: 100%;
+  background: var(--accent);
+  border-radius: 3px 3px 0 0;
+}
+
+.stats-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* ---------- Civitai import ---------- */
+.civitai-dialog { width: min(560px, 92vw); }
+
+.civitai-search {
+  display: flex;
+  gap: 8px;
+}
+
+.civitai-search input { flex: 1; min-width: 0; }
+
+.civitai-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 13px;
+}
+
+.civitai-row { word-break: break-all; }
+
+.civitai-row-label {
+  display: inline-block;
+  min-width: 5.5em;
+  color: var(--muted);
+}
+
+.civitai-note { color: var(--muted); font-size: 12px; }
+
+.civitai-note.warn { color: var(--danger); }
+
+.civitai-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.civitai-progress-track {
+  flex: 1;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.civitai-progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.civitai-progress-text {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.civitai-meta-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.civitai-meta-check input {
+  width: auto;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+
+.civitai-desc { color: var(--muted); font-size: 12px; }
+
+.civitai-json summary {
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.civitai-json pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.5;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* ---------- mobile (iPhone 16: 393pt / Plus・Pro Max: 430pt) ---------- */
 .mobile-only { display: none; }
 
@@ -1032,6 +1215,11 @@ button:focus-visible, a.ghost-btn:focus-visible {
     /* sticky 化に伴い Dynamic Island ぶんの余白はバー自身が持つ */
     padding-top: calc(12px + env(safe-area-inset-top));
   }
+
+  /* 項目が増えても 1 行に収める（ブランドは "fal" のみ表示に短縮） */
+  .brand span { display: none; }
+  .topbar-actions { gap: 6px; }
+  .topbar-actions .ghost-btn { padding: 6px 8px; font-size: 13px; }
 
   .layout {
     /* 下部固定の生成バーに隠れないぶんの余白を確保する */

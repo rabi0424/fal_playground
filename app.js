@@ -46,6 +46,7 @@ const LS_LORAS = 'fal_lora_library';
 const LS_ARENA = 'fal_arena'; // 比較アリーナ（arena.js）のデータ。同期のためここでも扱う
 const LS_FORM = 'fal_form_state';
 const LS_JOB = 'fal_active_job';
+const LS_CIVITAI_JOB = 'fal_civitai_job'; // 進行中の Civitai 取り込みジョブ
 const LORA_URL_OPTION = '__url__';
 const POLL_INTERVAL_MS = 900;
 
@@ -58,6 +59,9 @@ const MOBILE_MQ = window.matchMedia('(max-width: 430px)');
 
 const els = {
   themeBtn: $('#themeBtn'),
+  statsBtn: $('#statsBtn'),
+  statsDialog: $('#statsDialog'),
+  statsBody: $('#statsBody'),
   modelSelect: $('#modelSelect'),
   customModelField: $('#customModelField'),
   customModel: $('#customModel'),
@@ -75,6 +79,17 @@ const els = {
   hfError: $('#hfError'),
   hfList: $('#hfList'),
   hfAddBtn: $('#hfAddBtn'),
+  civitaiOpenBtn: $('#civitaiOpenBtn'),
+  civitaiDialog: $('#civitaiDialog'),
+  civitaiUrlInput: $('#civitaiUrlInput'),
+  civitaiResolveBtn: $('#civitaiResolveBtn'),
+  civitaiRepoInput: $('#civitaiRepoInput'),
+  civitaiMetaToggle: $('#civitaiMetaToggle'),
+  civitaiPreview: $('#civitaiPreview'),
+  civitaiStatus: $('#civitaiStatus'),
+  civitaiProgress: $('#civitaiProgress'),
+  civitaiError: $('#civitaiError'),
+  civitaiStartBtn: $('#civitaiStartBtn'),
   compareToggle: $('#compareToggle'),
   compareField: $('#compareField'),
   variantList: $('#variantList'),
@@ -467,6 +482,22 @@ function unregisterLora(path) {
   refreshLoraSelects();
 }
 
+// 過去の Civitai 取り込み（アップロード済み判定）がサブフォルダのパスを %2F に
+// エンコードした URL で登録していた不具合の補正。%2F だと HF 一括登録経由の
+// URL と食い違い、Modal 生成へ渡る LoRA 名が変わって効かなくなる
+(function normalizeLoraLibrary() {
+  const library = loadLoraLibrary();
+  let changed = false;
+  for (const item of library) {
+    if (/^https:\/\/huggingface\.co\/.*%2F/i.test(item.path)) {
+      item.path = item.path.replace(/%2F/gi, '/');
+      item.name = loraDisplayName(item.path);
+      changed = true;
+    }
+  }
+  if (changed) saveLoraLibrary(library);
+})();
+
 // プルダウンでの表示順: 名前順。名前に含まれる数字（末尾のバージョン番号
 // 0005000 など）は数値として比較し、同じ LoRA の別バージョンが小さい順に並ぶ。
 // 登録データ（localStorage）の順序は変えず表示時にだけ並び替える
@@ -675,6 +706,471 @@ function initHfDialog() {
     const urls = [...els.hfList.querySelectorAll('input:checked:not(:disabled)')]
       .map((cb) => cb.value);
     for (const url of urls) registerLora(url);
+  });
+}
+
+/* ---------- Civitai import ---------- */
+// Civitai の URL からモデルをサーバー側で HF リポジトリへ取り込み、完了したら
+// LoRA ライブラリに登録する。実処理は Worker のジョブなのでタブを閉じても継続する。
+// 進行中のジョブ ID は localStorage に控え、再訪時にポーリングを再開する
+
+const CIVITAI_STEP_LABELS = {
+  resolve: 'モデル情報を確認中…',
+  download: 'Civitai からダウンロード中…（サイズにより数分かかります）',
+  upload: 'Hugging Face へアップロード中…（サイズにより数分かかります）',
+  commit: 'リポジトリへコミット中…',
+};
+const CIVITAI_POLL_MS = 2000;
+
+let civitaiResolved = null; // 「確認」で取得したメタデータ（URL・repo 変更で無効化）
+let civitaiPolling = false;
+
+// done: true で完了表示（スピナーを止めてチェックマークにする）
+function civitaiSetStatus(text, done = false) {
+  els.civitaiStatus.hidden = !text;
+  els.civitaiStatus.textContent = text || '';
+  els.civitaiStatus.classList.toggle('done', !!text && done);
+}
+
+function civitaiSetError(text) {
+  els.civitaiError.hidden = !text;
+  els.civitaiError.textContent = text || '';
+}
+
+function civitaiActiveJob() {
+  try {
+    return JSON.parse(localStorage.getItem(LS_CIVITAI_JOB));
+  } catch {
+    return null;
+  }
+}
+
+// 転送中（download / upload ステップ）のプログレスバー。それ以外では隠す
+function civitaiSetProgress(done, total) {
+  const show = Number.isFinite(done) && Number.isFinite(total) && total > 0;
+  els.civitaiProgress.hidden = !show;
+  if (!show) return;
+  const pct = Math.min(100, (done / total) * 100);
+  els.civitaiProgress.querySelector('.civitai-progress-fill').style.width = `${pct}%`;
+  // 桁は合計サイズ基準で揃える（"45.3 / 218 MB" のような不揃いを避ける）
+  const digits = total < 100 * 1024 * 1024 ? 1 : 0;
+  const mb = (b) => (b / 1024 / 1024).toFixed(digits);
+  els.civitaiProgress.querySelector('.civitai-progress-text').textContent
+    = `${mb(done)} / ${mb(total)} MB`;
+}
+
+function civitaiSyncStartBtn() {
+  const busy = civitaiActiveJob() != null;
+  els.civitaiStartBtn.disabled = busy || !civitaiResolved || !!civitaiResolved.repoError;
+  // 本体もJSONも新規作業が不要なときだけ「登録」表記にする
+  const registerOnly = civitaiResolved?.alreadyUploaded
+    && (!els.civitaiMetaToggle.checked || civitaiResolved.metaFileExists || !civitaiResolved.metaDoc);
+  els.civitaiStartBtn.textContent = registerOnly ? 'ライブラリに登録' : '取り込み開始';
+}
+
+function civitaiRenderPreview(meta) {
+  els.civitaiPreview.innerHTML = '';
+  const row = (label, value) => {
+    if (!value) return;
+    const div = document.createElement('div');
+    div.className = 'civitai-row';
+    const l = document.createElement('span');
+    l.className = 'civitai-row-label';
+    l.textContent = label;
+    div.append(l, document.createTextNode(value));
+    els.civitaiPreview.appendChild(div);
+  };
+  const note = (text, warn = false) => {
+    if (!text) return;
+    const div = document.createElement('div');
+    div.className = warn ? 'civitai-note warn' : 'civitai-note';
+    div.textContent = text;
+    els.civitaiPreview.appendChild(div);
+  };
+
+  row('モデル', meta.modelName ?? '（不明）');
+  row('バージョン', [meta.versionName, meta.baseModel].filter(Boolean).join(' ・ '));
+  const size = meta.sizeKB ? `${(meta.sizeKB / 1024).toFixed(0)} MB` : '';
+  row('ファイル', [meta.fileName ?? '（DL 時に決定）', size].filter(Boolean).join(' ・ '));
+
+  // 保存対象のサイト情報（トリガーワード等）。使い物になるかここで判断できるよう、
+  // 要点を整形して出しつつ、保存される JSON 全文も畳んで見られるようにする
+  const doc = meta.metaDoc;
+  if (doc) {
+    const words = doc.version?.trainedWords ?? [];
+    row('トリガー', words.length ? words.join(' / ') : '（登録なし）');
+    const byline = [
+      doc.model?.creator ? `作者: ${doc.model.creator}` : null,
+      doc.model?.tags?.length ? doc.model.tags.slice(0, 6).join(', ') : null,
+    ].filter(Boolean).join(' ・ ');
+    row('作者・タグ', byline);
+    const sampleCount = doc.images?.length ?? 0;
+    row('サンプル', sampleCount
+      ? `生成設定つき ${sampleCount} 件（URL と設定のみ保存・画像本体は保存しません）` : '');
+
+    // 説明文は HTML で来るのでテキスト化して先頭だけ見せる
+    const descHtml = doc.version?.description || doc.model?.description || '';
+    if (descHtml) {
+      const text = new DOMParser().parseFromString(descHtml, 'text/html').body.textContent
+        .replace(/\s+/g, ' ').trim();
+      if (text) {
+        const div = document.createElement('div');
+        div.className = 'civitai-desc';
+        div.textContent = text.length > 300 ? `${text.slice(0, 300)}…` : text;
+        els.civitaiPreview.appendChild(div);
+      }
+    }
+
+    const details = document.createElement('details');
+    details.className = 'civitai-json';
+    const summary = document.createElement('summary');
+    summary.textContent = '保存される JSON を表示';
+    details.appendChild(summary);
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(doc, null, 2);
+    details.appendChild(pre);
+    els.civitaiPreview.appendChild(details);
+  } else {
+    note('サイト情報を取得できなかったため、JSON の保存はありません', true);
+  }
+
+  if (meta.modelType && meta.modelType !== 'LORA') {
+    note(`モデル種類が LORA ではありません（${meta.modelType}）`, true);
+  }
+  note(meta.metaWarning, true);
+  note(meta.repoError, true);
+  if (meta.alreadyUploaded) {
+    note(doc && !meta.metaFileExists
+      ? '同じ内容のファイルが既にリポジトリにあります（本体はスキップし、JSON の保存と登録だけ行います）'
+      : '同じ内容のファイルが既にリポジトリにあります。アップロードは行わず登録だけします');
+  } else if (meta.nameExists) {
+    note('同名のファイルがリポジトリにあります（内容が違うため上書きされます）', true);
+  }
+  els.civitaiPreview.hidden = false;
+}
+
+async function civitaiResolveUrl() {
+  const rawUrl = els.civitaiUrlInput.value.trim();
+  const repo = parseHfRepo(els.civitaiRepoInput.value);
+  civitaiResolved = null;
+  els.civitaiPreview.hidden = true;
+  civitaiSyncStartBtn();
+  if (!rawUrl) {
+    civitaiSetError('Civitai の URL を入力してください');
+    return;
+  }
+  if (!repo) {
+    civitaiSetError('アップロード先を owner/repo の形式で入力してください');
+    return;
+  }
+  civitaiSetError('');
+  civitaiSetStatus('モデル情報を取得中…');
+  try {
+    const res = await fetch(`/api/civitai/resolve?url=${encodeURIComponent(rawUrl)}&repo=${encodeURIComponent(repo)}`);
+    if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+    civitaiResolved = await res.json();
+  } catch (err) {
+    civitaiSetStatus('');
+    civitaiSetError(`確認に失敗しました: ${err.message}`);
+    return;
+  }
+  civitaiSetStatus('');
+  civitaiRenderPreview(civitaiResolved);
+  civitaiSyncStartBtn();
+}
+
+async function civitaiStartImport() {
+  if (!civitaiResolved) return;
+  const saveMeta = els.civitaiMetaToggle.checked;
+
+  // 同じ内容が既にあり、JSON も保存済み（または保存しない設定）なら登録だけで完了。
+  // JSON が未保存で保存 ON のときはジョブに進み、サーバー側で JSON のみコミットされる
+  if (civitaiResolved.alreadyUploaded
+    && (!saveMeta || civitaiResolved.metaFileExists || !civitaiResolved.metaDoc)) {
+    registerLora(civitaiResolved.alreadyUploaded);
+    civitaiSetStatus('既存のファイルを LoRA ライブラリに登録しました', true);
+    return;
+  }
+
+  const rawUrl = els.civitaiUrlInput.value.trim();
+  const repo = parseHfRepo(els.civitaiRepoInput.value);
+  if (!rawUrl || !repo) return;
+  const jobId = makeModalJobId();
+  civitaiSetError('');
+  civitaiSetStatus('取り込みジョブを開始しています…');
+  els.civitaiStartBtn.disabled = true;
+  try {
+    const res = await fetch('/api/lora-import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId, url: rawUrl, repo, saveMeta }),
+    });
+    if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+  } catch (err) {
+    civitaiSetStatus('');
+    civitaiSetError(`開始できませんでした: ${err.message}`);
+    civitaiSyncStartBtn();
+    return;
+  }
+  localStorage.setItem(LS_CIVITAI_JOB, JSON.stringify({ jobId, ts: Date.now() }));
+  civitaiPollJob();
+}
+
+// 進行中ジョブのポーリング。完了時はダイアログが閉じていても登録まで済ませる
+async function civitaiPollJob() {
+  if (civitaiPolling) return;
+  const active = civitaiActiveJob();
+  if (!active) return;
+  civitaiPolling = true;
+  try {
+    while (true) {
+      let res;
+      try {
+        res = await fetch(`/api/lora-import/job/${active.jobId}`);
+      } catch {
+        await sleep(CIVITAI_POLL_MS * 2); // ネットワーク断はそのまま再試行
+        continue;
+      }
+      if (res.status === 404) {
+        // ジョブ保持期間（1 時間）切れなど。結果は分からないので静かに諦める
+        localStorage.removeItem(LS_CIVITAI_JOB);
+        civitaiSetStatus('');
+        civitaiSetProgress(null, null);
+        break;
+      }
+      if (!res.ok) {
+        await sleep(CIVITAI_POLL_MS * 2);
+        continue;
+      }
+      const job = await res.json();
+      if (job.status === 'done') {
+        localStorage.removeItem(LS_CIVITAI_JOB);
+        civitaiSetProgress(null, null);
+        registerLora(job.hfUrl);
+        civitaiSetStatus(job.skipped
+          ? `既にアップロード済みだったため本体は省略し、登録を行いました: ${loraDisplayName(job.hfUrl)}`
+          : `取り込みが完了し、LoRA ライブラリに登録しました: ${loraDisplayName(job.hfUrl)}`, true);
+        break;
+      }
+      if (job.status === 'error') {
+        localStorage.removeItem(LS_CIVITAI_JOB);
+        civitaiSetStatus('');
+        civitaiSetProgress(null, null);
+        civitaiSetError(job.error || '取り込みに失敗しました');
+        break;
+      }
+      civitaiSetStatus(CIVITAI_STEP_LABELS[job.step] ?? '処理中…');
+      civitaiSetProgress(
+        job.step === 'download' || job.step === 'upload' ? job.bytesDone : null,
+        job.bytesTotal,
+      );
+      await sleep(CIVITAI_POLL_MS);
+    }
+  } finally {
+    civitaiPolling = false;
+    civitaiSyncStartBtn();
+  }
+}
+
+function initCivitaiDialog() {
+  els.civitaiOpenBtn.addEventListener('click', () => {
+    civitaiSetError('');
+    if (!civitaiActiveJob()) {
+      civitaiSetStatus('');
+      civitaiSetProgress(null, null);
+    }
+    els.civitaiRepoInput.value ||= HF_DEFAULT_REPO;
+    els.civitaiMetaToggle.checked = true; // JSON 保存は開くたびに既定の ON へ戻す
+    civitaiSyncStartBtn();
+    els.civitaiDialog.showModal();
+    civitaiPollJob(); // 進行中ジョブがあれば表示を再開する
+  });
+
+  els.civitaiResolveBtn.addEventListener('click', civitaiResolveUrl);
+  els.civitaiStartBtn.addEventListener('click', civitaiStartImport);
+  els.civitaiMetaToggle.addEventListener('change', civitaiSyncStartBtn);
+
+  // URL・リポジトリを変えたら確認からやり直す（プレビューと開始ボタンを無効化）
+  for (const input of [els.civitaiUrlInput, els.civitaiRepoInput]) {
+    input.addEventListener('input', () => {
+      civitaiResolved = null;
+      els.civitaiPreview.hidden = true;
+      civitaiSyncStartBtn();
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        civitaiResolveUrl();
+      }
+    });
+  }
+}
+
+/* ---------- 生成時間の統計 ---------- */
+// アクセスポイント（モデル）別に、履歴から画像 1 枚あたりの生成所要時間を集計する。
+//
+// Modal 版はサーバーの Durable Object が全ジョブを順次処理するため、連続投入時の
+// クライアント計測値（record.elapsed）には先行ジョブの処理待ちが含まれる。
+// - 新しい記録: サーバーが実処理時間（record.procMs、ジョブごとの ms 配列）を
+//   記録するのでそれをそのまま使う
+// - 古い記録: 完了時刻（ts）と所要秒（elapsed）から送信時刻を逆算し、直前の
+//   Modal 記録の完了時刻と重なる分（= 待ち時間）を差し引いて補正する。
+//   Modal のジョブはエンドポイントによらず同じ DO で順次処理されるため、
+//   補正のキューは全 Modal 記録をまとめて 1 本として扱う。
+//   途中の履歴が削除されていると重なりを検出できず、待ち時間が残ることがある
+// fal はリクエストが並列に処理されるためこの補正は適用できない（キュー待ち込みの実測値）
+
+function isModalRecord(record) {
+  return typeof record?.model === 'string' && record.model.startsWith('modal/');
+}
+
+// 統計に採用する 1 枚あたり所要時間の上限。現実の生成でこれを超えることはなく、
+// 超過分は補正しきれなかった待ち時間や放置されたタブなどの異常値とみなして捨てる
+const STATS_MAX_SEC = 30 * 60;
+
+// モデル ID → 1 枚あたりの所要秒のサンプル配列
+function collectStatsSamples() {
+  const samples = new Map();
+  const add = (model, sec) => {
+    if (!Number.isFinite(sec) || sec <= 0 || sec > STATS_MAX_SEC) return;
+    if (!samples.has(model)) samples.set(model, []);
+    samples.get(model).push(sec);
+  };
+
+  const history = loadHistory().filter((r) => Number.isFinite(r?.ts));
+
+  // Modal: 完了時刻順に並べて順次キューを再構成する
+  const modal = history.filter(isModalRecord).sort((a, b) => a.ts - b.ts);
+  let prevEnd = 0;
+  for (const r of modal) {
+    const count = Math.max(1, r.images?.length ?? 1);
+    if (Array.isArray(r.procMs) && r.procMs.length > 0) {
+      for (const ms of r.procMs) add(r.model, ms / 1000);
+    } else {
+      const elapsedMs = parseFloat(r.elapsed) * 1000;
+      if (elapsedMs > 0) {
+        const start = Math.max(r.ts - elapsedMs, prevEnd);
+        const span = r.ts - start;
+        // 複数枚の記録は 1 ジョブずつ順に処理された合計なので枚数で割り、
+        // 新記録（枚数ぶんのサンプル）と重みを揃えるため枚数回カウントする
+        for (let i = 0; i < count; i++) add(r.model, span / count / 1000);
+      }
+    }
+    prevEnd = Math.max(prevEnd, r.ts);
+  }
+
+  // fal ほか: 比較レコード（variants）は所要時間を持たないので対象外
+  for (const r of history) {
+    if (isModalRecord(r) || Array.isArray(r.variants)) continue;
+    add(r.model, parseFloat(r.elapsed));
+  }
+  return samples;
+}
+
+function statsQuantile(sorted, q) {
+  const pos = (sorted.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+function formatSec(s) {
+  return `${s >= 100 ? s.toFixed(0) : s.toFixed(1)}s`;
+}
+
+function renderStatsHistogram(values) {
+  const wrap = document.createElement('div');
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const bins = Math.min(16, Math.max(5, Math.ceil(Math.sqrt(values.length))));
+  const width = Math.max((max - min) / bins, 0.05);
+  const counts = new Array(bins).fill(0);
+  for (const v of values) {
+    counts[Math.min(bins - 1, Math.floor((v - min) / width))] += 1;
+  }
+  const peak = Math.max(...counts);
+
+  const hist = document.createElement('div');
+  hist.className = 'stats-hist';
+  counts.forEach((c, i) => {
+    const bin = document.createElement('div');
+    bin.className = 'stats-bin';
+    bin.title = `${formatSec(min + i * width)}〜${formatSec(min + (i + 1) * width)}: ${c} 件`;
+    const bar = document.createElement('span');
+    bar.style.height = c === 0 ? '0' : `${Math.max(6, (c / peak) * 100)}%`;
+    bin.appendChild(bar);
+    hist.appendChild(bin);
+  });
+  wrap.appendChild(hist);
+
+  const axis = document.createElement('div');
+  axis.className = 'stats-axis';
+  const lo = document.createElement('span');
+  lo.textContent = formatSec(min);
+  const hi = document.createElement('span');
+  hi.textContent = formatSec(max);
+  axis.append(lo, hi);
+  wrap.appendChild(axis);
+  return wrap;
+}
+
+function renderStats() {
+  els.statsBody.innerHTML = '';
+  const samples = collectStatsSamples();
+
+  // 表示順: モデル一覧の並び → それ以外（カスタムモデルなど）は名前順
+  const known = MODELS.map((m) => m.id).filter((id) => samples.has(id));
+  const others = [...samples.keys()].filter((id) => !known.includes(id)).sort();
+
+  if (known.length + others.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'stats-empty';
+    empty.textContent = '所要時間つきの生成履歴がまだありません';
+    els.statsBody.appendChild(empty);
+    return;
+  }
+
+  for (const id of [...known, ...others]) {
+    const values = samples.get(id).sort((a, b) => a - b);
+    const n = values.length;
+    const mean = values.reduce((sum, v) => sum + v, 0) / n;
+
+    const group = document.createElement('div');
+    group.className = 'stats-group';
+
+    const title = document.createElement('div');
+    title.className = 'stats-title';
+    title.textContent = MODELS.find((m) => m.id === id)?.name ?? id;
+    group.appendChild(title);
+
+    const nums = document.createElement('div');
+    nums.className = 'stats-nums';
+    const stat = (label, value) => {
+      const s = document.createElement('span');
+      s.append(`${label} `);
+      const strong = document.createElement('strong');
+      strong.textContent = value;
+      s.appendChild(strong);
+      return s;
+    };
+    nums.append(
+      stat('平均', formatSec(mean)),
+      stat('中央値', formatSec(statsQuantile(values, 0.5))),
+      stat('最短', formatSec(values[0])),
+      stat('最長', formatSec(values[n - 1])),
+      stat('件数', `${n}`),
+    );
+    group.appendChild(nums);
+
+    group.appendChild(renderStatsHistogram(values));
+    els.statsBody.appendChild(group);
+  }
+}
+
+function initStatsDialog() {
+  els.statsBtn.addEventListener('click', () => {
+    renderStats();
+    els.statsDialog.showModal();
   });
 }
 
@@ -1222,7 +1718,7 @@ async function runModalJobFrom(job) {
     } finally {
       clearInterval(ticker);
     }
-    entry.result = { url: r.url, seed: r.seed };
+    entry.result = { url: r.url, seed: r.seed, elapsedMs: r.elapsedMs ?? null };
     saveActiveJob(job);
   }
 
@@ -1234,6 +1730,9 @@ function finishModal(job) {
   removeActiveJob(job);
   const done = job.entries.filter((e) => e.result);
   if (done.length === 0) return;
+  // サーバーが記録した実処理時間（DO のキュー待ちを含まない）。統計で使う。
+  // elapsed（クライアント計測・待ち時間込み）は表示互換のためそのまま残す
+  const procMs = done.map((e) => e.result.elapsedMs).filter((v) => Number.isFinite(v) && v > 0);
   const record = {
     id: `modal_${Date.now()}`,
     ts: Date.now(),
@@ -1243,6 +1742,7 @@ function finishModal(job) {
     loras: job.loras,
     seed: done[0].result.seed,
     elapsed: ((Date.now() - job.startedAt) / 1000).toFixed(1),
+    ...(procMs.length > 0 ? { procMs } : {}),
     images: done.map((e) => ({ url: e.result.url, width: job.input.width, height: job.input.height })),
   };
   addHistoryRecord(record);
@@ -1969,6 +2469,8 @@ function scheduleSaveForm() {
 
 initTheme();
 initHfDialog();
+initCivitaiDialog();
+initStatsDialog();
 initForm();
 restoreFormState();
 
@@ -2101,3 +2603,7 @@ els.prompt.addEventListener('keydown', (e) => {
 
 // 前回の生成が完了待ちのまま離脱していたら再開する
 resumeActiveJobs();
+
+// Civitai 取り込みが進行中のまま離脱していたらポーリングを再開する
+//（完了時の LoRA 登録はダイアログを開いていなくても行われる）
+civitaiPollJob();

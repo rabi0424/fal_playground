@@ -13,6 +13,7 @@
   <div class="topbar-actions">
     <a href="edit.html" class="ghost-btn" title="画像の一部を選択して Poe の画像編集ボットで編集し、元画像にはめ込む">部分AI編集</a>
     <a href="arena.html" class="ghost-btn" title="LoRA チェックポイントの匿名比較と Elo ランキング">比較アリーナ</a>
+    <button id="statsBtn" class="ghost-btn" title="アクセスポイント別の生成所要時間の統計">統計</button>
     <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
   </div>
 </header>
@@ -40,6 +41,7 @@
       <div class="lora-actions">
         <button id="addLoraBtn" class="ghost-btn small" type="button">＋ LoRA を追加</button>
         <button id="hfOpenBtn" class="ghost-btn small" type="button">Hugging Face から一括登録</button>
+        <button id="civitaiOpenBtn" class="ghost-btn small" type="button">Civitai から取り込み</button>
       </div>
       <label class="compare-toggle">
         <input type="checkbox" id="compareToggle"> LoRA 比較モード
@@ -155,6 +157,55 @@
     <div class="key-actions">
       <button value="cancel" class="ghost-btn" formnovalidate>閉じる</button>
       <button value="add" id="hfAddBtn" class="primary-btn" disabled>選択した 0 件を登録</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="statsDialog" class="key-dialog stats-dialog">
+  <form method="dialog" class="key-form">
+    <h2>生成時間の統計</h2>
+    <p class="hint">
+      アクセスポイント（モデル）別の、画像 1 枚あたりの生成所要時間です。<br>
+      Modal 版は順次処理の待ち時間を除いた実処理時間で集計します（過去の記録は完了時刻からの推定補正）。
+      fal はキュー待ちを含む実測値です。30 分を超える値は異常値として集計から除外します。
+    </p>
+    <div id="statsBody" class="stats-body"></div>
+    <div class="key-actions">
+      <!-- autofocus で開いた直後のフォーカスをスクロール領域ではなくボタンに置く -->
+      <button value="close" class="ghost-btn" autofocus>閉じる</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="civitaiDialog" class="key-dialog civitai-dialog">
+  <form method="dialog" class="key-form">
+    <h2>Civitai から LoRA を取り込み</h2>
+    <p class="hint">
+      Civitai のモデルページ URL（modelVersionId 付き可）またはダウンロード URL を入力すると、
+      モデルを Hugging Face リポジトリへアップロードして LoRA ライブラリに登録します。<br>
+      公開リポジトリへのアップロードは再配布に当たります。モデルのライセンスを確認してください。
+    </p>
+    <div class="civitai-search">
+      <input id="civitaiUrlInput" type="text" placeholder="https://civitai.com/models/..." spellcheck="false" autocomplete="off">
+      <button id="civitaiResolveBtn" class="ghost-btn" type="button">確認</button>
+    </div>
+    <label class="field">
+      <span class="label">アップロード先リポジトリ（owner/repo）</span>
+      <input id="civitaiRepoInput" type="text" spellcheck="false" autocomplete="off">
+    </label>
+    <label class="civitai-meta-check" title="トリガーワード・説明・サンプルの生成設定などを .civitai.json としてモデルの隣に保存します（画像本体は保存しません）">
+      <input type="checkbox" id="civitaiMetaToggle" checked> サイトの情報（トリガーワード等）を JSON で一緒に保存する
+    </label>
+    <div id="civitaiPreview" class="civitai-preview" hidden></div>
+    <div id="civitaiStatus" class="status" hidden></div>
+    <div id="civitaiProgress" class="civitai-progress" hidden>
+      <div class="civitai-progress-track"><div class="civitai-progress-fill"></div></div>
+      <span class="civitai-progress-text"></span>
+    </div>
+    <div id="civitaiError" class="error" hidden></div>
+    <div class="key-actions">
+      <button value="cancel" class="ghost-btn" formnovalidate>閉じる</button>
+      <button id="civitaiStartBtn" class="primary-btn" type="button" disabled>取り込み開始</button>
     </div>
   </form>
 </dialog>

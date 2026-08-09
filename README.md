@@ -25,6 +25,8 @@ Cloudflare ダッシュボード → 対象の Worker → **Settings** → **Var
 | `MODAL_PROXY_KEY` | Modal の Proxy Auth Token（`wk-…`） | Modal 版 Krea 2 での生成 |
 | `MODAL_PROXY_SECRET` | 同上（`ws-…`）。[Modal ダッシュボード → Settings → Proxy Auth Tokens](https://modal.com/settings) で発行 | 同上 |
 | `POE_API_KEY` | [poe.com/api_key](https://poe.com/api_key) で発行した Poe の API キー | 部分AI編集（課金は Poe ポイント） |
+| `HF_TOKEN` | [Hugging Face のアクセストークン](https://huggingface.co/settings/tokens)（対象リポジトリへの **write** 権限） | Civitai からの LoRA 取り込み |
+| `CIVITAI_TOKEN` | [Civitai のアカウント設定 → API Keys](https://civitai.com/user/account) で発行 | 同上（Civitai のダウンロードはほぼログイン必須） |
 
 旧バージョンで使っていた `SYNC_TOKEN` は不要になったので削除して構いません。
 
@@ -43,12 +45,27 @@ npx wrangler r2 bucket create fal-playground-images
 - モデル選択（FLUX 系 / Recraft V3 / Modal 自前ホスト版 Krea 2 / 任意のカスタムモデル ID）
 - サイズ（約 1MP 基準のプリセット 6 種 + カスタム px 指定）・枚数・シード（「固定」チェック時のみ適用）・ステップ数・ガイダンスの指定
 - Hugging Face 公開リポジトリからの LoRA 一括登録（.safetensors を一覧表示して選択）
+- Civitai からの LoRA 取り込み（URL を貼ると Hugging Face へアップロードしてライブラリに登録・下記参照）
 - LoRA 比較アリーナ（別画面 `arena.html`・下記参照）
 - 部分AI編集（別画面 `edit.html`・下記参照）
 - 生成履歴とプロンプトの再利用（サーバー保存・全端末で共通）
+- 生成時間の統計（トップバー「統計」。アクセスポイント別の平均・中央値・分布。Modal 版は順次処理の待ち時間を除いた実処理時間で集計し、過去の記録も完了時刻から逆算して補正）
 - ダークモード（自動 / ライト / ダーク切替）
 - Cmd/Ctrl + Enter で生成
 - スマホ対応（iPhone 16 想定・下部固定の生成バー・ライトボックスのスワイプ切替）
+
+## Civitai からの LoRA 取り込み
+
+LoRA 欄の「Civitai から取り込み」で、Civitai のモデルページ URL（`modelVersionId` 付き可）またはダウンロード URL を貼ると、Worker がサーバー側でモデルをダウンロードして Hugging Face リポジトリへアップロードし、完了時に LoRA ライブラリへ自動登録します。
+
+- 「確認」でモデル名・バージョン・ファイルサイズに加え、保存されるサイト情報（トリガーワード・作者・説明・サンプルの生成設定と JSON 全文）をプレビューしてから開始できます。同じ内容（SHA256 一致）が既にリポジトリにある場合はアップロードせず登録だけ行います
+- 既定で、その時点のサイト情報を `<ファイル名>.civitai.json` としてモデルの隣に保存します（トリガーワードなどを後から調べるため。画像本体は保存せず URL と生成設定のみ）。ダイアログのチェックを外すと保存しません（開き直すと ON に戻ります）。本体がアップロード済みで JSON だけ無い場合は JSON のみ追加されるため、メタデータの後付け取り込みにも使えます
+- 処理はサーバー側で完結するので、開始後にタブを閉じても続行されます（次回アクセス時に完了を検知して登録）
+- ダウンロード後に SHA256 を Civitai の公称値と照合してからアップロードします
+- 制約・注意:
+  - `HF_TOKEN`（write）が必須。`CIVITAI_TOKEN` も実質必須です（未設定だと多くのモデルでダウンロードが拒否されます）。Early Access（有料先行）中のモデルは取り込めません
+  - civitai.red などのミラー URL も受け付けますが、API 互換性が無い場合はダウンロード URL の直接指定を使ってください
+  - **公開リポジトリへのアップロードは再配布に当たります**。モデルのライセンスを確認のうえ利用してください。なお非公開リポジトリを取り込み先にすると、fal は認証付き URL をダウンロードできないため fal 系モデルでその LoRA は使えません（Modal 版は modal_comfy 側の設定次第）
 
 ## LoRA 比較アリーナ
 
