@@ -87,6 +87,7 @@ const els = {
   civitaiMetaToggle: $('#civitaiMetaToggle'),
   civitaiPreview: $('#civitaiPreview'),
   civitaiStatus: $('#civitaiStatus'),
+  civitaiProgress: $('#civitaiProgress'),
   civitaiError: $('#civitaiError'),
   civitaiStartBtn: $('#civitaiStartBtn'),
   compareToggle: $('#compareToggle'),
@@ -708,9 +709,11 @@ const CIVITAI_POLL_MS = 2000;
 let civitaiResolved = null; // 「確認」で取得したメタデータ（URL・repo 変更で無効化）
 let civitaiPolling = false;
 
-function civitaiSetStatus(text) {
+// done: true で完了表示（スピナーを止めてチェックマークにする）
+function civitaiSetStatus(text, done = false) {
   els.civitaiStatus.hidden = !text;
   els.civitaiStatus.textContent = text || '';
+  els.civitaiStatus.classList.toggle('done', !!text && done);
 }
 
 function civitaiSetError(text) {
@@ -724,6 +727,20 @@ function civitaiActiveJob() {
   } catch {
     return null;
   }
+}
+
+// 転送中（download / upload ステップ）のプログレスバー。それ以外では隠す
+function civitaiSetProgress(done, total) {
+  const show = Number.isFinite(done) && Number.isFinite(total) && total > 0;
+  els.civitaiProgress.hidden = !show;
+  if (!show) return;
+  const pct = Math.min(100, (done / total) * 100);
+  els.civitaiProgress.querySelector('.civitai-progress-fill').style.width = `${pct}%`;
+  // 桁は合計サイズ基準で揃える（"45.3 / 218 MB" のような不揃いを避ける）
+  const digits = total < 100 * 1024 * 1024 ? 1 : 0;
+  const mb = (b) => (b / 1024 / 1024).toFixed(digits);
+  els.civitaiProgress.querySelector('.civitai-progress-text').textContent
+    = `${mb(done)} / ${mb(total)} MB`;
 }
 
 function civitaiSyncStartBtn() {
@@ -855,7 +872,7 @@ async function civitaiStartImport() {
   if (civitaiResolved.alreadyUploaded
     && (!saveMeta || civitaiResolved.metaFileExists || !civitaiResolved.metaDoc)) {
     registerLora(civitaiResolved.alreadyUploaded);
-    civitaiSetStatus('既存のファイルを LoRA ライブラリに登録しました');
+    civitaiSetStatus('既存のファイルを LoRA ライブラリに登録しました', true);
     return;
   }
 
@@ -902,6 +919,7 @@ async function civitaiPollJob() {
         // ジョブ保持期間（1 時間）切れなど。結果は分からないので静かに諦める
         localStorage.removeItem(LS_CIVITAI_JOB);
         civitaiSetStatus('');
+        civitaiSetProgress(null, null);
         break;
       }
       if (!res.ok) {
@@ -911,19 +929,25 @@ async function civitaiPollJob() {
       const job = await res.json();
       if (job.status === 'done') {
         localStorage.removeItem(LS_CIVITAI_JOB);
+        civitaiSetProgress(null, null);
         registerLora(job.hfUrl);
         civitaiSetStatus(job.skipped
           ? `既にアップロード済みだったため本体は省略し、登録を行いました: ${loraDisplayName(job.hfUrl)}`
-          : `取り込みが完了し、LoRA ライブラリに登録しました: ${loraDisplayName(job.hfUrl)}`);
+          : `取り込みが完了し、LoRA ライブラリに登録しました: ${loraDisplayName(job.hfUrl)}`, true);
         break;
       }
       if (job.status === 'error') {
         localStorage.removeItem(LS_CIVITAI_JOB);
         civitaiSetStatus('');
+        civitaiSetProgress(null, null);
         civitaiSetError(job.error || '取り込みに失敗しました');
         break;
       }
       civitaiSetStatus(CIVITAI_STEP_LABELS[job.step] ?? '処理中…');
+      civitaiSetProgress(
+        job.step === 'download' || job.step === 'upload' ? job.bytesDone : null,
+        job.bytesTotal,
+      );
       await sleep(CIVITAI_POLL_MS);
     }
   } finally {
@@ -935,7 +959,10 @@ async function civitaiPollJob() {
 function initCivitaiDialog() {
   els.civitaiOpenBtn.addEventListener('click', () => {
     civitaiSetError('');
-    if (!civitaiActiveJob()) civitaiSetStatus('');
+    if (!civitaiActiveJob()) {
+      civitaiSetStatus('');
+      civitaiSetProgress(null, null);
+    }
     els.civitaiRepoInput.value ||= HF_DEFAULT_REPO;
     els.civitaiMetaToggle.checked = true; // JSON 保存は開くたびに既定の ON へ戻す
     civitaiSyncStartBtn();

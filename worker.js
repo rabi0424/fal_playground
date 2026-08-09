@@ -781,8 +781,28 @@ export class SyncState extends DurableObject {
       fileName: job.meta?.fileName ?? null,
       hfUrl: job.hfUrl ?? null,
       skipped: job.skipped ?? false,
+      bytesDone: job.bytesDone ?? null,
+      bytesTotal: job.bytesTotal ?? null,
       error: job.error ?? null,
     };
+  }
+
+  // 転送バイト数を job に間引き記録する TransformStream（プログレスバー表示用）。
+  // base はレンジ転送（multipart の各パート）再開時の開始オフセット
+  loraProgressStream(key, job, base = 0) {
+    let counted = base;
+    let lastSaved = 0;
+    return new TransformStream({
+      transform: async (chunk, controller) => {
+        counted += chunk.byteLength;
+        if (Date.now() - lastSaved > 1000) {
+          lastSaved = Date.now();
+          job.bytesDone = counted;
+          await this.ctx.storage.put(key, job);
+        }
+        controller.enqueue(chunk);
+      },
+    });
   }
 
   async failLoraImport(key, job, message) {
@@ -911,6 +931,10 @@ export class SyncState extends DurableObject {
       job.meta.fileName = sanitizeLoraFileName(name);
     }
 
+    job.bytesDone = 0;
+    job.bytesTotal = size;
+    await this.ctx.storage.put(key, job);
+
     // R2 への保存と SHA256 計算を 1 パスで行う。DigestStream への write を
     // TransformStream 内で await することで、バッファを溜めずに両者へ流す
     const digester = new crypto.DigestStream('SHA-256');
@@ -925,6 +949,7 @@ export class SyncState extends DurableObject {
           await writer.close();
         },
       }))
+      .pipeThrough(this.loraProgressStream(key, job))
       .pipeThrough(new FixedLengthStream(size));
     await this.env.IMAGES.put(`${LORA_STAGING_PREFIX}${key.slice('lora:job:'.length)}`, stream);
 
@@ -945,6 +970,9 @@ export class SyncState extends DurableObject {
   // そうでなければ単発 PUT。verify アクションがあれば最後に呼ぶ
   async loraStepUpload(key, job) {
     const stagingKey = `${LORA_STAGING_PREFIX}${key.slice('lora:job:'.length)}`;
+    job.bytesDone = 0;
+    job.bytesTotal = job.size;
+    await this.ctx.storage.put(key, job);
     const lfsHeaders = {
       Accept: 'application/vnd.git-lfs+json',
       'Content-Type': 'application/vnd.git-lfs+json',
@@ -997,7 +1025,9 @@ export class SyncState extends DurableObject {
           }
           const putRes = await fetch(header[part], {
             method: 'PUT',
-            body: obj.body.pipeThrough(new FixedLengthStream(length)),
+            body: obj.body
+              .pipeThrough(this.loraProgressStream(key, job, offset))
+              .pipeThrough(new FixedLengthStream(length)),
           });
           if (!putRes.ok) throw new Error(`part ${part} upload error ${putRes.status}`);
           job.etags[part] = putRes.headers.get('ETag') ?? '';
@@ -1023,7 +1053,9 @@ export class SyncState extends DurableObject {
         const putRes = await fetch(upload.href, {
           method: 'PUT',
           headers: { ...header },
-          body: obj.body.pipeThrough(new FixedLengthStream(job.size)),
+          body: obj.body
+            .pipeThrough(this.loraProgressStream(key, job))
+            .pipeThrough(new FixedLengthStream(job.size)),
         });
         if (!putRes.ok) throw new Error(`upload error ${putRes.status}`);
       }

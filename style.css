@@ -638,6 +638,18 @@ button:focus-visible, a.ghost-btn:focus-visible {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* 完了メッセージ用: スピナーを回し続けず、チェックマークに置き換える */
+.status.done::before {
+  content: "✓";
+  width: auto;
+  height: auto;
+  border: none;
+  border-radius: 0;
+  animation: none;
+  color: var(--success);
+  font-weight: 700;
+}
+
 .error {
   font-size: 13px;
   color: var(--danger);
@@ -1124,6 +1136,35 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .civitai-note { color: var(--muted); font-size: 12px; }
 
 .civitai-note.warn { color: var(--danger); }
+
+.civitai-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.civitai-progress-track {
+  flex: 1;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.civitai-progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.civitai-progress-text {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 
 .civitai-meta-check {
   display: flex;
