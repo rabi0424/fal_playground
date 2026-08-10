@@ -819,6 +819,34 @@ export class SyncState extends DurableObject {
     };
   }
 
+  // 並列パート転送の合算進捗カウンタ。stream(counter) を通ったバイト数を
+  // job.bytesDone に加算して 1 秒ごとに保存する（複数パート同時でも合算になる）。
+  // パートが失敗したら rollback(counter) で加算分を戻し、リトライでの二重加算を防ぐ
+  makeProgressTally(key, job) {
+    let lastSaved = 0;
+    const save = async (force = false) => {
+      if (!force && Date.now() - lastSaved < 1000) return;
+      lastSaved = Date.now();
+      await this.ctx.storage.put(key, job);
+    };
+    return {
+      stream: (counter) => new TransformStream({
+        transform: async (chunk, controller) => {
+          counter.n += chunk.byteLength;
+          job.bytesDone += chunk.byteLength;
+          await save();
+          controller.enqueue(chunk);
+        },
+      }),
+      rollback: async (counter) => {
+        job.bytesDone -= counter.n;
+        counter.n = 0;
+        await save(true);
+      },
+      save,
+    };
+  }
+
   // 転送バイト数を job に間引き記録する TransformStream（プログレスバー表示用）。
   // base はレンジ転送（multipart の各パート）再開時の開始オフセット
   loraProgressStream(key, job, base = 0) {
@@ -1135,27 +1163,25 @@ export class SyncState extends DurableObject {
     }
 
     const partCount = Math.ceil(size / partSize);
+    const partLen = (n) => Math.min(partSize, size - (n - 1) * partSize);
     const pending = [];
     for (let n = 1; n <= partCount; n++) {
       if (!job.stagingParts[n]) pending.push(n);
     }
-    job.bytesDone = Math.min(size, Object.keys(job.stagingParts).length * partSize);
+    // 再開時は保存済みパートのバイト数から数え直す
+    job.bytesDone = Object.keys(job.stagingParts)
+      .reduce((sum, n) => sum + partLen(Number(n)), 0);
     await this.ctx.storage.put(key, job);
 
-    const saveProgress = async () => {
-      // 進捗はパート粒度の近似で十分（完了時に size ぴったりへ揃える）
-      job.bytesDone = Math.min(size, Object.keys(job.stagingParts).length * partSize);
-      job.attempts = 0;
-      await this.ctx.storage.put(key, job);
-    };
-
+    const tally = this.makeProgressTally(key, job);
     const worker = async () => {
       while (pending.length > 0) {
         const n = pending.shift();
         const offset = (n - 1) * partSize;
-        const len = Math.min(partSize, size - offset);
+        const len = partLen(n);
         let lastErr = null;
         for (let retry = 0; retry < 3; retry++) {
+          const counter = { n: 0 };
           try {
             const res = await fetch(finalUrl, {
               headers: { ...this.civitaiDlHeaders(finalUrl), Range: `bytes=${offset}-${offset + len - 1}` },
@@ -1164,12 +1190,17 @@ export class SyncState extends DurableObject {
               await res.body?.cancel();
               throw new Error(`range request failed (HTTP ${res.status})`);
             }
-            const part = await upload.uploadPart(n, res.body.pipeThrough(new FixedLengthStream(len)));
+            const part = await upload.uploadPart(
+              n,
+              res.body.pipeThrough(tally.stream(counter)).pipeThrough(new FixedLengthStream(len)),
+            );
             job.stagingParts[n] = { partNumber: part.partNumber, etag: part.etag };
+            job.attempts = 0; // 進捗があったら打ち切りカウントを戻す
             lastErr = null;
-            await saveProgress();
+            await tally.save(true);
             break;
           } catch (err) {
+            await tally.rollback(counter);
             lastErr = err;
           }
         }
@@ -1235,30 +1266,38 @@ export class SyncState extends DurableObject {
         const parts = Object.keys(header)
           .filter((k) => /^\d+$/.test(k))
           .sort((a, b) => Number(a) - Number(b));
+        const uploadPartLen = (p) => Math.min(chunkSize, job.size - (Number(p) - 1) * chunkSize);
         const pending = parts.filter((p) => !job.etags[p]); // 再開時はアップロード済みを飛ばす
-        job.bytesDone = Math.min(job.size, (parts.length - pending.length) * chunkSize);
+        // 再開時はアップロード済みパートのバイト数から数え直す
+        job.bytesDone = parts.filter((p) => job.etags[p])
+          .reduce((sum, p) => sum + uploadPartLen(p), 0);
         await this.ctx.storage.put(key, job);
+        const tally = this.makeProgressTally(key, job);
         let stagingLost = false;
         const uploadWorker = async () => {
           while (pending.length > 0 && !stagingLost) {
             const part = pending.shift();
             const offset = (Number(part) - 1) * chunkSize;
-            const length = Math.min(chunkSize, job.size - offset);
-            const obj = await this.env.IMAGES.get(stagingKey, { range: { offset, length } });
-            if (!obj) {
-              stagingLost = true;
-              return;
+            const length = uploadPartLen(part);
+            const counter = { n: 0 };
+            try {
+              const obj = await this.env.IMAGES.get(stagingKey, { range: { offset, length } });
+              if (!obj) {
+                stagingLost = true;
+                return;
+              }
+              const putRes = await fetch(header[part], {
+                method: 'PUT',
+                body: obj.body.pipeThrough(tally.stream(counter)).pipeThrough(new FixedLengthStream(length)),
+              });
+              if (!putRes.ok) throw new Error(`part ${part} upload error ${putRes.status}`);
+              job.etags[part] = putRes.headers.get('ETag') ?? '';
+              job.attempts = 0; // 進捗があったら打ち切りカウントを戻す
+              await tally.save(true);
+            } catch (err) {
+              await tally.rollback(counter);
+              throw err;
             }
-            const putRes = await fetch(header[part], {
-              method: 'PUT',
-              body: obj.body.pipeThrough(new FixedLengthStream(length)),
-            });
-            if (!putRes.ok) throw new Error(`part ${part} upload error ${putRes.status}`);
-            job.etags[part] = putRes.headers.get('ETag') ?? '';
-            job.attempts = 0;
-            // 進捗はパート粒度の近似（並列中の転送バイトまでは追わない）
-            job.bytesDone = Math.min(job.size, Object.keys(job.etags).length * chunkSize);
-            await this.ctx.storage.put(key, job);
           }
         };
         await Promise.all(Array.from({ length: UPLOAD_CONCURRENCY }, uploadWorker));
