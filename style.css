@@ -327,6 +327,13 @@ details.lora-accordion { display: block; }
   flex-wrap: wrap;
 }
 
+/* チェックポイント指定版の選択行（.lora-row の構造を流用） */
+.ckpt-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .lora-head {
   display: flex;
   gap: 8px;

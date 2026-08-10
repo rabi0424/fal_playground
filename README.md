@@ -114,11 +114,24 @@ LoRA 欄の「Civitai から取り込み」で、Civitai のモデルページ U
 
 ## Modal 自前ホスト版 Krea 2
 
-モデル選択の「Krea 2 [turbo] 自前ホスト（Modal 実験版 / GPUスナップ版 / 本番）」は、fal ではなく Modal 上の [modal_comfy](https://github.com/rabi0424/modal_comfy) API で生成します。実験版（CPU スナップショット）・GPU スナップショット版（`krea2-comfy-api-gpusnap`）・本番（安定版）はモデル選択で切り替えられ、標準は実験版です。エンドポイントの URL 自体を変えたい場合は、Worker の環境変数で上書きできます（未設定なら modal_comfy の既定 URL）:
+モデル選択の「Krea 2 [turbo] 自前ホスト（Modal 実験版 / GPUスナップ版 / 本番 / チェックポイント指定版）」は、fal ではなく Modal 上の [modal_comfy](https://github.com/rabi0424/modal_comfy) API で生成します。実験版（CPU スナップショット）・GPU スナップショット版（`krea2-comfy-api-gpusnap`）・本番（安定版）・チェックポイント指定版（`krea2-comfy-api-ckpt`）はモデル選択で切り替えられ、標準は実験版です。エンドポイントの URL 自体を変えたい場合は、Worker の環境変数で上書きできます（未設定なら modal_comfy の既定 URL）:
 
 - `KREA2_ENDPOINT_EXP` = 実験版の URL
 - `KREA2_ENDPOINT_GPUSNAP` = GPU スナップショット版の URL
 - `KREA2_ENDPOINT` = 本番の URL
+- `KREA2_ENDPOINT_CKPT` = チェックポイント指定版の URL
+
+### チェックポイント指定版
+
+チェックポイント指定版を選ぶと「チェックポイント」欄が出て、生成に使う UNet を LoRA と同じ感覚で切り替えられます。既定は `Krea-2-Turbo-Q8_0.gguf` です。
+
+- **Hugging Face から一括登録**: 公開リポジトリの `.safetensors` / `.gguf` を一覧から選んでチェックポイントライブラリに登録できます（既定リポジトリは `Abiray/Krea-2-Turbo-GGUF`）。登録した URL のチェックポイントは**初回使用時に Modal 側が Volume へ自動取り込み**します（サイズにより 1〜数分。2 回目以降はキャッシュ）。`HF_TOKEN` が設定されていれば非公開リポジトリも使えます
+- **Civitai から取り込み**: LoRA と同じサーバー側パイプライン（Civitai → HF アップロード）で取り込み、チェックポイントライブラリに登録します。R2 の一時保存は multipart 対応なので大きなチェックポイントも扱えます（安全弁として約 30 GB まで）。一時ファイルは取り込み完了・失敗時に削除されます
+- **転送の並列化と再開**: Range 対応かつ SHA256 公称値のあるファイル（64 MB 超）は 4 並列の分割ダウンロードで取り込み、HF へのアップロードも並列化しています。パート単位で進捗が保存されるため、回線が不安定でも完了した分はやり直しになりません（進捗が完全に停滞したときだけ打ち切り）。この経路ではダウンロード全体の SHA256 逐次検証の代わりに、各パートの長さ検証 + Civitai 公称ハッシュを LFS の oid として使います
+- プルダウンの「URL / ファイル名を入力…」で、HF の resolve URL（自動登録されます）や Volume 内のファイル名の直接指定もできます
+- Volume に無いファイル名を指定するとエラーになり、利用可能なファイルの一覧がエラーメッセージに表示されます
+- `.gguf` は GGUF ローダー、`.safetensors` は ComfyUI 標準の UNET ローダーで読み込まれます（Krea 2 系アーキテクチャのもの以外は動きません）
+- ライブラリは LoRA ライブラリと同様に全端末で同期されます
 
 ### 使い方のメモ
 
