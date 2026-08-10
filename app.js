@@ -906,7 +906,7 @@ function civitaiActiveJob() {
 }
 
 // 転送中（download / upload ステップ）のプログレスバー。それ以外では隠す
-function civitaiSetProgress(done, total) {
+function civitaiSetProgress(done, total, extra = '') {
   const show = Number.isFinite(done) && Number.isFinite(total) && total > 0;
   els.civitaiProgress.hidden = !show;
   if (!show) return;
@@ -916,7 +916,37 @@ function civitaiSetProgress(done, total) {
   const digits = total < 100 * 1024 * 1024 ? 1 : 0;
   const mb = (b) => (b / 1024 / 1024).toFixed(digits);
   els.civitaiProgress.querySelector('.civitai-progress-text').textContent
-    = `${mb(done)} / ${mb(total)} MB`;
+    = `${mb(done)} / ${mb(total)} MB${extra}`;
+}
+
+// 転送速度と残り時間の推定。進捗はパート単位（64/256 MiB）で飛び飛びに増えるため、
+// 直近 60 秒の移動窓で平均して平滑化する。ステップが変わったり進捗が巻き戻ったら
+//（新しいジョブ・再開など）推定をやり直す
+const civitaiRate = { step: null, samples: [] };
+
+function civitaiEtaText(step, done, total) {
+  if (!Number.isFinite(done) || !Number.isFinite(total) || total <= 0) return '';
+  if (civitaiRate.step !== step || (civitaiRate.samples.at(-1)?.b ?? -1) > done) {
+    civitaiRate.step = step;
+    civitaiRate.samples = [];
+  }
+  const s = civitaiRate.samples;
+  s.push({ t: Date.now(), b: done });
+  while (s.length > 2 && s.at(-1).t - s[0].t > 60_000) s.shift();
+  const spanMs = s.at(-1).t - s[0].t;
+  const bytes = s.at(-1).b - s[0].b;
+  // 窓が短いうちや停滞中は出さない（不正確な値を見せない）
+  if (spanMs < 5000 || bytes <= 0) return '';
+  const rate = bytes / (spanMs / 1000);
+  const speed = `${(rate / 1024 / 1024).toFixed(rate < 10 * 1024 * 1024 ? 1 : 0)} MB/s`;
+  return ` ・ ${speed} ・ 残り${civitaiFormatEta((total - done) / rate)}`;
+}
+
+function civitaiFormatEta(sec) {
+  if (!Number.isFinite(sec) || sec < 0) return '不明';
+  if (sec < 60) return `約${Math.max(5, Math.round(sec / 5) * 5)}秒`;
+  if (sec < 3600) return `約${Math.round(sec / 60)}分`;
+  return `約${Math.floor(sec / 3600)}時間${Math.round((sec % 3600) / 60)}分`;
 }
 
 function civitaiSyncStartBtn() {
@@ -1120,9 +1150,11 @@ async function civitaiPollJob() {
         break;
       }
       civitaiSetStatus(CIVITAI_STEP_LABELS[job.step] ?? '処理中…');
+      const transferring = job.step === 'download' || job.step === 'upload';
       civitaiSetProgress(
-        job.step === 'download' || job.step === 'upload' ? job.bytesDone : null,
+        transferring ? job.bytesDone : null,
         job.bytesTotal,
+        transferring ? civitaiEtaText(job.step, job.bytesDone, job.bytesTotal) : '',
       );
       await sleep(CIVITAI_POLL_MS);
     }
