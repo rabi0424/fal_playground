@@ -132,6 +132,7 @@ const els = {
   error: $('#error'),
   detail: $('#detail'),
   gallery: $('#gallery'),
+  galleryCount: $('#galleryCount'),
   gallerySearch: $('#gallerySearch'),
   clearHistoryBtn: $('#clearHistoryBtn'),
 };
@@ -2395,9 +2396,20 @@ function gallerySearchText(record) {
   return `${record.prompt ?? ''} ${record.model ?? ''} ${loraText}`.toLowerCase();
 }
 
+// レコード内の画像枚数（比較レコードは全試行の合計）
+function recordImageCount(record) {
+  if (Array.isArray(record.variants)) {
+    return record.variants.reduce((n, v) => n + (v.images?.length ?? 0), 0);
+  }
+  return record.images?.length ?? 0;
+}
+
 function renderGallery() {
   const allItems = loadHistory();
   els.gallery.innerHTML = '';
+
+  const imageCount = allItems.reduce((n, r) => n + recordImageCount(r), 0);
+  els.galleryCount.textContent = allItems.length ? `${allItems.length} 件・${imageCount} 枚` : '';
 
   if (allItems.length === 0) {
     const empty = document.createElement('div');

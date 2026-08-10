@@ -9,8 +9,8 @@ import { DurableObject } from 'cloudflare:workers';
 
 // 生成画像・履歴の保存設定
 // 画像本体は R2（env.IMAGES）に置く。履歴レコードは Durable Object の SQLite に
-// 小さな JSON（プロンプト・設定・画像への参照）として持つ。
-const HISTORY_KEEP = 1000; // 履歴レコードの上限。超過分は画像ごと古い順に自動削除
+// 小さな JSON（プロンプト・設定・画像への参照）として 1 件 1 キーで持つ。
+// 件数の上限は設けない（キー分割により値サイズ上限の制約を受けない）。
 
 // Modal 生成ジョブの設定。ジョブは Durable Object の alarm でサーバー側完結で
 // 処理する（クライアントとの接続が切れても結果を取りこぼさないため）
@@ -425,29 +425,74 @@ export class SyncState extends DurableObject {
   }
 
   /* ---- 生成履歴（サーバーが正） ---- */
+  // 1 件 1 キー（history:rec:<ts 14桁ゼロ詰め>:<id>）で保存する。以前は全件を
+  // history:list の 1 値に入れていたが、DO の値サイズ上限（2 MiB）が実質的な
+  // 件数上限になるため、無制限化にあたり分割した（初回アクセス時に自動移行）。
+  // history:id:<id> は id → レコードキーの索引（同 id の差し替え・削除用）
+
+  historyRecordKey(record) {
+    const ts = Math.max(0, Math.floor(Number(record?.ts) || 0));
+    return `history:rec:${String(ts).padStart(14, '0')}:${record.id}`;
+  }
+
+  async migrateHistoryStorage() {
+    const legacy = await this.ctx.storage.get('history:list');
+    if (!legacy) return;
+    // put のバッチ上限（128 エントリ）に収まるよう分割して書き込む
+    let batch = {};
+    let n = 0;
+    const flush = async () => {
+      if (n > 0) await this.ctx.storage.put(batch);
+      batch = {};
+      n = 0;
+    };
+    for (const record of legacy) {
+      const key = this.historyRecordKey(record);
+      batch[key] = record;
+      batch[`history:id:${record.id}`] = key;
+      if ((n += 2) >= 128) await flush();
+    }
+    await flush();
+    await this.ctx.storage.delete('history:list');
+  }
 
   async listHistory() {
-    return (await this.ctx.storage.get('history:list')) ?? [];
+    await this.migrateHistoryStorage();
+    // キーは時刻昇順に並ぶので reverse で新しい順になる
+    const map = await this.ctx.storage.list({ prefix: 'history:rec:', reverse: true });
+    return [...map.values()];
   }
 
   async addHistory(record) {
-    const list = await this.listHistory();
-    const next = list.filter((r) => r.id !== record.id); // 同 id は差し替え
-    next.unshift(record);
-    const removed = next.splice(HISTORY_KEEP);
-    await this.deleteRecordImages(removed);
-    await this.ctx.storage.put('history:list', next);
+    await this.migrateHistoryStorage();
+    const key = this.historyRecordKey(record);
+    const indexKey = `history:id:${record.id}`;
+    // 同 id は差し替え（画像は差し替え後のレコードに引き継がれるので消さない）
+    const oldKey = await this.ctx.storage.get(indexKey);
+    if (typeof oldKey === 'string' && oldKey !== key) await this.ctx.storage.delete(oldKey);
+    await this.ctx.storage.put({ [key]: record, [indexKey]: key });
   }
 
   async deleteHistory(id) {
-    const list = await this.listHistory();
-    await this.deleteRecordImages(list.filter((r) => r.id === id));
-    await this.ctx.storage.put('history:list', list.filter((r) => r.id !== id));
+    await this.migrateHistoryStorage();
+    const indexKey = `history:id:${id}`;
+    const key = await this.ctx.storage.get(indexKey);
+    if (typeof key !== 'string') return;
+    const record = await this.ctx.storage.get(key);
+    if (record) await this.deleteRecordImages([record]);
+    await this.ctx.storage.delete([key, indexKey]);
   }
 
   async clearHistory() {
-    await this.deleteRecordImages(await this.listHistory());
-    await this.ctx.storage.put('history:list', []);
+    await this.migrateHistoryStorage();
+    const map = await this.ctx.storage.list({ prefix: 'history:' });
+    const records = [...map].filter(([k]) => k.startsWith('history:rec:')).map(([, v]) => v);
+    await this.deleteRecordImages(records);
+    // delete のバッチ上限（128 キー）に収まるよう分割する
+    const keys = [...map.keys()];
+    for (let i = 0; i < keys.length; i += 128) {
+      await this.ctx.storage.delete(keys.slice(i, i + 128));
+    }
   }
 
   async deleteRecordImages(records) {
