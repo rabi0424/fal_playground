@@ -544,7 +544,10 @@ function populateLoraSelect(select, selected) {
 }
 
 function refreshLoraSelects() {
-  for (const row of document.querySelectorAll('.lora-row')) {
+  // .lora-list 配下（共通 LoRA と比較モードの各試行）だけを対象にする。
+  // チェックポイント欄の行はスタイル流用で .lora-row クラスを持つが、構造が
+  // 違うためここで触ってはいけない（プルダウンの中身が壊れ、例外で落ちる）
+  for (const row of document.querySelectorAll('.lora-list .lora-row')) {
     const select = row.querySelector('.lora-select');
     populateLoraSelect(select, select.value);
     syncLoraRow(row);
