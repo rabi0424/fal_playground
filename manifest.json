@@ -1,0 +1,21 @@
+{
+  "name": "fal playground",
+  "short_name": "fal",
+  "description": "fal.ai / Modal 版 Krea 2 の画像生成プレイグラウンド",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#101012",
+  "theme_color": "#101012",
+  "lang": "ja",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "比較アリーナ", "url": "/arena.html" },
+    { "name": "部分AI編集", "url": "/edit.html" }
+  ]
+}

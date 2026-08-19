@@ -586,6 +586,10 @@ async function runRound(session, round) {
 // 1 件の fal リクエストの完了を待って結果を返す。一時的な接続エラーは
 // 数回まで無視して次のポーリングで拾う
 async function awaitRequest(pend, roundId) {
+  // アプリを閉じている間はこのポーリングが止まるので、完了の検知（＝通知）は
+  // サーバー側にも頼んでおく。一斉生成の完了はサーバー側でまとめて 1 通になる
+  window.falPush?.watchFalJob(pend.status_url);
+
   let errors = 0;
   while (true) {
     await sleep(POLL_INTERVAL_MS + Math.random() * 500);

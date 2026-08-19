@@ -1893,3 +1893,76 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
   .topbar { border-bottom-color: var(--border); }
   .generate-area { border-top-color: var(--border); }
 }
+
+/* ---------- プッシュ通知（生成完了の通知 / push.js） ---------- */
+
+.push-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 通知オンのときだけ色を付けて、ひと目で状態が分かるようにする */
+.push-btn.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.push-btn.busy { opacity: 0.6; pointer-events: none; }
+
+/* 画面ごとの共通エラー欄が無いため、通知まわりの案内は小さなトーストで出す */
+.push-toast {
+  position: fixed;
+  /* left/right + margin auto で中央寄せする（left: 50% だけだと使える幅が
+     画面の半分になり、短いメッセージでも折り返してしまう） */
+  left: 16px;
+  right: 16px;
+  margin-inline: auto;
+  width: fit-content;
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  z-index: 60;
+  max-width: 520px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: var(--material);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--shadow-floating);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  transform: translateY(12px);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s ease, transform 0.2s ease, visibility 0.2s;
+}
+
+.push-toast.show {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+@media (max-width: 430px) {
+  /* 項目が多いので、狭い画面ではベルのアイコンだけにする */
+  .push-btn .push-label { display: none; }
+
+  /* 通知ボタンが増えたぶん、幅の狭い端末（iPhone SE など）では
+     トップバーの項目が収まりきらないことがある。ページ全体が横に
+     はみ出す代わりに、この行の中だけ横スクロールできるようにする */
+  .topbar-actions {
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .topbar-actions::-webkit-scrollbar { display: none; }
+
+  /* 下部固定の生成バーに重ならない位置に出す */
+  .push-toast { bottom: calc(96px + env(safe-area-inset-bottom)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .push-toast { transition: none; }
+}

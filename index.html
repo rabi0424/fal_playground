@@ -5,6 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>fal playground</title>
 <link rel="stylesheet" href="style.css">
+<!-- ホーム画面に追加してアプリとして使うための設定（iPhone / Android 共通） -->
+<!-- Cloudflare Access の下でも読めるよう、Cookie 付きで取得させる -->
+<link rel="manifest" href="/manifest.json" crossorigin="use-credentials">
+<link rel="icon" href="/icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="fal">
+<!-- ステータスバーの色。テーマ切替に合わせて push.js が実際の背景色に更新する -->
+<meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#101012" media="(prefers-color-scheme: dark)">
 </head>
 <body>
 
@@ -14,6 +25,7 @@
     <a href="edit.html" class="ghost-btn" title="画像の一部を選択して Poe の画像編集ボットで編集し、元画像にはめ込む">部分AI編集</a>
     <a href="arena.html" class="ghost-btn" title="LoRA チェックポイントの匿名比較と Elo ランキング">比較アリーナ</a>
     <button id="statsBtn" class="ghost-btn" title="アクセスポイント別の生成所要時間の統計">統計</button>
+    <button id="pushBtn" class="ghost-btn push-btn" type="button" aria-pressed="false" title="生成完了をプッシュ通知します"><span class="push-icon">🔕</span><span class="push-label">通知</span></button>
     <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
   </div>
 </header>
@@ -231,5 +243,6 @@
 </div>
 
 <script src="app.js"></script>
+<script src="push.js"></script>
 </body>
 </html>

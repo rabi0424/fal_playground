@@ -1689,6 +1689,10 @@ async function submitJob(modelId, input) {
 
 // 既に送信済みの submitted をポーリングし、完了したら画像を取得する
 async function awaitJob(job, submitted, onProgress) {
+  // アプリを閉じている間はこのポーリングが止まるため、完了の検知（＝通知）は
+  // サーバー側にも頼んでおく（通知が不要な設定なら push.js 側で何もしない）
+  window.falPush?.watchFalJob(submitted?.status_url);
+
   let status;
   do {
     await sleep(POLL_INTERVAL_MS);
