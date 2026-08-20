@@ -1,13 +1,19 @@
 /* ---------- theme ---------- */
+/*
+ * data-theme = 利用者の選択（auto / light / dark。ボタンの表示に使う）
+ * data-scheme = 実際に描く配色（light / dark）。auto の解決は theme.js が行う。
+ *
+ * 配色をここ1か所だけに書くための分担。以前は auto 用に同じ内容を
+ * prefers-color-scheme のブロックへもう一度書いていたが、アクセント色を
+ * 増やすと同じ重複がその数だけ増えるため、解決をJSへ寄せた。
+ * 初期値は各ページの <head> のインラインスクリプトが描画前に入れる。
+ */
 :root {
   --bg: #fafafa;
   --panel: #ffffff;
   --text: #18181b;
   --muted: #71717a;
   --border: #e4e4e7;
-  --accent: #2563eb;
-  --accent-hover: #1d4ed8;
-  --accent-text: #ffffff;
   --danger: #dc2626;
   --success: #16a34a;
   /* 重なりの階層はシャドウの深さで表現する（浮いているものほど深い） */
@@ -20,15 +26,12 @@
   color-scheme: light;
 }
 
-[data-theme="dark"] {
+[data-scheme="dark"] {
   --bg: #101012;
   --panel: #18181b;
   --text: #f4f4f5;
   --muted: #a1a1aa;
   --border: #2a2a2e;
-  --accent: #3b82f6;
-  --accent-hover: #60a5fa;
-  --accent-text: #0b1220;
   --danger: #f87171;
   --success: #4ade80;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 2px 6px rgb(0 0 0 / 0.25);
@@ -39,25 +42,50 @@
   color-scheme: dark;
 }
 
-@media (prefers-color-scheme: dark) {
-  [data-theme="auto"] {
-    --bg: #101012;
-    --panel: #18181b;
-    --text: #f4f4f5;
-    --muted: #a1a1aa;
-    --border: #2a2a2e;
-    --accent: #3b82f6;
-    --accent-hover: #60a5fa;
-    --accent-text: #0b1220;
-    --danger: #f87171;
-    --success: #4ade80;
-    --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 2px 6px rgb(0 0 0 / 0.25);
-    --shadow-raised: 0 2px 6px rgb(0 0 0 / 0.35), 0 8px 24px rgb(0 0 0 / 0.4);
-    --shadow-floating: 0 4px 12px rgb(0 0 0 / 0.4), 0 24px 60px rgb(0 0 0 / 0.55);
-    --material: rgb(20 20 23 / 0.72);
-    --hairline: rgb(255 255 255 / 0.09);
-    color-scheme: dark;
-  }
+/* ---------- accent ---------- */
+/*
+ * 強調色。macOS のアクセントカラーと同じ考え方で、利用者が切り替えられる。
+ * 明暗で別の値を持つのは、暗い背景では同じ色がくすんで見えるため。
+ * 一覧と保存は theme.js を参照。
+ */
+:root {
+  --accent: #007aff; /* 既定: ブルー */
+  --accent-text: #ffffff;
+}
+[data-scheme="dark"] { --accent: #0a84ff; }
+
+[data-accent="cyan"] { --accent: #32ade6; }
+[data-scheme="dark"][data-accent="cyan"] { --accent: #64d2ff; --accent-text: #003355; }
+
+[data-accent="purple"] { --accent: #af52de; }
+[data-scheme="dark"][data-accent="purple"] { --accent: #bf5af2; }
+
+[data-accent="pink"] { --accent: #ff2d55; }
+[data-scheme="dark"][data-accent="pink"] { --accent: #ff375f; }
+
+[data-accent="red"] { --accent: #ff3b30; }
+[data-scheme="dark"][data-accent="red"] { --accent: #ff453a; }
+
+[data-accent="orange"] { --accent: #ff9500; }
+[data-scheme="dark"][data-accent="orange"] { --accent: #ff9f0a; --accent-text: #331f00; }
+
+[data-accent="yellow"] { --accent: #ffcc00; --accent-text: #332900; }
+[data-scheme="dark"][data-accent="yellow"] { --accent: #ffd60a; --accent-text: #332900; }
+
+[data-accent="green"] { --accent: #34c759; }
+[data-scheme="dark"][data-accent="green"] { --accent: #30d158; --accent-text: #00330f; }
+
+[data-accent="graphite"] { --accent: #8e8e93; }
+[data-scheme="dark"][data-accent="graphite"] { --accent: #98989d; }
+
+/*
+ * ホバーは「本文色へ少し寄せる」で作る。明るいテーマでは暗く、暗いテーマ
+ * では明るくなるので、どのアクセントでも1行で済む（色ごとに濃淡を
+ * 書き分けなくてよい）。color-mix 非対応のブラウザ向けに素の値も置く。
+ */
+:root {
+  --accent-hover: #0062cc;
+  --accent-hover: color-mix(in srgb, var(--accent) 84%, var(--text));
 }
 
 /* ---------- motion ---------- */
@@ -70,6 +98,51 @@
   --dur-move: 0.35s;
 }
 
+/* ---------- scale ---------- */
+/*
+ * 寸法は段階を決めて、そこから選ぶ。色は早くから変数になっていたが
+ * 文字サイズ・角丸・間隔は生の数値のままで、12pxと13px、6pxと8pxの角丸が
+ * 混在していた。一つ一つは気づかれなくても、積もると「揃っていない」
+ * 見え方になる。
+ *
+ * 入力欄だけは 16px を厳守する（iOS Safari が 16px 未満の入力に
+ * フォーカスするとページ全体をズームするため。docs/mobile-ui-design.md 参照）。
+ */
+:root {
+  --text-2xs: 11px;  /* バッジ・補助の数値 */
+  --text-xs: 12px;   /* メタ情報・注記 */
+  --text-sm: 13px;   /* 副次的なUI */
+  --text-md: 14px;   /* 既定の本文・コントロール */
+  --text-lg: 16px;   /* 入力欄（ズーム防止）・小見出し */
+  --text-xl: 18px;   /* セクション見出し */
+  --text-2xl: 26px;  /* ページ見出し */
+
+  --radius-xs: 4px;   /* つまみ・極小の面 */
+  --radius-sm: 6px;   /* バッジ・タグ */
+  --radius-md: 8px;   /* 入力欄・ボタン・カード（既定） */
+  --radius-lg: 12px;  /* パネル・ダイアログ */
+  --radius-pill: 999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /*
+   * 器の幅は2段だけ。画面をまたいでも同じ余白で始まるようにする。
+   *   --page-max    …… 一覧や2カラムを載せる広い画面（生成・比較アリーナ）
+   *   --content-max …… 1カラムで読む・編集する画面（部分AI編集）
+   * 以前は 1400 / 1400 / 760px とパディング 24/24/10px がばらばらだった。
+   */
+  --page-max: 1400px;
+  --content-max: 760px;
+  --page-pad: var(--space-5);
+  /* 説明文の行長。1行が長すぎると次の行の頭に目が戻れない */
+  --prose-max: 78ch;
+}
+
 /* ---------- base ---------- */
 * { box-sizing: border-box; }
 
@@ -79,7 +152,7 @@ body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     "Hiragino Sans", "Noto Sans JP", sans-serif;
-  font-size: 14px;
+  font-size: var(--text-md);
   line-height: 1.6;
   background: var(--bg);
   color: var(--text);
@@ -102,9 +175,10 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 24px;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--page-pad);
   /* viewport-fit=cover で Dynamic Island の下に潜らないようにする */
-  padding-top: calc(14px + env(safe-area-inset-top));
+  padding-top: calc(var(--space-3) + env(safe-area-inset-top));
   background: var(--material);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
   backdrop-filter: blur(20px) saturate(180%);
@@ -112,9 +186,10 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
 }
 
 .brand {
-  font-size: 16px;
+  font-size: var(--text-lg);
   font-weight: 700;
   letter-spacing: -0.02em;
+  white-space: nowrap;
 }
 
 .brand span {
@@ -122,7 +197,101 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
   color: var(--muted);
 }
 
-.topbar-actions { display: flex; gap: 8px; }
+/*
+ * 右側は「行き先（ナビ）」と「見え方（外観）」の2つの群に分ける。
+ * 全部が同じボタンだと、押すと画面が変わるものと、その場で見た目が
+ * 変わるだけのものが見分けられない。
+ */
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.topbar-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* ナビ側は横に溢れたらスクロールさせる。畳んで隠すと到達性が落ちる */
+.topbar-group.nav {
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.topbar-group.nav::-webkit-scrollbar { display: none; }
+.topbar-group.nav > * { flex: none; }
+
+.topbar-group.appearance {
+  padding-left: var(--space-2);
+  border-left: 1px solid var(--hairline);
+  flex: none;
+}
+
+/* ---------- accent ---------- */
+
+.accent-btn {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  transition: border-color var(--dur-quick) var(--spring),
+    transform var(--dur-press) var(--spring);
+}
+
+.accent-btn:hover { border-color: var(--muted); }
+.accent-btn:active { transform: scale(0.94); }
+
+/* 文字を持たないボタンなので、いま選んでいる色そのものを見本にする */
+.accent-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.12);
+}
+
+.accent-pop {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-floating);
+}
+
+.accent-swatch {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--swatch);
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.12);
+  transition: transform var(--dur-press) var(--spring);
+}
+
+.accent-swatch:hover { transform: scale(1.12); }
+.accent-swatch:active { transform: scale(0.92); }
+
+/* 選択中は本体の色に頼らず、周りに輪を出して示す（色覚に依存しない） */
+.accent-swatch.is-selected {
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.12), 0 0 0 2px var(--panel),
+    0 0 0 4px var(--text);
+}
 
 /* ---------- layout ---------- */
 /* 列は minmax(0, 1fr) にする。1fr だけだと最小幅が auto になり、
@@ -131,11 +300,12 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
    縮小表示・右に余白ができる）ため */
 .layout {
   display: grid;
-  grid-template-columns: 340px minmax(0, 1fr);
-  gap: 24px;
-  max-width: 1400px;
+  /* サイズの選択肢（例: 正方形 1:1（1024×1024））が切れない幅 */
+  grid-template-columns: 372px minmax(0, 1fr);
+  gap: var(--space-5);
+  max-width: var(--page-max);
   margin: 0 auto;
-  padding: 24px;
+  padding: var(--page-pad);
 }
 
 @media (max-width: 900px) {
@@ -145,7 +315,7 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow);
 }
 
@@ -154,7 +324,7 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
   padding: 20px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--space-3);
   align-self: start;
   position: sticky;
   top: 24px;
@@ -175,11 +345,11 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
 .field {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-1);
 }
 
 .label {
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--muted);
 }
@@ -192,11 +362,11 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
 input, select, textarea {
   font: inherit;
   /* 16px 未満だと iOS Safari がフォーカス時に自動ズームする */
-  font-size: 16px;
+  font-size: var(--text-lg);
   color: var(--text);
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 8px 10px;
   width: 100%;
   transition: border-color var(--dur-quick) ease, box-shadow var(--dur-quick) ease;
@@ -210,20 +380,20 @@ input:focus, select:focus, textarea:focus {
 
 textarea { resize: vertical; min-height: 80px; }
 
-.row { display: flex; gap: 10px; }
+.row { display: flex; gap: var(--space-2); }
 .row .field { flex: 1; }
 .num-field { max-width: 90px; }
 
 .advanced {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 0;
 }
 
 .advanced summary {
   cursor: pointer;
   padding: 8px 12px;
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--muted);
   user-select: none;
@@ -233,13 +403,13 @@ textarea { resize: vertical; min-height: 80px; }
   padding: 4px 12px 12px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .seed-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-2);
 }
 
 .seed-row input[type="number"] {
@@ -250,8 +420,8 @@ textarea { resize: vertical; min-height: 80px; }
 .seed-lock {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 13px;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
   color: var(--muted);
   cursor: pointer;
   white-space: nowrap;
@@ -280,28 +450,28 @@ details.lora-accordion { display: block; }
 .lora-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .lora-list:empty { display: none; }
 
 .lora-row {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .lora-scale {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .lora-scale .scale-label {
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
 }
 
@@ -323,20 +493,20 @@ details.lora-accordion { display: block; }
 
 .lora-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
 /* チェックポイント指定版の選択行（.lora-row の構造を流用） */
 .ckpt-hint {
   margin-top: 6px;
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
 }
 
 .lora-head {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .lora-head .lora-select {
@@ -348,8 +518,8 @@ details.lora-accordion { display: block; }
 .compare-toggle {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
   color: var(--muted);
   cursor: pointer;
   margin-top: 2px;
@@ -362,22 +532,22 @@ details.lora-accordion { display: block; }
 }
 
 .compare-field {
-  gap: 10px;
+  gap: var(--space-2);
 }
 
 #variantList {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-2);
 }
 
 .variant {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .variant-head {
@@ -387,7 +557,7 @@ details.lora-accordion { display: block; }
 }
 
 .variant-title {
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--text);
 }
@@ -395,17 +565,17 @@ details.lora-accordion { display: block; }
 .compare-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .compare-col {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .compare-col-title {
-  font-size: 13px;
+  font-size: var(--text-sm);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -415,7 +585,7 @@ details.lora-accordion { display: block; }
 .compare-img {
   width: 100%;
   height: auto;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border);
   display: block;
 }
@@ -428,31 +598,31 @@ details.lora-accordion { display: block; }
   left: 6px;
   background: var(--accent);
   color: var(--accent-text);
-  font-size: 11px;
+  font-size: var(--text-2xs);
   font-weight: 600;
   padding: 2px 7px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 /* ---------- custom resolution ---------- */
 .custom-size {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 12px;
-  gap: 10px;
+  gap: var(--space-2);
 }
 
 .size-inputs {
   display: flex;
   align-items: flex-end;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .size-dim {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-1);
 }
 
 .icon-btn {
@@ -460,14 +630,14 @@ details.lora-accordion { display: block; }
   width: 36px;
   height: 36px;
   padding: 0;
-  font-size: 15px;
+  font-size: var(--text-lg);
   line-height: 1;
 }
 
 .size-hint {
   display: flex;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
 }
 
@@ -497,7 +667,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
   background: var(--accent);
   color: var(--accent-text);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 10px 16px;
   font-weight: 600;
   box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 35%, transparent);
@@ -510,19 +680,19 @@ button:focus-visible, a.ghost-btn:focus-visible {
   background: transparent;
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 6px 12px;
   white-space: nowrap;
 }
 
 .ghost-btn:hover { border-color: var(--muted); }
-.ghost-btn.small { font-size: 12px; padding: 4px 10px; }
+.ghost-btn.small { font-size: var(--text-xs); padding: 4px 10px; }
 
 /* ---------- generate area ---------- */
 .generate-area {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--space-3);
 }
 
 /* ジョブ一覧・注記・エラーの入れ物。ボックスは作らず、中身を generate-area の
@@ -557,7 +727,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
     -webkit-backdrop-filter: blur(20px) saturate(180%);
     backdrop-filter: blur(20px) saturate(180%);
     border-top: 1px solid var(--hairline);
-    border-radius: 0 0 12px 12px;
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
   }
 }
 
@@ -568,7 +738,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .job-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
   max-height: 150px;
   overflow-y: auto;
 }
@@ -578,8 +748,8 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .job-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
   /* 長いステータス（比較モードの試行表示など）でもプロンプトや ✕ を
      押し出さず、収まらない分は折り返す */
   flex-wrap: wrap;
@@ -619,17 +789,17 @@ button:focus-visible, a.ghost-btn:focus-visible {
 
 /* Modal 版ジョブの実行中だけ出す共通の注意書き（各行には出さない） */
 .job-hint {
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
 }
 
 /* ---------- status / error ---------- */
 .status {
-  font-size: 13px;
+  font-size: var(--text-sm);
   color: var(--muted);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .status::before {
@@ -658,7 +828,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 }
 
 .error {
-  font-size: 13px;
+  font-size: var(--text-sm);
   color: var(--danger);
   word-break: break-word;
 }
@@ -669,7 +839,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
   min-height: 320px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .detail-empty {
@@ -684,7 +854,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .detail-images {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 /* 生成結果・選択切替時は下からわずかに浮き上がって現れる（減衰・オーバーシュートなし） */
@@ -700,7 +870,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .image-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .image-card img {
@@ -710,19 +880,19 @@ button:focus-visible, a.ghost-btn:focus-visible {
   max-height: 70vh;
   max-height: 70svh;
   margin-inline: auto;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border);
   display: block;
 }
 
 .image-card .actions {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   align-items: center;
 }
 
 .image-card .meta {
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
   margin-left: auto;
 }
@@ -730,26 +900,26 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .detail-meta {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
   color: var(--muted);
 }
 
 .detail-meta .prompt-full {
-  font-size: 13px;
+  font-size: var(--text-sm);
   color: var(--text);
   line-height: 1.5;
   word-break: break-word;
 }
 
 .detail-meta .meta-line {
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
 }
 
 .detail-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
@@ -759,7 +929,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .gallery-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-2);
   margin-bottom: 12px;
 }
 
@@ -767,7 +937,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .gallery-head .ghost-btn { margin-left: auto; }
 
 .gallery-head h2 {
-  font-size: 14px;
+  font-size: var(--text-md);
   font-weight: 600;
   margin: 0;
   color: var(--muted);
@@ -777,11 +947,11 @@ button:focus-visible, a.ghost-btn:focus-visible {
   width: auto;
   max-width: 100%;
   padding: 5px 9px;
-  font-size: 13px;
+  font-size: var(--text-sm);
   color: var(--text);
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
 .gallery-search:focus {
@@ -794,7 +964,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .gallery {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 8px;
+  gap: var(--space-2);
   /* 履歴が伸びてもページが無限に長くならないよう独立スクロールにする */
   max-height: 60vh;
   max-height: 60svh;
@@ -805,7 +975,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .gallery-item {
   position: relative;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -845,11 +1015,11 @@ button:focus-visible, a.ghost-btn:focus-visible {
   padding: 6px 8px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .gallery-item .prompt-text {
-  font-size: 10px;
+  font-size: var(--text-2xs);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -858,19 +1028,19 @@ button:focus-visible, a.ghost-btn:focus-visible {
 }
 
 .gallery-item .meta {
-  font-size: 9px;
+  font-size: var(--text-2xs);
   color: var(--muted);
 }
 
 .gallery-item .actions {
   display: flex;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .gallery-empty {
   grid-column: 1 / -1;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-sm);
   padding: 20px 0;
 }
 
@@ -896,7 +1066,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .lightbox img {
   max-width: 100%;
   max-height: 100%;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   box-shadow: var(--shadow-floating);
   animation: rise-in var(--dur-move) var(--spring) backwards;
 }
@@ -908,10 +1078,10 @@ button:focus-visible, a.ghost-btn:focus-visible {
   width: 44px;
   height: 44px;
   border: none;
-  border-radius: 22px;
+  border-radius: var(--radius-pill);
   background: rgb(0 0 0 / 0.5);
   color: #fff;
-  font-size: 20px;
+  font-size: var(--text-xl);
   line-height: 1;
 }
 
@@ -922,16 +1092,16 @@ button:focus-visible, a.ghost-btn:focus-visible {
   transform: translateX(-50%);
   background: rgb(0 0 0 / 0.5);
   color: #fff;
-  font-size: 13px;
+  font-size: var(--text-sm);
   padding: 4px 12px;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   pointer-events: none;
 }
 
 /* ---------- dialog ---------- */
 .key-dialog {
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: var(--panel);
   color: var(--text);
   padding: 0;
@@ -958,21 +1128,21 @@ button:focus-visible, a.ghost-btn:focus-visible {
   padding: 24px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--space-3);
 }
 
-.key-form h2 { margin: 0; font-size: 16px; }
+.key-form h2 { margin: 0; font-size: var(--text-lg); }
 
 .key-form .hint {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
 }
 
 .key-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 /* ---------- Hugging Face bulk import ---------- */
@@ -980,7 +1150,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 
 .hf-search {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .hf-search input { flex: 1; min-width: 0; }
@@ -988,7 +1158,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .hf-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
   max-height: 45vh;
   max-height: 45svh;
   overflow-y: auto;
@@ -1004,9 +1174,9 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .hf-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-2);
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   transition: background var(--dur-quick) ease, transform var(--dur-move) var(--spring);
 }
@@ -1027,12 +1197,12 @@ button:focus-visible, a.ghost-btn:focus-visible {
 
 .hf-item .hf-name {
   flex: 1;
-  font-size: 13px;
+  font-size: var(--text-sm);
   word-break: break-all;
 }
 
 .hf-item .hf-meta {
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
   white-space: nowrap;
 }
@@ -1045,7 +1215,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .stats-body {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: var(--space-5);
   max-height: 60vh;
   max-height: 60svh;
   overflow-y: auto;
@@ -1057,24 +1227,24 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .stats-body:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
-.stats-empty { color: var(--muted); font-size: 13px; }
+.stats-empty { color: var(--muted); font-size: var(--text-sm); }
 
 .stats-group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
 }
 
-.stats-title { font-size: 13px; font-weight: 600; }
+.stats-title { font-size: var(--text-sm); font-weight: 600; }
 
 .stats-nums {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 14px;
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
 }
 
@@ -1083,7 +1253,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .stats-hist {
   display: flex;
   align-items: flex-end;
-  gap: 2px;
+  gap: var(--space-1);
   height: 64px;
   border-bottom: 1px solid var(--border);
 }
@@ -1094,7 +1264,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
   display: flex;
   align-items: flex-end;
   height: 100%;
-  border-radius: 3px 3px 0 0;
+  border-radius: var(--radius-xs) var(--radius-xs) 0 0;
 }
 
 .stats-bin:hover { background: var(--bg); }
@@ -1102,13 +1272,13 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .stats-bin span {
   width: 100%;
   background: var(--accent);
-  border-radius: 3px 3px 0 0;
+  border-radius: var(--radius-xs) var(--radius-xs) 0 0;
 }
 
 .stats-axis {
   display: flex;
   justify-content: space-between;
-  font-size: 11px;
+  font-size: var(--text-2xs);
   color: var(--muted);
 }
 
@@ -1117,7 +1287,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 
 .civitai-search {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .civitai-search input { flex: 1; min-width: 0; }
@@ -1125,11 +1295,11 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .civitai-preview {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg);
-  font-size: 13px;
+  font-size: var(--text-sm);
 }
 
 .civitai-row { word-break: break-all; }
@@ -1140,21 +1310,21 @@ button:focus-visible, a.ghost-btn:focus-visible {
   color: var(--muted);
 }
 
-.civitai-note { color: var(--muted); font-size: 12px; }
+.civitai-note { color: var(--muted); font-size: var(--text-xs); }
 
 .civitai-note.warn { color: var(--danger); }
 
 .civitai-progress {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .civitai-progress-track {
   flex: 1;
   height: 6px;
   background: var(--border);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   overflow: hidden;
 }
 
@@ -1162,12 +1332,12 @@ button:focus-visible, a.ghost-btn:focus-visible {
   height: 100%;
   width: 0;
   background: var(--accent);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   transition: width 0.4s ease;
 }
 
 .civitai-progress-text {
-  font-size: 11px;
+  font-size: var(--text-2xs);
   color: var(--muted);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -1176,8 +1346,8 @@ button:focus-visible, a.ghost-btn:focus-visible {
 .civitai-meta-check {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
   cursor: pointer;
 }
 
@@ -1188,10 +1358,10 @@ button:focus-visible, a.ghost-btn:focus-visible {
   accent-color: var(--accent);
 }
 
-.civitai-desc { color: var(--muted); font-size: 12px; }
+.civitai-desc { color: var(--muted); font-size: var(--text-xs); }
 
 .civitai-json summary {
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
   cursor: pointer;
 }
@@ -1201,11 +1371,11 @@ button:focus-visible, a.ghost-btn:focus-visible {
   padding: 8px 10px;
   max-height: 220px;
   overflow: auto;
-  font-size: 11px;
+  font-size: var(--text-2xs);
   line-height: 1.5;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -1213,25 +1383,31 @@ button:focus-visible, a.ghost-btn:focus-visible {
 /* ---------- mobile (iPhone 16: 393pt / Plus・Pro Max: 430pt) ---------- */
 .mobile-only { display: none; }
 
+/* 狭い画面では器の余白を一段狭める。使う側は --page-pad を見るだけでよい */
+@media (max-width: 700px) {
+  :root { --page-pad: var(--space-4); }
+}
+
 @media (max-width: 430px) {
+  /* 本文 15px は docs/mobile-ui-design.md の決定（入力系だけ 16px 厳守） */
   body { font-size: 15px; }
 
   .topbar {
-    padding: 12px calc(16px + env(safe-area-inset-right))
-             12px calc(16px + env(safe-area-inset-left));
+    padding: var(--space-3) calc(var(--page-pad) + env(safe-area-inset-right))
+             var(--space-3) calc(var(--page-pad) + env(safe-area-inset-left));
     /* sticky 化に伴い Dynamic Island ぶんの余白はバー自身が持つ */
-    padding-top: calc(12px + env(safe-area-inset-top));
+    padding-top: calc(var(--space-3) + env(safe-area-inset-top));
   }
 
   /* 項目が増えても 1 行に収める（ブランドは "fal" のみ表示に短縮） */
   .brand span { display: none; }
-  .topbar-actions { gap: 6px; }
-  .topbar-actions .ghost-btn { padding: 6px 8px; font-size: 13px; }
+  .topbar-actions { gap: var(--space-2); }
+  .topbar-actions .ghost-btn { padding: 6px 8px; font-size: var(--text-sm); }
 
   .layout {
     /* 下部固定の生成バーに隠れないぶんの余白を確保する */
-    padding: 16px 16px calc(110px + env(safe-area-inset-bottom));
-    gap: 16px;
+    padding: var(--page-pad) var(--page-pad) calc(110px + env(safe-area-inset-bottom));
+    gap: var(--space-4);
   }
 
   .controls { padding: 16px; }
@@ -1239,17 +1415,34 @@ button:focus-visible, a.ghost-btn:focus-visible {
   /* 最も触るプロンプトをフォーム先頭へ */
   .prompt-field { order: -1; }
 
-  /* LoRA はアコーディオンとして畳めるようにする */
+  /*
+   * 畳める2つ（LoRA・詳細設定）は同じ見た目にする。隣り合っているのに
+   * 片方だけ枠なしだと、別の種類の部品に見えて畳めることが伝わらない。
+   */
+  .lora-accordion {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+  }
+
+  .lora-accordion > summary,
+  .advanced summary {
+    padding: var(--space-3);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--muted);
+  }
+
   .lora-accordion > summary {
     pointer-events: auto;
     cursor: pointer;
-    padding: 6px 0;
+  }
+
+  .lora-accordion > :not(summary) {
+    margin: 0 var(--space-3) var(--space-3);
   }
 
   .lora-accordion > summary::before { content: "▸ "; }
   .lora-accordion[open] > summary::before { content: "▾ "; }
-
-  .advanced summary { padding: 12px; }
 
   /* 生成ボタンを常時タップできる下部固定バーにする */
   .generate-area {
@@ -1258,7 +1451,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
     right: 0;
     bottom: 0;
     z-index: 50;
-    gap: 8px;
+    gap: var(--space-2);
     padding: 10px calc(16px + env(safe-area-inset-right))
              calc(10px + env(safe-area-inset-bottom))
              calc(16px + env(safe-area-inset-left));
@@ -1276,11 +1469,12 @@ button:focus-visible, a.ghost-btn:focus-visible {
   /* タッチターゲット（44pt）とタップ時のフィードバック */
   button { -webkit-tap-highlight-color: transparent; }
 
-  .primary-btn { padding: 14px 16px; font-size: 17px; }
+  /* iOS 標準のボタン文字サイズ。docs/mobile-ui-design.md の決定 */
+  .primary-btn { padding: var(--space-3) var(--space-4); font-size: 17px; }
   .primary-btn:active:not(:disabled) { background: var(--accent-hover); }
 
   .ghost-btn { padding: 10px 14px; min-height: 44px; }
-  .ghost-btn.small { font-size: 14px; }
+  .ghost-btn.small { font-size: var(--text-md); }
   .ghost-btn:active { border-color: var(--muted); }
 
   .icon-btn { width: 44px; height: 44px; }
@@ -1296,7 +1490,9 @@ button:focus-visible, a.ghost-btn:focus-visible {
   .gallery-head { flex-wrap: wrap; }
   .gallery-search {
     order: 3;
-    margin: 8px 0 0;
+    /* 自分の行を持たせる。同じ行に置くと右端で見切れる */
+    flex: 1 0 100%;
+    margin: var(--space-2) 0 0;
   }
 
   /* HF 一覧の行はタップしやすい高さにする */
@@ -1316,9 +1512,9 @@ button:focus-visible, a.ghost-btn:focus-visible {
 
 /* ---------- arena（LoRA 比較アリーナ / arena.html） ---------- */
 .arena-main {
-  max-width: 1400px;
+  max-width: var(--page-max);
   margin: 0 auto;
-  padding: 24px;
+  padding: var(--page-pad);
 }
 
 .topbar .brand a {
@@ -1326,7 +1522,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
   text-decoration: none;
 }
 
-.arena-tag {
+.page-tag {
   font-weight: 400;
   color: var(--muted);
   margin-left: 8px;
@@ -1340,13 +1536,13 @@ a.ghost-btn {
 }
 
 .arena-main .hint {
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
   margin: 8px 0;
 }
 
 .arena-main .meta {
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
 }
 
@@ -1354,15 +1550,18 @@ a.ghost-btn {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
-.arena-head h2 { margin: 0; font-size: 18px; }
+.arena-head h2 { margin: 0; font-size: var(--text-xl); }
+
+/* 見出し直下の説明は器いっぱいまで伸ばさない */
+.arena-main > section > .hint { max-width: var(--prose-max); }
 
 .session-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 12px;
+  gap: var(--space-3);
   margin-top: 16px;
 }
 
@@ -1371,7 +1570,7 @@ a.ghost-btn {
   cursor: pointer;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
   transition: border-color var(--dur-quick) ease,
     box-shadow var(--dur-quick) ease,
     transform var(--dur-move) var(--spring);
@@ -1387,23 +1586,23 @@ a.ghost-btn {
   transform: scale(0.98);
   transition-duration: var(--dur-quick), var(--dur-quick), var(--dur-press);
 }
-.session-card h3 { margin: 0; font-size: 14px; }
+.session-card h3 { margin: 0; font-size: var(--text-md); }
 
 .session-head {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
   margin-bottom: 16px;
 }
 
-.session-head h2 { margin: 0; font-size: 18px; }
+.session-head h2 { margin: 0; font-size: var(--text-xl); }
 .session-head .danger { color: var(--danger); margin-left: auto; }
 
 .arena-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 380px;
-  gap: 20px;
+  gap: var(--space-5);
   align-items: start;
 }
 
@@ -1416,12 +1615,12 @@ a.ghost-btn {
   margin-bottom: 20px;
 }
 
-.arena-panel h3 { margin: 0 0 10px; font-size: 14px; }
+.arena-panel h3 { margin: 0 0 10px; font-size: var(--text-md); }
 
 .round-start-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
   margin-top: 4px;
   flex-wrap: wrap;
 }
@@ -1430,7 +1629,7 @@ a.ghost-btn {
 .vote-head {
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  gap: var(--space-2);
   flex-wrap: wrap;
   margin-bottom: 10px;
 }
@@ -1447,26 +1646,26 @@ a.ghost-btn {
 .vote-pair {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .vote-side {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   min-width: 0;
 }
 
 .vote-side img {
   width: 100%;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg);
   cursor: zoom-in;
 }
 
 .vote-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   margin-top: 10px;
   flex-wrap: wrap;
 }
@@ -1475,8 +1674,8 @@ a.ghost-btn {
   margin-top: 10px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  font-size: 12px;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
   color: var(--muted);
 }
 
@@ -1490,7 +1689,7 @@ a.ghost-btn {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-2);
   margin-bottom: 8px;
 }
 
@@ -1500,7 +1699,7 @@ a.ghost-btn {
 .lb-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--text-sm);
 }
 
 .lb-table th,
@@ -1510,7 +1709,7 @@ a.ghost-btn {
   border-bottom: 1px solid var(--border);
 }
 
-.lb-table th { color: var(--muted); font-weight: 500; font-size: 12px; }
+.lb-table th { color: var(--muted); font-weight: 500; font-size: var(--text-xs); }
 .lb-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 
 .lb-table .lb-name {
@@ -1524,31 +1723,31 @@ a.ghost-btn {
 .round-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .round-item {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
 }
 
 .round-item.active { border-color: var(--accent); }
 
 .round-item-title {
-  font-size: 13px;
+  font-size: var(--text-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.round-item-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.round-item-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
 
 .round-item details summary {
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
   cursor: pointer;
 }
@@ -1556,19 +1755,19 @@ a.ghost-btn {
 .round-thumbs {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
-  gap: 8px;
+  gap: var(--space-2);
   margin-top: 8px;
 }
 
 .round-thumb img {
   width: 100%;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: zoom-in;
   background: var(--bg);
 }
 
 .round-thumb .name {
-  font-size: 10px;
+  font-size: var(--text-2xs);
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1581,7 +1780,7 @@ a.ghost-btn {
 .range-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   margin: 6px 0;
 }
 
@@ -1591,7 +1790,7 @@ a.ghost-btn {
 .plist-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   margin: 6px 0;
 }
 
@@ -1601,7 +1800,7 @@ a.ghost-btn {
   max-height: 260px;
   overflow: auto;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 6px;
   display: flex;
   flex-direction: column;
@@ -1610,11 +1809,11 @@ a.ghost-btn {
 .plist label {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   padding: 3px 6px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--text-sm);
 }
 
 .plist label:hover { background: var(--bg); }
@@ -1629,14 +1828,14 @@ a.ghost-btn {
 
 @media (max-width: 430px) {
   .arena-main { padding: 16px; }
-  .vote-pair { gap: 8px; }
-  .vote-side .primary-btn { font-size: 12px; padding: 8px 6px; }
+  .vote-pair { gap: var(--space-2); }
+  .vote-side .primary-btn { font-size: var(--text-xs); padding: 8px 6px; }
 }
 
 /* 投票数の目安（リーダーボード下） */
 .lb-status {
   margin-top: 10px;
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
   line-height: 1.5;
   white-space: pre-line; /* 目安と順位変動の 2 行表示 */
@@ -1654,20 +1853,20 @@ a.ghost-btn {
 
 /* ---------- 部分AI編集（edit.html） ---------- */
 .edit-main {
-  max-width: 760px;
+  max-width: var(--content-max);
   margin: 0 auto;
-  padding: 24px;
+  padding: var(--page-pad);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
-.edit-main .hint { font-size: 12px; color: var(--muted); }
-.edit-main .meta { font-size: 12px; font-weight: 400; color: var(--muted); }
+.edit-main .hint { font-size: var(--text-xs); color: var(--muted); }
+.edit-main .meta { font-size: var(--text-xs); font-weight: 400; color: var(--muted); }
 
 .upload-area {
   border: 2px dashed var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: var(--panel);
   padding: 48px 24px;
   text-align: center;
@@ -1676,21 +1875,21 @@ a.ghost-btn {
 }
 
 .upload-area:hover, .upload-area.dragover { border-color: var(--accent); }
-.upload-icon { font-size: 26px; color: var(--accent); margin-bottom: 8px; }
+.upload-icon { font-size: var(--text-2xl); color: var(--accent); margin-bottom: 8px; }
 .upload-text { font-weight: 600; }
-.upload-hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.upload-hint { font-size: var(--text-xs); color: var(--muted); margin-top: 6px; }
 
-#workspace { display: flex; flex-direction: column; gap: 14px; }
+#workspace { display: flex; flex-direction: column; gap: var(--space-3); }
 
-.ratio-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.ratio-chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+.ratio-bar { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.ratio-chips { display: flex; gap: var(--space-2); flex-wrap: wrap; flex: 1; }
 
 .ratio-chip {
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--panel);
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--text-xs);
   padding: 4px 12px;
   white-space: nowrap;
 }
@@ -1701,7 +1900,7 @@ a.ghost-btn {
 .orient-toggle {
   display: inline-flex;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   overflow: hidden;
   transition: opacity 0.15s;
 }
@@ -1712,7 +1911,7 @@ a.ghost-btn {
   border: none;
   background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-xs);
   padding: 4px 12px;
 }
 
@@ -1721,7 +1920,7 @@ a.ghost-btn {
 /* 選択キャンバス。ハンドルが枠の外にはみ出す分だけ左右に余白を取る */
 .canvas-wrap {
   position: relative;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
   box-shadow: var(--shadow);
   touch-action: none;
@@ -1776,53 +1975,52 @@ a.ghost-btn {
   transform: translateX(-50%);
   background: var(--accent);
   color: var(--accent-text);
-  font-size: 11px;
+  font-size: var(--text-2xs);
   font-weight: 600;
   padding: 2px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   white-space: nowrap;
   pointer-events: none;
 }
 
-.edit-form { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.edit-form { padding: 20px; display: flex; flex-direction: column; gap: var(--space-3); }
 .quality-field { max-width: 120px; }
 
-.edit-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.edit-actions { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
 .edit-actions-spacer { flex: 1; }
 
-.edit-result { padding: 20px; display: flex; flex-direction: column; gap: 12px; }
-.edit-result h3 { margin: 0; font-size: 15px; }
-.edit-result img { max-width: 100%; border-radius: 8px; }
+.edit-result { padding: 20px; display: flex; flex-direction: column; gap: var(--space-3); }
+.edit-result h3 { margin: 0; font-size: var(--text-lg); }
+.edit-result img { max-width: 100%; border-radius: var(--radius-md); }
 
 a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 
 .details-section summary {
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--muted);
   user-select: none;
   padding: 4px 0;
 }
 
-.inter-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 8px; }
+.inter-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); margin-top: 8px; }
 
 .inter-card {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 10px;
   text-align: center;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
 }
 
-.inter-card span { font-size: 12px; color: var(--muted); font-weight: 600; }
-.inter-card img { max-width: 100%; border-radius: 6px; margin: 0 auto; }
-.inter-card a { font-size: 12px; }
+.inter-card span { font-size: var(--text-xs); color: var(--muted); font-weight: 600; }
+.inter-card img { max-width: 100%; border-radius: var(--radius-sm); margin: 0 auto; }
+.inter-card a { font-size: var(--text-xs); }
 
 @media (max-width: 700px) {
-  .edit-main { padding: 16px 10px; }
   .inter-grid { grid-template-columns: 1fr; }
   /* タッチ操作用にハンドルを大きくする */
   .rh { width: 24px; height: 24px; }

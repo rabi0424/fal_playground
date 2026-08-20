@@ -5,16 +5,41 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>fal playground</title>
 <link rel="stylesheet" href="style.css">
+<script>
+/*
+ * 保存した外観を描画前に入れる。読み込み後に入れると、設定と違う配色が
+ * 一瞬見えてしまう（theme.js の DOM の約束を参照）。
+ */
+(function () {
+  try {
+    var d = document.documentElement;
+    var t = localStorage.getItem('fal_theme') || 'auto';
+    d.dataset.theme = t;
+    d.dataset.scheme =
+      t === 'dark' ||
+      (t === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches)
+        ? 'dark'
+        : 'light';
+    var a = localStorage.getItem('fal_accent');
+    if (a) d.dataset.accent = a;
+  } catch (e) {}
+})();
+</script>
 </head>
 <body>
 
 <header class="topbar">
   <div class="brand">fal <span>playground</span></div>
   <div class="topbar-actions">
-    <a href="edit.html" class="ghost-btn" title="画像の一部を選択して Poe の画像編集ボットで編集し、元画像にはめ込む">部分AI編集</a>
-    <a href="arena.html" class="ghost-btn" title="LoRA チェックポイントの匿名比較と Elo ランキング">比較アリーナ</a>
-    <button id="statsBtn" class="ghost-btn" title="アクセスポイント別の生成所要時間の統計">統計</button>
-    <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
+    <div class="topbar-group nav">
+      <a href="edit.html" class="ghost-btn" title="画像の一部を選択して Poe の画像編集ボットで編集し、元画像にはめ込む">部分AI編集</a>
+      <a href="arena.html" class="ghost-btn" title="LoRA チェックポイントの匿名比較と Elo ランキング">比較アリーナ</a>
+      <button id="statsBtn" class="ghost-btn" title="アクセスポイント別の生成所要時間の統計">統計</button>
+    </div>
+    <div class="topbar-group appearance">
+      <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
+      <button id="accentBtn" class="accent-btn" title="アクセントカラー" aria-label="アクセントカラー"><span class="accent-dot"></span></button>
+    </div>
   </div>
 </header>
 
@@ -230,6 +255,7 @@
   <div id="lightboxCounter" class="lightbox-counter mobile-only" hidden></div>
 </div>
 
+<script src="theme.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

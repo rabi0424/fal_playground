@@ -45,7 +45,6 @@ const DIM_STEP = 8;
 
 const LS_HISTORY = 'fal_history'; // サーバー履歴の表示用キャッシュ
 const LS_HISTORY_MIGRATED = 'fal_history_migrated';
-const LS_THEME = 'fal_theme';
 const LS_LORAS = 'fal_lora_library';
 const LS_CKPTS = 'fal_ckpt_library'; // Modal チェックポイント指定版のライブラリ
 const LS_ARENA = 'fal_arena'; // 比較アリーナ（arena.js）のデータ。同期のためここでも扱う
@@ -66,7 +65,6 @@ const $ = (sel) => document.querySelector(sel);
 const MOBILE_MQ = window.matchMedia('(max-width: 430px)');
 
 const els = {
-  themeBtn: $('#themeBtn'),
   statsBtn: $('#statsBtn'),
   statsDialog: $('#statsDialog'),
   statsBody: $('#statsBody'),
@@ -261,26 +259,6 @@ function clearHistory() {
   historyCache = [];
   persistHistoryCache();
   fetch('/api/history', { method: 'DELETE' }).catch(() => {});
-}
-
-/* ---------- theme ---------- */
-
-const THEME_LABELS = { auto: '自動', light: 'ライト', dark: 'ダーク' };
-const THEME_ORDER = ['auto', 'light', 'dark'];
-
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  els.themeBtn.textContent = THEME_LABELS[theme];
-}
-
-function initTheme() {
-  applyTheme(localStorage.getItem(LS_THEME) || 'auto');
-  els.themeBtn.addEventListener('click', () => {
-    const current = document.documentElement.dataset.theme;
-    const next = THEME_ORDER[(THEME_ORDER.indexOf(current) + 1) % THEME_ORDER.length];
-    localStorage.setItem(LS_THEME, next);
-    applyTheme(next);
-  });
 }
 
 /* ---------- form ---------- */
@@ -2707,7 +2685,6 @@ function scheduleSaveForm() {
 
 /* ---------- init ---------- */
 
-initTheme();
 initHfDialog();
 initCivitaiDialog();
 initStatsDialog();

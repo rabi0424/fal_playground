@@ -5,14 +5,39 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>部分AI編集 - fal playground</title>
 <link rel="stylesheet" href="style.css">
+<script>
+/*
+ * 保存した外観を描画前に入れる。読み込み後に入れると、設定と違う配色が
+ * 一瞬見えてしまう（theme.js の DOM の約束を参照）。
+ */
+(function () {
+  try {
+    var d = document.documentElement;
+    var t = localStorage.getItem('fal_theme') || 'auto';
+    d.dataset.theme = t;
+    d.dataset.scheme =
+      t === 'dark' ||
+      (t === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches)
+        ? 'dark'
+        : 'light';
+    var a = localStorage.getItem('fal_accent');
+    if (a) d.dataset.accent = a;
+  } catch (e) {}
+})();
+</script>
 </head>
 <body>
 
 <header class="topbar">
-  <div class="brand"><a href="./">fal <span>playground</span></a><span class="arena-tag">/ 部分AI編集</span></div>
+  <div class="brand"><a href="./">fal <span>playground</span></a><span class="page-tag">/ 部分AI編集</span></div>
   <div class="topbar-actions">
-    <a href="./" class="ghost-btn">← 生成画面へ</a>
-    <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
+    <div class="topbar-group nav">
+      <a href="./" class="ghost-btn">← 生成画面へ</a>
+    </div>
+    <div class="topbar-group appearance">
+      <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
+      <button id="accentBtn" class="accent-btn" title="アクセントカラー" aria-label="アクセントカラー"><span class="accent-dot"></span></button>
+    </div>
   </div>
 </header>
 
@@ -159,6 +184,7 @@
   <div id="lightboxCounter" class="lightbox-counter mobile-only" hidden></div>
 </div>
 
+<script src="theme.js"></script>
 <script src="edit.js"></script>
 </body>
 </html>

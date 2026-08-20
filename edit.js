@@ -48,7 +48,6 @@ const GPT_RATIOS = [
   { label: '1:1', value: 1 }, { label: '3:2', value: 3 / 2 }, { label: '2:3', value: 2 / 3 },
 ];
 
-const LS_THEME = 'fal_theme';
 const LS_FORM = 'fal_edit_form';
 const LS_JOB = 'fal_edit_job'; // 実行中ジョブ。タブを閉じても次回開いたときに再開する
 const LS_STATE = 'fal_edit_state'; // 選択範囲・アップロード済み元画像 URL（再読み込みで復元）
@@ -65,7 +64,6 @@ const MIN_SEL_PX = 20; // 表示座標での選択・リサイズの最小サイ
 const $ = (sel) => document.querySelector(sel);
 
 const els = {
-  themeBtn: $('#themeBtn'),
   uploadArea: $('#uploadArea'),
   fileInput: $('#fileInput'),
   workspace: $('#workspace'),
@@ -119,25 +117,6 @@ const ACCESS_EXPIRED_MSG = 'ログインセッションが切れています。�
 
 function isHtmlResponse(res) {
   return (res.headers.get('Content-Type') || '').includes('text/html');
-}
-
-/* ---------- theme（app.js と同じ切替） ---------- */
-
-const THEME_LABELS = { auto: '自動', light: 'ライト', dark: 'ダーク' };
-const THEME_ORDER = ['auto', 'light', 'dark'];
-
-function initTheme() {
-  const apply = (theme) => {
-    document.documentElement.dataset.theme = theme;
-    els.themeBtn.textContent = THEME_LABELS[theme];
-  };
-  apply(localStorage.getItem(LS_THEME) || 'auto');
-  els.themeBtn.addEventListener('click', () => {
-    const current = document.documentElement.dataset.theme;
-    const next = THEME_ORDER[(THEME_ORDER.indexOf(current) + 1) % THEME_ORDER.length];
-    localStorage.setItem(LS_THEME, next);
-    apply(next);
-  });
 }
 
 /* ---------- API helpers ---------- */
@@ -1411,7 +1390,6 @@ function initSelection() {
   });
 }
 
-initTheme();
 initForm();
 initUpload();
 initSelection();
