@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="ja" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>画像編集 - fal playground</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><a href="./">fal <span>playground</span></a><span class="arena-tag">/ 画像編集</span></div>
+  <div class="topbar-actions">
+    <a href="./" class="ghost-btn">← 生成画面へ</a>
+    <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
+  </div>
+</header>
+
+<main class="ie-main">
+
+  <!-- 入力画像 -->
+  <section class="panel ie-panel">
+    <div class="ie-head">
+      <h2>入力画像</h2>
+      <div class="ie-head-actions">
+        <button id="pickFileBtn" class="ghost-btn small" type="button">端末から選ぶ</button>
+        <button id="pickHistoryBtn" class="ghost-btn small" type="button">履歴から選ぶ</button>
+      </div>
+    </div>
+
+    <div class="upload-area" id="uploadArea">
+      <div class="upload-icon">⬆</div>
+      <div class="upload-text">クリックまたはドラッグ＆ドロップで画像を読み込む</div>
+      <div class="upload-hint">JPG, PNG, WebP に対応。長辺 2048px に収まるよう縮小してから送信します</div>
+      <input type="file" id="fileInput" accept="image/*" hidden>
+    </div>
+
+    <div id="sourcePreview" class="ie-source" hidden>
+      <img id="sourceImg" alt="入力画像">
+      <div class="ie-source-meta">
+        <span id="sourceInfo" class="hint"></span>
+        <button id="clearSourceBtn" class="ghost-btn small" type="button">取り消す</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 指示 -->
+  <section class="panel ie-panel">
+    <label class="field">
+      <span class="label">編集の指示（プロンプト）</span>
+      <textarea id="prompt" rows="3" placeholder="例: 背景を夜の街に変える / 服を白いシャツにする"></textarea>
+    </label>
+
+    <details class="field lora-accordion" open>
+      <summary class="label">LoRA</summary>
+      <div id="loraList" class="lora-list"></div>
+      <div class="lora-actions">
+        <button id="addLoraBtn" class="ghost-btn small" type="button">＋ LoRA を追加</button>
+        <a href="library.html" class="ghost-btn small">ライブラリを管理</a>
+      </div>
+      <p class="hint" id="loraHint" hidden>登録済みの LoRA がありません。生成画面の「Hugging Face から一括登録」「Civitai から取り込み」で追加できます。</p>
+    </details>
+
+    <details class="field lora-accordion">
+      <summary class="label">詳細設定</summary>
+
+      <div class="row">
+        <label class="field">
+          <span class="label">出力サイズ</span>
+          <select id="sizeSelect"></select>
+        </label>
+        <label class="field num-field">
+          <span class="label">枚数</span>
+          <select id="numImages">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="field num-field">
+          <span class="label">ステップ</span>
+          <input id="steps" type="number" min="1" max="50" step="1" value="28">
+        </label>
+        <label class="field num-field">
+          <span class="label">ガイダンス</span>
+          <input id="guidance" type="number" min="0" max="20" step="0.1" value="4.5">
+        </label>
+        <label class="field">
+          <span class="label">速度</span>
+          <select id="acceleration">
+            <option value="none">なし（品質優先）</option>
+            <option value="regular" selected>標準</option>
+            <option value="high">高速</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="field">
+        <span class="label">シード <em>（「固定」にチェック時のみ使用）</em></span>
+        <div class="seed-row">
+          <input id="seed" type="number" min="0" placeholder="random">
+          <label class="seed-lock" title="チェックすると入力したシード値で編集します。オフの間はランダムになります">
+            <input type="checkbox" id="seedLock"> 固定
+          </label>
+        </div>
+      </div>
+
+      <label class="field">
+        <span class="label">除外したい要素（negative prompt）</span>
+        <input id="negativePrompt" type="text" placeholder="空欄で未指定">
+      </label>
+    </details>
+
+    <div class="ie-run">
+      <button id="runBtn" class="primary-btn" type="button" disabled>編集する</button>
+      <button id="cancelBtn" class="ghost-btn" type="button" hidden>キャンセル</button>
+    </div>
+
+    <div id="status" class="status" hidden></div>
+    <div id="error" class="error" role="alert" hidden></div>
+  </section>
+
+  <!-- 結果 -->
+  <section id="resultPanel" class="panel ie-panel" hidden>
+    <div class="ie-head">
+      <h2>結果</h2>
+      <span id="resultMeta" class="hint"></span>
+    </div>
+    <div id="resultImages" class="ie-results"></div>
+  </section>
+
+  <!-- この画面の履歴 -->
+  <section class="panel ie-panel">
+    <div class="ie-head">
+      <h2>編集履歴</h2>
+      <span class="hint">生成画面のギャラリーにも表示されます</span>
+    </div>
+    <div id="gallery" class="ie-gallery"></div>
+    <p id="galleryEmpty" class="hint" hidden>まだこの画面で編集した画像はありません。</p>
+  </section>
+
+</main>
+
+<!-- 履歴から入力画像を選ぶ -->
+<dialog id="historyDialog" class="key-dialog">
+  <form method="dialog" class="key-form">
+    <h3>履歴から入力画像を選ぶ</h3>
+    <p class="hint">この端末の生成履歴です。タップすると入力画像になります。</p>
+    <div id="historyPicker" class="ie-picker"></div>
+    <div id="historyEmpty" class="hint" hidden>履歴がまだありません。</div>
+    <div class="key-actions">
+      <button value="cancel" class="ghost-btn" formnovalidate>閉じる</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="imgedit.js"></script>
+</body>
+</html>
