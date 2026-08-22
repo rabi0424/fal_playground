@@ -97,6 +97,14 @@
             <option value="high">高速</option>
           </select>
         </label>
+        <label class="field">
+          <span class="label">形式</span>
+          <select id="outputFormat">
+            <option value="png" selected>PNG</option>
+            <option value="jpeg">JPEG</option>
+            <option value="webp">WebP</option>
+          </select>
+        </label>
       </div>
 
       <div class="field">
@@ -119,6 +127,7 @@
       <button id="runBtn" class="primary-btn" type="button" disabled>編集する</button>
       <button id="cancelBtn" class="ghost-btn" type="button" hidden>キャンセル</button>
     </div>
+    <p id="costHint" class="hint" hidden></p>
 
     <div id="status" class="status" hidden></div>
     <div id="error" class="error" role="alert" hidden></div>

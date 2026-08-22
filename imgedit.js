@@ -23,6 +23,9 @@ const MAX_LORAS = 3; // fal 側の上限
 const MAX_INPUT_PX = 2048; // 送信前に長辺をここまで縮める
 const INPUT_QUALITY = 0.92; // 縮小後の JPEG 品質
 const POLL_INTERVAL_MS = 1200;
+// 課金はメガピクセル単価。image_size を省略すると入力画像の解像度がそのまま
+// 使われるので、送信前に目安を出しておく（2026-08 時点の公開料金）
+const PRICE_PER_MP_USD = 0.035;
 
 const LS_THEME = 'fal_theme';
 const LS_LORAS = 'fal_lora_library';
@@ -65,10 +68,12 @@ const els = {
   steps: $('#steps'),
   guidance: $('#guidance'),
   acceleration: $('#acceleration'),
+  outputFormat: $('#outputFormat'),
   seed: $('#seed'),
   seedLock: $('#seedLock'),
   negativePrompt: $('#negativePrompt'),
   runBtn: $('#runBtn'),
+  costHint: $('#costHint'),
   cancelBtn: $('#cancelBtn'),
   status: $('#status'),
   error: $('#error'),
@@ -406,6 +411,22 @@ function clearSource() {
 
 function syncRunBtn() {
   els.runBtn.disabled = !source || els.prompt.value.trim() === '' || running;
+  renderCostHint();
+}
+
+// 出力の総ピクセル数から費用の目安を出す。サイズ指定なしなら入力画像の解像度になる
+function renderCostHint() {
+  const size = SIZES.find((s) => s.value === els.sizeSelect.value);
+  const width = size?.width ?? source?.width;
+  const height = size?.height ?? source?.height;
+  if (!width || !height) {
+    els.costHint.hidden = true;
+    return;
+  }
+  const mp = (width * height) / 1e6 * Number(els.numImages.value);
+  els.costHint.hidden = false;
+  els.costHint.textContent = `出力 ${width}×${height} × ${els.numImages.value} 枚`
+    + ` ・ ${mp.toFixed(1)} MP ・ 目安 $${(mp * PRICE_PER_MP_USD).toFixed(3)}`;
 }
 
 /* ---------- 履歴 ---------- */
@@ -526,7 +547,7 @@ function buildInput(dataUri) {
     num_inference_steps: Number(els.steps.value) || 28,
     guidance_scale: Number(els.guidance.value) || 4.5,
     acceleration: els.acceleration.value,
-    output_format: 'png',
+    output_format: els.outputFormat.value,
   };
   if (size && size.width) input.image_size = { width: size.width, height: size.height };
   if (els.seedLock.checked && els.seed.value !== '') input.seed = Number(els.seed.value);
@@ -610,6 +631,8 @@ async function waitAndFinish(job) {
   const result = await falFetch(job.submitted.response_url);
   const images = result.images || (result.image ? [result.image] : []);
   if (images.length === 0) throw new Error('画像が返されませんでした');
+  // 安全性チェックに引っかかった画像は fal 側で黒く塗り潰されて返る
+  const flagged = (result.has_nsfw_concepts ?? []).filter(Boolean).length;
 
   const record = {
     id: job.id,
@@ -628,7 +651,9 @@ async function waitAndFinish(job) {
   clearJob();
   const saved = await saveHistoryRecord(record);
   setRunning(false);
-  setStatus('');
+  setStatus(flagged > 0
+    ? `安全性チェックにより ${flagged} 枚が塗り潰されて返りました`
+    : '');
   renderResult(saved, images.length);
 }
 
@@ -711,6 +736,7 @@ function saveForm() {
     steps: els.steps.value,
     guidance: els.guidance.value,
     acceleration: els.acceleration.value,
+    outputFormat: els.outputFormat.value,
     seed: els.seed.value,
     seedLock: els.seedLock.checked,
     negativePrompt: els.negativePrompt.value,
@@ -736,6 +762,7 @@ async function restoreForm() {
   if (s.steps) els.steps.value = s.steps;
   if (s.guidance) els.guidance.value = s.guidance;
   if (s.acceleration) els.acceleration.value = s.acceleration;
+  if (s.outputFormat) els.outputFormat.value = s.outputFormat;
   els.seed.value = s.seed || '';
   els.seedLock.checked = !!s.seedLock;
   els.negativePrompt.value = s.negativePrompt || '';
@@ -778,8 +805,12 @@ els.uploadArea.addEventListener('drop', (e) => loadFile(e.dataTransfer?.files?.[
 els.addLoraBtn.addEventListener('click', () => addLoraRow());
 els.prompt.addEventListener('input', () => { syncRunBtn(); saveForm(); });
 for (const el of [els.sizeSelect, els.numImages, els.steps, els.guidance,
-  els.acceleration, els.seed, els.seedLock, els.negativePrompt]) {
+  els.acceleration, els.outputFormat, els.seed, els.seedLock, els.negativePrompt]) {
   el.addEventListener('change', saveForm);
+}
+// 出力サイズと枚数は費用の目安に効く
+for (const el of [els.sizeSelect, els.numImages]) {
+  el.addEventListener('change', renderCostHint);
 }
 
 els.runBtn.addEventListener('click', run);
