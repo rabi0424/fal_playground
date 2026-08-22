@@ -166,6 +166,34 @@ function hfResolveUrl(repo, path) {
   return `${HF_BASE}/${repo}/resolve/main/${path.split('/').map(encodeURIComponent).join('/')}`;
 }
 
+// .safetensors の HF resolve URL から、隣に置いた .civitai.json の URL を作る。
+// 想定外の URL（HF 以外・別の拡張子）は null を返して呼び出し側で弾く
+function hfMetaJsonUrl(raw) {
+  let u;
+  try {
+    u = new URL(String(raw ?? ''));
+  } catch {
+    return null;
+  }
+  if (u.protocol !== 'https:' || u.hostname !== 'huggingface.co') return null;
+  if (!/^\/[\w.-]+\/[\w.-]+\/resolve\/[^/]+\/.+\.safetensors$/i.test(u.pathname)) return null;
+  return `${u.origin}${civitaiMetaJsonPath(u.pathname)}`;
+}
+
+// 保存した JSON から、ライブラリ表示に使う項目だけ取り出す
+function civitaiMetaSummary(doc) {
+  const words = Array.isArray(doc?.version?.trainedWords) ? doc.version.trainedWords : [];
+  return {
+    trigger: words.filter((w) => typeof w === 'string' && w.trim() !== '').join(', ') || null,
+    base: doc?.version?.baseModel ?? null,
+    modelName: doc?.model?.name ?? null,
+    versionName: doc?.version?.name ?? null,
+    creator: doc?.model?.creator ?? null,
+    source: doc?.source ?? null,
+    savedAt: doc?.savedAt ?? null,
+  };
+}
+
 // 取り込み時点の Civitai の情報を JSON として保存するための文書を組み立てる。
 // トリガーワード・説明・サンプル画像の生成パラメータなど「後から使い方を調べる」
 // ための情報を残す。画像本体は保存しない（URL と生成設定のみ）。
@@ -1689,6 +1717,35 @@ export default {
     // Hugging Face 公開リポジトリのファイル一覧の中継。
     // ブラウザから huggingface.co を直接叩くと CORS 等で失敗するため、
     // 同一オリジンの API として提供する（公開データのみ・repo 形式を厳密に検証）
+    // モデルの隣に保存した .civitai.json を読み出す（LoRA ライブラリのトリガーワード等）。
+    // ブラウザから huggingface.co を直接叩くと CORS で失敗し、非公開リポジトリは
+    // トークンが要るため Worker 経由にする。返すのは表示に使う項目だけ
+    if (url.pathname === '/api/lora/meta') {
+      if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
+      const target = hfMetaJsonUrl(url.searchParams.get('url') || '');
+      if (!target) {
+        return new Response('url は Hugging Face の .safetensors の URL を指定してください', { status: 422 });
+      }
+      let res;
+      try {
+        res = await fetch(target, {
+          headers: { 'User-Agent': 'fal-playground', ...hfAuthHeaders(env) },
+          signal: apiSignal(),
+        });
+      } catch {
+        return new Response('Hugging Face に接続できませんでした', { status: 502 });
+      }
+      if (res.status === 404) return new Response('サイト情報 JSON がありません', { status: 404 });
+      if (!res.ok) return new Response(`Hugging Face error ${res.status}`, { status: 502 });
+      let doc;
+      try {
+        doc = await res.json();
+      } catch {
+        return new Response('サイト情報 JSON を解釈できませんでした', { status: 502 });
+      }
+      return Response.json(civitaiMetaSummary(doc));
+    }
+
     if (url.pathname === '/api/hf/tree') {
       if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
       const repo = url.searchParams.get('repo') || '';

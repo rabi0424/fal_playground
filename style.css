@@ -325,7 +325,9 @@ details.lora-accordion { display: block; }
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  align-items: center;
 }
+.lora-actions a.ghost-btn { text-decoration: none; }
 
 /* チェックポイント指定版の選択行（.lora-row の構造を流用） */
 .ckpt-hint {
@@ -1892,4 +1894,244 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 @media (prefers-contrast: more) {
   .topbar { border-bottom-color: var(--border); }
   .generate-area { border-top-color: var(--border); }
+}
+
+/* ---------- LoRA ライブラリ（library.html） ---------- */
+
+.lib-main {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 20px 16px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.lib-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: sticky;
+  /* topbar の実高さを library.js が --lib-top に入れる（Dynamic Island 対応で可変） */
+  top: var(--lib-top, 0px);
+  z-index: 2;
+  /* 一覧が下を流れるので、バーは背後をぼかして透かす（topbar と同じ扱い） */
+  background: var(--material);
+  backdrop-filter: saturate(1.8) blur(20px);
+  -webkit-backdrop-filter: saturate(1.8) blur(20px);
+  margin: -20px -16px 0;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.lib-search {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 9px 12px;
+  font: inherit;
+}
+
+.lib-filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.lib-chip {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 3px 12px;
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  transition: background var(--dur-quick) ease, color var(--dur-quick) ease,
+    border-color var(--dur-quick) ease, transform var(--dur-move) var(--spring);
+}
+.lib-chip:active { transform: scale(0.97); }
+.lib-chip.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.lib-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.lib-sort {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.lib-sort .label { margin: 0; white-space: nowrap; }
+.lib-sort select { padding: 5px 8px; font-size: 13px; width: auto; }
+.lib-tools .spacer { flex: 1; }
+
+.lib-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lib-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 11px 12px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.lib-card.open {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  box-shadow: var(--shadow-raised);
+}
+
+.lib-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+.lib-name {
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+.lib-star {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--border);
+  flex-shrink: 0;
+  transition: transform var(--dur-move) var(--spring), color var(--dur-quick) ease;
+}
+.lib-star.on { color: #eab308; }
+.lib-star:active { transform: scale(1.25); }
+
+.lib-badge {
+  font-size: 11px;
+  border-radius: 5px;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.lib-badge.base {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.lib-badge.warn {
+  color: #b45309;
+  border-color: color-mix(in srgb, #b45309 35%, transparent);
+  background: color-mix(in srgb, #b45309 8%, transparent);
+}
+
+.lib-trigger {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.lib-trigger-chip {
+  font-size: 12px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+  border-radius: 6px;
+  padding: 1px 8px;
+}
+
+.lib-sub {
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.lib-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.lib-editor .hint { font-size: 11.5px; }
+.lib-editor .lora-scale { margin: 0; }
+
+.lib-path {
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+
+.lib-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.lib-actions .spacer { flex: 1; }
+.lib-actions a.ghost-btn { text-decoration: none; }
+.lib-danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+
+.lib-empty { text-align: center; padding: 32px 8px; }
+
+/* 取得結果の反映確認 */
+.lib-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.lib-diff-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 11px;
+}
+/* 全体規則の input { width: 100% } に負けてチェックボックスが横幅を食わないようにする */
+.lib-diff-row input[type="checkbox"] {
+  width: auto;
+  flex: none;
+  margin: 4px 0 0;
+}
+.lib-diff-body { flex: 1; min-width: 0; }
+.lib-diff-title { font-size: 12px; color: var(--muted); }
+.lib-diff-value { overflow-wrap: anywhere; }
+
+/* 生成画面の LoRA 行に出すトリガーワード */
+.lora-trigger {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.lora-trigger .lib-trigger-chip { flex-shrink: 0; }
+
+@media (max-width: 430px) {
+  .lib-main { padding: 16px 12px 56px; }
+  .lib-toolbar { margin: -16px -12px 0; padding: 12px; }
 }
