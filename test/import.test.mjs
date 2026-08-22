@@ -304,6 +304,32 @@ async function testListAndCancel() {
   console.log('✓ list/cancel: 一覧が取得でき、中止で multipart も破棄される');
 }
 
+// 実際に起きた不具合: alarm が過去の時刻のまま配信されずに残ると、「張られている」と
+// 判定して張り直さないため、以後どのジョブも一度も実行されない（runs が 0 のまま）
+async function testStuckPastAlarm() {
+  const mod = await loadWorker();
+  const fileBytes = randomBytes(150 * 1024);
+  const ctx = makeDo(mod, { fileBytes, chunkSize: 0 });
+  const { stub, storage } = ctx;
+  const id = 'a'.repeat(32);
+
+  // 3 日前の時刻で居座っている alarm
+  await storage.setAlarm(Date.now() - 3 * 24 * 60 * 60 * 1000);
+  await stub.startLoraImport(id, 'https://civitai.com/models/45?modelVersionId=123', 'me/repo', false, 'lora');
+  assert.ok((await storage.getAlarm()) > Date.now() - 1000, '過ぎた alarm が張り直されていない');
+
+  await runAlarms(ctx);
+  const job = await storage.get(`lora:job:${id}`);
+  assert.equal(job.status, 'done', `張り直した alarm で完了するはず: ${job.status} (${job.error ?? ''})`);
+  assert.ok(job.runs > 0, 'ジョブが一度も実行されていない');
+
+  // 一覧にも「過ぎた alarm」であることが出ること
+  await storage.setAlarm(Date.now() - 60 * 60 * 1000);
+  const list = await stub.listLoraImports();
+  assert.equal(list.alarmOverdue, true, '一覧に alarm の異常が出ていない');
+  console.log('✓ stuck alarm: 過去の時刻で居座った alarm を張り直して完了');
+}
+
 await testCheckpoint();
 await testLoraSingleRun();
 await testRetryDuringUpload();
@@ -314,5 +340,6 @@ await testSharedBudget();
 await testNewJobNotStarved();
 await testNoResurrection();
 await testListAndCancel();
+await testStuckPastAlarm();
 rmSync(OUT, { force: true });
 console.log('\nすべて成功');

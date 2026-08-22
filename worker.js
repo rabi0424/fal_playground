@@ -16,6 +16,11 @@ const HISTORY_KEEP = 1000; // 履歴レコードの上限。超過分は画像�
 // 処理する（クライアントとの接続が切れても結果を取りこぼさないため）
 const JOB_TTL_MS = 60 * 60 * 1000; // 完了・失敗ジョブの保持期間
 const JOB_POLL_DELAY_MS = 2000;
+// これ以上「予定時刻を過ぎているのに実行されていない」alarm は、配信されないまま
+// 残っているものとみなして張り直す。Durable Object の alarm は実行が繰り返し
+// 異常終了すると過去の時刻のまま居座ることがあり、その状態を「張られている」と
+// 判定すると誰もジョブを進めなくなる（取り込みが resolve のまま永久に止まる）
+const ALARM_OVERDUE_MS = 60 * 1000;
 const JOB_MAX_SUBMIT_ATTEMPTS = 2; // 送信自体の再試行上限（多重生成・多重課金の防止）
 
 // 履歴追加時に取り込む外部画像のホスト（fal の CDN）。それ以外は取り込まず URL のまま残す
@@ -544,9 +549,7 @@ export class SyncState extends DurableObject {
       attempts: 0,
       created: Date.now(),
     });
-    if ((await this.ctx.storage.getAlarm()) === null) {
-      await this.ctx.storage.setAlarm(Date.now() + 50);
-    }
+    await this.ensureAlarm();
   }
 
   async getKrea2Job(id) {
@@ -559,6 +562,15 @@ export class SyncState extends DurableObject {
       elapsedMs: job.elapsedMs ?? null, // 実処理時間（DO のキュー待ちを含まない）
       error: job.error ?? null,
     };
+  }
+
+  // alarm を確実に張る。既に張られていても、予定時刻をとうに過ぎている（＝配信されない
+  // まま残っている）ものは張り直す
+  async ensureAlarm(delayMs = 50) {
+    const at = await this.ctx.storage.getAlarm();
+    if (at === null || at < Date.now() - ALARM_OVERDUE_MS) {
+      await this.ctx.storage.setAlarm(Date.now() + delayMs);
+    }
   }
 
   // 未完了ジョブを順に処理する（順次実行なので Modal 側のウォーム状態も保ちやすい）。
@@ -609,9 +621,7 @@ export class SyncState extends DurableObject {
       attempts: 0,
       created: Date.now(),
     });
-    if ((await this.ctx.storage.getAlarm()) === null) {
-      await this.ctx.storage.setAlarm(Date.now() + 50);
-    }
+    await this.ensureAlarm();
   }
 
   async getPoeJob(id) {
@@ -864,9 +874,7 @@ export class SyncState extends DurableObject {
       created: Date.now(),
       progressAt: Date.now(),
     });
-    if ((await this.ctx.storage.getAlarm()) === null) {
-      await this.ctx.storage.setAlarm(Date.now() + 50);
-    }
+    await this.ensureAlarm();
   }
 
   // ジョブ記録の保存。停滞検知の基準になる「最後に前進した時刻」を必ず更新する。
@@ -907,9 +915,7 @@ export class SyncState extends DurableObject {
       this.abortedLoraJobs.add(key);
       return job;
     }
-    if (stalledMs > LORA_RESUME_STALE_MS && (await this.ctx.storage.getAlarm()) === null) {
-      await this.ctx.storage.setAlarm(Date.now() + 50);
-    }
+    if (stalledMs > LORA_RESUME_STALE_MS) await this.ensureAlarm();
     return job;
   }
 
@@ -918,10 +924,12 @@ export class SyncState extends DurableObject {
   async listLoraImports() {
     const jobs = await this.ctx.storage.list({ prefix: 'lora:job:' });
     const now = Date.now();
+    const alarmAt = await this.ctx.storage.getAlarm();
     return {
       now: new Date(now).toISOString(),
-      alarmAt: (await this.ctx.storage.getAlarm()) ?? null,
-      alarmInMs: ((await this.ctx.storage.getAlarm()) ?? 0) - now || null,
+      alarmAt: alarmAt ?? null,
+      alarmInMs: alarmAt === null ? null : alarmAt - now,
+      alarmOverdue: alarmAt !== null && alarmAt < now - ALARM_OVERDUE_MS,
       aborted: this.abortedLoraJobs.size,
       jobs: [...jobs].map(([key, j]) => ({
         id: key.slice('lora:job:'.length),
@@ -1766,7 +1774,9 @@ export default {
     if (url.pathname === '/api/lora-import/jobs') {
       if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
       const importStub = env.STATE.get(env.STATE.idFromName('lora-import'));
-      return Response.json(await importStub.listLoraImports());
+      return new Response(JSON.stringify(await importStub.listLoraImports(), null, 2), {
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      });
     }
 
     // 取り込みジョブの状態取得（クライアントはこれをポーリングする）。DELETE で中止
