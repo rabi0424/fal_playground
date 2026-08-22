@@ -51,6 +51,12 @@
       <textarea id="prompt" rows="3" placeholder="例: 背景を夜の街に変える / 服を白いシャツにする"></textarea>
     </label>
 
+    <label class="field">
+      <span class="label">プロバイダ</span>
+      <select id="provider"></select>
+      <span class="hint" id="providerHint"></span>
+    </label>
+
     <details class="field lora-accordion" open>
       <summary class="label">LoRA</summary>
       <div id="loraList" class="lora-list"></div>
@@ -64,7 +70,7 @@
     <details class="field lora-accordion">
       <summary class="label">詳細設定</summary>
 
-      <div class="row">
+      <div class="row" data-only="fal">
         <label class="field">
           <span class="label">出力サイズ</span>
           <select id="sizeSelect"></select>
@@ -80,7 +86,7 @@
         </label>
       </div>
 
-      <div class="row">
+      <div class="row" data-only="fal">
         <label class="field num-field">
           <span class="label">ステップ</span>
           <input id="steps" type="number" min="1" max="50" step="1" value="28">
@@ -97,15 +103,16 @@
             <option value="high">高速</option>
           </select>
         </label>
-        <label class="field">
-          <span class="label">形式</span>
-          <select id="outputFormat">
-            <option value="png" selected>PNG</option>
-            <option value="jpeg">JPEG</option>
-            <option value="webp">WebP</option>
-          </select>
-        </label>
       </div>
+
+      <label class="field">
+        <span class="label">形式</span>
+        <select id="outputFormat">
+          <option value="png" selected>PNG</option>
+          <option value="jpeg">JPEG</option>
+          <option value="webp">WebP</option>
+        </select>
+      </label>
 
       <div class="field">
         <span class="label">シード <em>（「固定」にチェック時のみ使用）</em></span>
@@ -117,7 +124,7 @@
         </div>
       </div>
 
-      <label class="field">
+      <label class="field" data-only="fal">
         <span class="label">除外したい要素（negative prompt）</span>
         <input id="negativePrompt" type="text" placeholder="空欄で未指定">
       </label>

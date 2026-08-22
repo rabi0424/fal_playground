@@ -1,13 +1,15 @@
 'use strict';
 
 /* ==========================================================================
- * 画像編集（fal-ai/qwen-image-edit-2511/lora）
+ * 画像編集（Qwen Image Edit 2511 + LoRA）
  *
  * 入力画像 1 枚 + 指示文 + LoRA で画像を編集する別画面。既存の「部分AI編集」
  * （Poe・範囲を切り抜いてはめ込む）とは別枠で、画像全体をモデルに渡す。
  *
- * - fal の呼び出しは生成画面と同じく Worker のプロキシ（/api/fal/proxy）経由。
- *   キューに投げて status_url をポーリングする
+ * - 同じモデルを fal と WaveSpeed の 2 プロバイダから選べる。API の形が違うので
+ *   PROVIDERS のアダプタで吸収する（送信内容の組み立て・投入・ポーリング・結果の解釈）
+ * - どちらも Worker のプロキシ経由（/api/fal/proxy・/api/wavespeed/proxy）で呼ぶ。
+ *   API キーはブラウザに渡さない
  * - 入力画像は data URI として fal に渡す。このアプリは Cloudflare Access の
  *   内側に置く前提で、/api/image/... を fal から取りに行けるとは限らないため
  * - 同じ画像は R2 にも保存し（/api/upload）、履歴レコードと再開用に使う。
@@ -18,14 +20,9 @@
 
 /* ---------- constants ---------- */
 
-const MODEL_ID = 'fal-ai/qwen-image-edit-2511/lora';
-const MAX_LORAS = 3; // fal 側の上限
+const MAX_LORAS = 3; // どちらのプロバイダも最大 3 個
 const MAX_INPUT_PX = 2048; // 送信前に長辺をここまで縮める
 const INPUT_QUALITY = 0.92; // 縮小後の JPEG 品質
-const POLL_INTERVAL_MS = 1200;
-// 課金はメガピクセル単価。image_size を省略すると入力画像の解像度がそのまま
-// 使われるので、送信前に目安を出しておく（2026-08 時点の公開料金）
-const PRICE_PER_MP_USD = 0.035;
 
 const LS_THEME = 'fal_theme';
 const LS_LORAS = 'fal_lora_library';
@@ -60,6 +57,8 @@ const els = {
   sourceInfo: $('#sourceInfo'),
   clearSourceBtn: $('#clearSourceBtn'),
   prompt: $('#prompt'),
+  provider: $('#provider'),
+  providerHint: $('#providerHint'),
   loraList: $('#loraList'),
   addLoraBtn: $('#addLoraBtn'),
   loraHint: $('#loraHint'),
@@ -414,19 +413,11 @@ function syncRunBtn() {
   renderCostHint();
 }
 
-// 出力の総ピクセル数から費用の目安を出す。サイズ指定なしなら入力画像の解像度になる
+// 費用の目安。課金の考え方がプロバイダごとに違う（fal は解像度、WaveSpeed は枚数）
 function renderCostHint() {
-  const size = SIZES.find((s) => s.value === els.sizeSelect.value);
-  const width = size?.width ?? source?.width;
-  const height = size?.height ?? source?.height;
-  if (!width || !height) {
-    els.costHint.hidden = true;
-    return;
-  }
-  const mp = (width * height) / 1e6 * Number(els.numImages.value);
-  els.costHint.hidden = false;
-  els.costHint.textContent = `出力 ${width}×${height} × ${els.numImages.value} 枚`
-    + ` ・ ${mp.toFixed(1)} MP ・ 目安 $${(mp * PRICE_PER_MP_USD).toFixed(3)}`;
+  const text = provider().costHint();
+  els.costHint.hidden = !text;
+  els.costHint.textContent = text;
 }
 
 /* ---------- 履歴 ---------- */
@@ -518,10 +509,156 @@ async function saveHistoryRecord(record) {
   }
 }
 
-/* ---------- fal ---------- */
+/* ---------- プロバイダ ---------- */
 
-async function falFetch(url, options = {}) {
-  const res = await fetch(`/api/fal/proxy?url=${encodeURIComponent(url)}`, {
+// 同じ Qwen Image Edit 2511 でも API の形が違うので、ここで差を吸収する。
+// supports に無い項目は UI ごと隠す（送っても無視される項目を見せない）
+const PROVIDERS = {
+  fal: {
+    label: 'fal（fal-ai/qwen-image-edit-2511/lora）',
+    model: 'fal-ai/qwen-image-edit-2511/lora',
+    note: '解像度・ステップ・ガイダンスまで指定できます。課金はメガピクセル単価（$0.035/MP）。',
+    supports: { size: true, count: true, steps: true, guidance: true, acceleration: true, negative: true },
+    pollMs: 1200,
+
+    buildInput(dataUri) {
+      const size = SIZES.find((x) => x.value === els.sizeSelect.value);
+      const input = {
+        prompt: els.prompt.value.trim(),
+        image_urls: [dataUri],
+        num_images: Number(els.numImages.value),
+        num_inference_steps: Number(els.steps.value) || 28,
+        guidance_scale: Number(els.guidance.value) || 4.5,
+        acceleration: els.acceleration.value,
+        output_format: els.outputFormat.value,
+      };
+      if (size && size.width) input.image_size = { width: size.width, height: size.height };
+      if (els.seedLock.checked && els.seed.value !== '') input.seed = Number(els.seed.value);
+      const negative = els.negativePrompt.value.trim();
+      if (negative) input.negative_prompt = negative;
+      const loras = collectLoras();
+      if (loras.length > 0) input.loras = loras;
+      return input;
+    },
+
+    // 画像本体は履歴にも再開用の記録にも残さない
+    strip(input) {
+      return { ...input, image_urls: undefined };
+    },
+
+    async submit(input) {
+      const res = await proxyFetch('fal', `https://queue.fal.run/${this.model}`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+      return { statusUrl: res.status_url, responseUrl: res.response_url, requestId: res.request_id };
+    },
+
+    async poll(handle) {
+      const status = await proxyFetch('fal', handle.statusUrl);
+      if (status.status !== 'COMPLETED') {
+        const queue = status.queue_position;
+        return {
+          done: false,
+          text: status.status === 'IN_QUEUE' && Number.isFinite(queue) ? `順番待ち（${queue} 番目）…` : '編集中…',
+        };
+      }
+      return { done: true, result: await proxyFetch('fal', handle.responseUrl) };
+    },
+
+    parse(result) {
+      const images = result.images || (result.image ? [result.image] : []);
+      return {
+        images: images.map((i) => ({ url: i.url, width: i.width, height: i.height })),
+        seed: result.seed ?? null,
+        // 安全性チェックに引っかかった画像は fal 側で黒く塗り潰されて返る
+        flagged: (result.has_nsfw_concepts ?? []).filter(Boolean).length,
+      };
+    },
+
+    costHint() {
+      const size = SIZES.find((x) => x.value === els.sizeSelect.value);
+      const width = size?.width ?? source?.width;
+      const height = size?.height ?? source?.height;
+      if (!width || !height) return '';
+      const mp = (width * height) / 1e6 * Number(els.numImages.value);
+      return `出力 ${width}×${height} × ${els.numImages.value} 枚`
+        + ` ・ ${mp.toFixed(1)} MP ・ 目安 $${(mp * 0.035).toFixed(3)}`;
+    },
+  },
+
+  wavespeed: {
+    label: 'WaveSpeed（wavespeed-ai/qwen-image/edit-2511-lora）',
+    model: 'wavespeed-ai/qwen-image/edit-2511-lora',
+    note: '指定できるのは指示文・LoRA・seed・形式だけです（解像度やステップは API に無く、出力は 1 枚）。課金は 1 枚 $0.025 の固定制。LoRA は公開アクセスできる URL である必要があります。',
+    supports: {},
+    pollMs: 2000,
+    endpoint: 'https://api.wavespeed.ai/api/v3/wavespeed-ai/qwen-image/edit-2511-lora',
+
+    buildInput(dataUri) {
+      const input = {
+        prompt: els.prompt.value.trim(),
+        images: [dataUri], // 1 枚目がベース画像（最大 3 枚まで渡せる仕様）
+        // 未指定は -1（ランダム）。fal と違って省略ではなく明示する
+        seed: els.seedLock.checked && els.seed.value !== '' ? Number(els.seed.value) : -1,
+        // 既定が jpeg なので、劣化させないよう常に明示して送る
+        output_format: els.outputFormat.value,
+      };
+      const loras = collectLoras();
+      if (loras.length > 0) input.loras = loras;
+      return input;
+    },
+
+    strip(input) {
+      return { ...input, images: undefined };
+    },
+
+    async submit(input) {
+      const res = await proxyFetch('wavespeed', this.endpoint, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+      const data = res.data ?? res;
+      if (!data?.id && !data?.urls?.get) throw new Error('予測 ID が返りませんでした');
+      return {
+        id: data.id,
+        resultUrl: data.urls?.get ?? `https://api.wavespeed.ai/api/v3/predictions/${data.id}/result`,
+      };
+    },
+
+    async poll(handle) {
+      const res = await proxyFetch('wavespeed', handle.resultUrl);
+      const data = res.data ?? res;
+      if (data.status === 'completed') return { done: true, result: data };
+      if (['failed', 'cancelled', 'timeout'].includes(data.status)) {
+        throw new Error(data.error || `処理が ${data.status} で終わりました`);
+      }
+      return { done: false, text: data.status === 'created' ? '順番待ち…' : '編集中…' };
+    },
+
+    parse(result) {
+      // outputs は URL 文字列の配列。モデルによっては構造化オブジェクトが来る
+      const images = (result.outputs ?? [])
+        .map((o) => (typeof o === 'string' ? { url: o } : { url: o?.url, width: o?.width, height: o?.height }))
+        .filter((i) => i.url);
+      return { images, seed: result.seed ?? null, flagged: 0 };
+    },
+
+    costHint() {
+      return '出力 1 枚 ・ 目安 $0.025（枚数固定の課金）';
+    },
+  },
+};
+
+let providerId = 'fal';
+
+function provider() {
+  return PROVIDERS[providerId] ?? PROVIDERS.fal;
+}
+
+// どちらのプロバイダも Worker のプロキシ経由で呼ぶ（API キーをブラウザに置かない）
+async function proxyFetch(name, url, options = {}) {
+  const res = await fetch(`/api/${name}/proxy?url=${encodeURIComponent(url)}`, {
     ...options,
     headers: { 'Content-Type': 'application/json', ...options.headers },
   });
@@ -531,31 +668,22 @@ async function falFetch(url, options = {}) {
     let detail = text.slice(0, 300) || `HTTP ${res.status}`;
     try {
       const body = JSON.parse(text);
-      detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail ?? body);
+      // fal は detail、WaveSpeed は message にエラー内容を入れる
+      const raw = body.detail ?? body.message ?? body;
+      detail = typeof raw === 'string' ? raw : JSON.stringify(raw);
     } catch { /* JSON でなければそのまま出す */ }
     throw new Error(detail);
   }
   return res.json();
 }
 
-function buildInput(dataUri) {
-  const size = SIZES.find((s) => s.value === els.sizeSelect.value);
-  const input = {
-    prompt: els.prompt.value.trim(),
-    image_urls: [dataUri],
-    num_images: Number(els.numImages.value),
-    num_inference_steps: Number(els.steps.value) || 28,
-    guidance_scale: Number(els.guidance.value) || 4.5,
-    acceleration: els.acceleration.value,
-    output_format: els.outputFormat.value,
-  };
-  if (size && size.width) input.image_size = { width: size.width, height: size.height };
-  if (els.seedLock.checked && els.seed.value !== '') input.seed = Number(els.seed.value);
-  const negative = els.negativePrompt.value.trim();
-  if (negative) input.negative_prompt = negative;
-  const loras = collectLoras();
-  if (loras.length > 0) input.loras = loras;
-  return input;
+// プロバイダが対応していない項目は隠す
+function syncProviderFields() {
+  for (const el of document.querySelectorAll('[data-only]')) {
+    el.hidden = el.dataset.only !== providerId;
+  }
+  els.providerHint.textContent = provider().note;
+  renderCostHint();
 }
 
 /* ---------- 実行 ---------- */
@@ -587,23 +715,22 @@ async function run() {
   setRunning(true);
   setStatus('リクエストを送信中…');
 
-  const input = buildInput(source.dataUri);
+  const api = provider();
+  const input = api.buildInput(source.dataUri);
   const job = {
     id: makeId(),
+    provider: providerId,
+    model: api.model,
     startedAt: Date.now(),
     prompt,
     sourceUrl: source.url,
     // 送信内容のうち、履歴と再開に必要な分だけ控える（画像本体は持たない）
-    params: { ...input, image_urls: undefined },
+    params: api.strip(input),
     loras: input.loras ?? [],
   };
 
   try {
-    const submitted = await falFetch(`https://queue.fal.run/${MODEL_ID}`, {
-      method: 'POST',
-      body: JSON.stringify(input),
-    });
-    job.submitted = submitted;
+    job.handle = await api.submit(input);
     saveJob(job);
     await waitAndFinish(job);
   } catch (err) {
@@ -616,37 +743,33 @@ async function run() {
 
 // 送信済みジョブの完了待ち。ページを開き直したときもここから再開する
 async function waitAndFinish(job) {
+  const api = PROVIDERS[job.provider] ?? PROVIDERS.fal;
   setRunning(true);
-  let status;
+  let poll;
   do {
-    await sleep(POLL_INTERVAL_MS);
+    await sleep(api.pollMs);
     if (cancelled) throw new Error('キャンセルしました');
-    status = await falFetch(job.submitted.status_url);
-    const queue = status.queue_position;
-    setStatus(status.status === 'IN_QUEUE' && Number.isFinite(queue)
-      ? `順番待ち（${queue} 番目）…`
-      : '編集中…');
-  } while (status.status !== 'COMPLETED');
+    poll = await api.poll(job.handle);
+    if (!poll.done) setStatus(poll.text);
+  } while (!poll.done);
 
-  const result = await falFetch(job.submitted.response_url);
-  const images = result.images || (result.image ? [result.image] : []);
+  const { images, seed, flagged } = api.parse(poll.result);
   if (images.length === 0) throw new Error('画像が返されませんでした');
-  // 安全性チェックに引っかかった画像は fal 側で黒く塗り潰されて返る
-  const flagged = (result.has_nsfw_concepts ?? []).filter(Boolean).length;
 
+  // seed 未指定を表す -1 は「ランダム」なので記録しない
+  const usedSeed = seed ?? (job.params?.seed >= 0 ? job.params.seed : null);
   const record = {
     id: job.id,
     ts: Date.now(),
     type: 'imgedit',
-    model: MODEL_ID,
+    model: job.model ?? api.model,
     prompt: job.prompt,
     input: job.params,
     loras: job.loras,
-    seed: result.seed ?? job.params?.seed ?? null,
+    seed: usedSeed,
     elapsed: ((Date.now() - job.startedAt) / 1000).toFixed(1),
     // 出力に続けて入力画像も残す（削除時に一括で消える）
-    images: [...images.map((i) => ({ url: i.url, width: i.width, height: i.height })),
-      { url: job.sourceUrl }],
+    images: [...images, { url: job.sourceUrl }],
   };
   clearJob();
   const saved = await saveHistoryRecord(record);
@@ -714,7 +837,7 @@ async function resumeJob() {
   } catch {
     job = null;
   }
-  if (!job?.submitted?.status_url) return;
+  if (!job?.handle) return;
   setStatus('前回の編集の結果を確認中…');
   try {
     await waitAndFinish(job);
@@ -731,6 +854,7 @@ async function resumeJob() {
 function saveForm() {
   const state = {
     prompt: els.prompt.value,
+    provider: providerId,
     size: els.sizeSelect.value,
     numImages: els.numImages.value,
     steps: els.steps.value,
@@ -757,6 +881,10 @@ async function restoreForm() {
   if (!s) return;
 
   els.prompt.value = s.prompt || '';
+  if (s.provider && PROVIDERS[s.provider]) {
+    providerId = s.provider;
+    els.provider.value = providerId;
+  }
   if (s.size) els.sizeSelect.value = s.size;
   if (s.numImages) els.numImages.value = s.numImages;
   if (s.steps) els.steps.value = s.steps;
@@ -767,6 +895,7 @@ async function restoreForm() {
   els.seedLock.checked = !!s.seedLock;
   els.negativePrompt.value = s.negativePrompt || '';
   for (const l of s.loras || []) addLoraRow(l.path, l.scale);
+  syncProviderFields();
   syncRunBtn();
   if (s.source?.url) await setSourceFromSrc(s.source.url, s.source.from || 'history');
 }
@@ -774,6 +903,19 @@ async function restoreForm() {
 /* ---------- init ---------- */
 
 initTheme();
+
+for (const [id, api] of Object.entries(PROVIDERS)) {
+  const opt = document.createElement('option');
+  opt.value = id;
+  opt.textContent = api.label;
+  els.provider.appendChild(opt);
+}
+els.provider.value = providerId;
+els.provider.addEventListener('change', () => {
+  providerId = els.provider.value;
+  syncProviderFields();
+  saveForm();
+});
 
 for (const size of SIZES) {
   const opt = document.createElement('option');
@@ -820,5 +962,6 @@ els.cancelBtn.addEventListener('click', () => {
 });
 
 syncAddLoraBtn();
+syncProviderFields();
 restoreForm();
 fetchHistory().then(resumeJob);
