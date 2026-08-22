@@ -41,7 +41,19 @@ const LORA_STAGING_PREFIX = 'lora-staging/';
 const LORA_IMPORT_MAX_ATTEMPTS = 4; // 連続エラーでの打ち切り上限（進捗があれば戻る）
 // 進捗のたびに attempts を戻すため、「少し進んでは固まる」を繰り返すジョブは
 // attempts だけでは止まらない。再開を含む通算の実行回数にも上限を設ける
-const LORA_IMPORT_MAX_RUNS = 100;
+// （予算切れによる正常な中断も 1 回に数えるので、暴走を止めるためだけの大きめの値。
+// 30 GB を細かいパートで送る場合でも数百回で収まる。エラーの繰り返しは attempts 側で
+// 先に止まる）
+const LORA_IMPORT_MAX_RUNS = 1000;
+// 1 回の alarm 実行で転送するパート数・バイト数の上限。Workers / Durable Object には
+// 1 回の呼び出しあたりの CPU 時間・subrequest 数の上限があり、巨大なチェックポイントを
+// 1 回で流し切ろうとすると実行ごと打ち切られる。打ち切りは例外にならないので次の alarm も
+// 張られず、ジョブが取り残される。予算を使い切ったらこちらから中断して次の alarm に
+// 続きを渡す（完了パートは記録済みなのでやり直しにはならない）
+const LORA_PARTS_PER_RUN = 16;
+const LORA_BYTES_PER_RUN = 2 * 1024 * 1024 * 1024;
+// アップロード計画（LFS の転送先一覧）を作り直すまでの期間。署名 URL の寿命より短くする
+const LORA_UPLOAD_PLAN_TTL_MS = 6 * 60 * 60 * 1000;
 // 進捗が完全に止まったジョブを打ち切るまでの猶予。alarm が異常終了して pending の
 // まま取り残されたジョブも、これを過ぎればポーリング側から error にする
 const LORA_STALL_TIMEOUT_MS = 15 * 60 * 1000;
@@ -838,6 +850,11 @@ export class SyncState extends DurableObject {
     await this.ctx.storage.put(key, job);
   }
 
+  // この alarm 実行でまだ転送してよいか（パート数・バイト数の予算が残っているか）
+  runBudgetLeft(run) {
+    return run.parts < LORA_PARTS_PER_RUN && run.bytes < LORA_BYTES_PER_RUN;
+  }
+
   // 直近まで前進していた（＝実行中とみなせる）か
   loraJobIsLive(job) {
     return job.status === 'pending'
@@ -939,9 +956,15 @@ export class SyncState extends DurableObject {
     return `${LORA_STAGING_PREFIX}${key.slice('lora:job:'.length)}`;
   }
 
+  // アップロード計画（LFS の転送先一覧）の置き場。ステージング本体と同じ接頭辞に
+  // 置くので、取り残されても 24 時間後の掃除で一緒に回収される
+  loraPlanKey(key) {
+    return `${this.loraStagingKey(key)}.plan.json`;
+  }
+
   async deleteLoraStaging(key) {
     try {
-      await this.env.IMAGES.delete(this.loraStagingKey(key));
+      await this.env.IMAGES.delete([this.loraStagingKey(key), this.loraPlanKey(key)]);
     } catch { /* 消せなくても 24h 後の掃除で回収される */ }
   }
 
@@ -1019,15 +1042,23 @@ export class SyncState extends DurableObject {
       job.attempts += 1;
       await this.saveLoraJob(key, job);
 
+      // この実行ぶんの転送予算。使い切ったら pending のまま抜け、alarm が続きを回す
+      const run = { parts: 0, bytes: 0, yielded: false };
       while (job.status === 'pending') {
+        const stepBefore = job.step;
         if (job.step === 'resolve') await this.loraStepResolve(key, job);
-        else if (job.step === 'download') await this.loraStepDownload(key, job);
-        else if (job.step === 'upload') await this.loraStepUpload(key, job);
+        else if (job.step === 'download') await this.loraStepDownload(key, job, run);
+        else if (job.step === 'upload') await this.loraStepUpload(key, job, run);
         else if (job.step === 'commit') await this.loraStepCommit(key, job);
         else {
           await this.failLoraImport(key, job, `不明なステップです: ${job.step}`);
           return;
         }
+        if (run.yielded) break;
+        // 転送ステップが切り替わったら、予算を使いかけのまま次に進まず一度 alarm に返す。
+        // 残り予算が中途半端だとアップロード開始直後に中断することになり、転送先を
+        // 取り直すぶんだけ無駄が出る
+        if (job.step !== stepBefore && (run.parts > 0 || run.bytes > 0)) break;
       }
     } catch {
       // pending のまま次の alarm で再試行
@@ -1106,7 +1137,7 @@ export class SyncState extends DurableObject {
   // Civitai からダウンロードして R2 に一時保存する。Range 対応かつ SHA256 の
   // 公称値がある場合は並列分割ダウンロード（パート単位で再開できる）、それ以外は
   // 従来どおり 1 本のストリームで保存しつつ SHA256 を計算する
-  async loraStepDownload(key, job) {
+  async loraStepDownload(key, job, run) {
     // Range: bytes=0-0 の探りで、到達性・範囲リクエスト対応・総サイズを一度に調べる
     const { res, finalUrl } = await this.civitaiOpen(job.meta.downloadUrl, 'bytes=0-0');
     if (res.status === 401 || res.status === 403) {
@@ -1152,7 +1183,8 @@ export class SyncState extends DurableObject {
       // 並列分割ダウンロード。逐次の SHA256 計算はできないため oid には公称値を使う
       //（各パートは長さ検証つき。内容が公称値と食い違っていれば HF 側の検証で弾かれる）
       await res.body?.cancel();
-      await this.chunkedStagingDownload(key, job, finalUrl, size);
+      const finished = await this.chunkedStagingDownload(key, job, finalUrl, size, run);
+      if (!finished) return; // 予算切れ。残りのパートは次の alarm 実行で取得する
       job.sha256 = job.meta.sha256;
     } else {
       // 逐次ストリーム経路。探りが 200（Range 非対応）ならその応答をそのまま使い、
@@ -1201,6 +1233,7 @@ export class SyncState extends DurableObject {
         return;
       }
       job.sha256 = sha256;
+      run.bytes += size; // 分割できない経路なので中断はしないが、予算は消費した扱いにする
     }
     job.size = size;
     job.step = 'upload';
@@ -1211,7 +1244,7 @@ export class SyncState extends DurableObject {
   // 途中断・リトライ時は残りのパートだけをやり直す（巨大ファイルでも全体の
   // やり直しが発生しない）。パートが進むたび attempts を 1 戻すので、前進が続く限りは
   // 打ち切られず、停滞すれば連続エラー数・通算実行回数・停滞時間のどれかで止まる
-  async chunkedStagingDownload(key, job, finalUrl, size) {
+  async chunkedStagingDownload(key, job, finalUrl, size, run) {
     const partSize = size > 8 * 1024 * 1024 * 1024 ? R2_PART_SIZE : R2_SMALL_PART_SIZE;
     const stagingKey = this.loraStagingKey(key);
     let upload;
@@ -1240,9 +1273,12 @@ export class SyncState extends DurableObject {
     const tally = this.makeProgressTally(key, job);
     const worker = async () => {
       while (pending.length > 0) {
+        if (!this.runBudgetLeft(run)) return; // 予算切れ。残りは次の alarm 実行へ
         const n = pending.shift();
         const offset = (n - 1) * partSize;
         const len = partLen(n);
+        run.parts += 1;
+        run.bytes += len;
         let lastErr = null;
         for (let retry = 0; retry < 3; retry++) {
           const counter = { n: 0 };
@@ -1276,26 +1312,30 @@ export class SyncState extends DurableObject {
     };
     await Promise.all(Array.from({ length: DL_CONCURRENCY }, worker));
 
+    if (pending.length > 0) {
+      run.yielded = true; // 予算切れ。完了パートは記録済みなので次の実行が続きを取る
+      await this.saveLoraJob(key, job);
+      return false;
+    }
+
     const parts = Object.values(job.stagingParts).sort((a, b) => a.partNumber - b.partNumber);
     await upload.complete(parts);
     job.stagingUploadId = null;
     job.bytesDone = size;
     await this.saveLoraJob(key, job);
+    return true;
   }
 
-  // HF の LFS プロトコルでアップロードする: batch API で転送先を取得し、
-  // multipart（応答 header の chunk_size + 連番 URL）なら分割 PUT + 完了通知、
-  // そうでなければ単発 PUT。verify アクションがあれば最後に呼ぶ
-  async loraStepUpload(key, job) {
-    const stagingKey = `${LORA_STAGING_PREFIX}${key.slice('lora:job:'.length)}`;
-    job.bytesDone = 0;
-    job.bytesTotal = job.size;
-    await this.saveLoraJob(key, job);
-    const lfsHeaders = {
-      Accept: 'application/vnd.git-lfs+json',
-      'Content-Type': 'application/vnd.git-lfs+json',
-      ...hfAuthHeaders(this.env),
-    };
+  // アップロード計画（LFS batch API の応答）を得る。転送先の一覧は multipart だと
+  // 数百件になり Durable Object のストレージには収まらないので R2 に置く。batch を
+  // 叩き直すと multipart セッション（uploadId）が変わって送信済みのパートが無効に
+  // なるため、複数回の alarm 実行にまたがるときは同じ計画を読み直して使い続ける
+  async loraUploadPlan(key, job, lfsHeaders) {
+    if (job.planAt && Date.now() - job.planAt < LORA_UPLOAD_PLAN_TTL_MS) {
+      const saved = await this.env.IMAGES.get(this.loraPlanKey(key));
+      if (saved) return await saved.json();
+    }
+
     const batchRes = await fetch(`${HF_BASE}/${job.repo}.git/info/lfs/objects/batch`, {
       method: 'POST',
       headers: lfsHeaders,
@@ -1311,114 +1351,187 @@ export class SyncState extends DurableObject {
       if (batchRes.status >= 400 && batchRes.status < 500) {
         await this.failLoraImport(key, job,
           `Hugging Face LFS API がリクエストを拒否しました（HTTP ${batchRes.status}: ${(await batchRes.text()).slice(0, 200)}）`);
-        return;
+        return null;
       }
       throw new Error(`LFS batch error ${batchRes.status}`);
     }
     const object = (await batchRes.json())?.objects?.[0];
     if (object?.error) {
       await this.failLoraImport(key, job, `Hugging Face LFS error: ${object.error.message ?? 'unknown'}`);
-      return;
+      return null;
     }
 
     const upload = object?.actions?.upload;
-    if (upload) {
-      const header = upload.header ?? {};
-      const chunkSize = Number(header.chunk_size);
-      if (Number.isFinite(chunkSize) && chunkSize > 0) {
-        // multipart: header の連番キーが各パートの PUT 先 URL。パートは並列で送り、
-        // 完了ごとに etag を保存して再開できるようにする。パートが進むたび attempts を
-        // 1 戻すので、前進が続く限りは打ち切られない
-        const parts = Object.keys(header)
-          .filter((k) => /^\d+$/.test(k))
-          .sort((a, b) => Number(a) - Number(b));
-        const uploadPartLen = (p) => Math.min(chunkSize, job.size - (Number(p) - 1) * chunkSize);
-        const pending = parts.filter((p) => !job.etags[p]); // 再開時はアップロード済みを飛ばす
-        // 再開時はアップロード済みパートのバイト数から数え直す
-        job.bytesDone = parts.filter((p) => job.etags[p])
-          .reduce((sum, p) => sum + uploadPartLen(p), 0);
-        await this.saveLoraJob(key, job);
-        const tally = this.makeProgressTally(key, job);
-        let stagingLost = false;
-        const uploadWorker = async () => {
-          while (pending.length > 0 && !stagingLost) {
-            const part = pending.shift();
-            const offset = (Number(part) - 1) * chunkSize;
-            const length = uploadPartLen(part);
-            const counter = { n: 0 };
-            try {
-              const obj = await this.env.IMAGES.get(stagingKey, { range: { offset, length } });
-              if (!obj) {
-                stagingLost = true;
-                return;
-              }
-              const putRes = await fetch(header[part], {
-                method: 'PUT',
-                body: obj.body.pipeThrough(tally.stream(counter)).pipeThrough(new FixedLengthStream(length)),
-                signal: transferSignal(length),
-              });
-              if (!putRes.ok) throw new Error(`part ${part} upload error ${putRes.status}`);
-              job.etags[part] = putRes.headers.get('ETag') ?? '';
-              job.attempts = Math.max(0, job.attempts - 1); // 前進したぶんだけ打ち切りカウントを戻す
-              await tally.save(true);
-            } catch (err) {
-              await tally.rollback(counter);
-              throw err;
-            }
-          }
-        };
-        await Promise.all(Array.from({ length: UPLOAD_CONCURRENCY }, uploadWorker));
-        if (stagingLost) {
-          // 一時ファイルが消えている（R2 掃除など）。download からやり直す
-          job.step = 'download';
-          job.etags = {};
-          await this.abortStagingMultipart(key, job);
-          await this.saveLoraJob(key, job);
-          return;
-        }
-        const completeRes = await fetch(upload.href, {
-          method: 'POST',
-          headers: lfsHeaders,
-          body: JSON.stringify({
-            oid: job.sha256,
-            parts: parts.map((p) => ({ partNumber: Number(p), etag: job.etags[p] })),
-          }),
-          signal: transferSignal(),
-        });
-        if (!completeRes.ok) throw new Error(`multipart complete error ${completeRes.status}`);
-      } else {
-        // basic: 応答の header をそのまま付けて単発 PUT
-        const obj = await this.env.IMAGES.get(stagingKey);
-        if (!obj) {
-          job.step = 'download';
-          await this.saveLoraJob(key, job);
-          return;
-        }
-        const putRes = await fetch(upload.href, {
-          method: 'PUT',
-          headers: { ...header },
-          body: obj.body
-            .pipeThrough(this.loraProgressStream(key, job))
-            .pipeThrough(new FixedLengthStream(job.size)),
-          signal: transferSignal(job.size),
-        });
-        if (!putRes.ok) throw new Error(`upload error ${putRes.status}`);
-      }
+    const header = upload?.header ?? {};
+    const chunkSize = Number(header.chunk_size);
+    const verify = object?.actions?.verify;
+    // actions が無い場合は同一オブジェクトがサーバー側に既にある（コミットだけでよい）
+    const plan = {
+      mode: !upload ? 'skip' : (Number.isFinite(chunkSize) && chunkSize > 0 ? 'multipart' : 'basic'),
+      href: upload?.href ?? null,
+      header,
+      // verify はアップロードした場合だけ呼ぶ（既にサーバー側にあるなら不要）
+      verify: upload && verify ? { href: verify.href, header: verify.header ?? {} } : null,
+    };
 
-      const verify = object.actions?.verify;
-      if (verify) {
-        const verifyRes = await fetch(verify.href, {
-          method: 'POST',
-          headers: { ...lfsHeaders, ...(verify.header ?? {}) },
-          body: JSON.stringify({ oid: job.sha256, size: job.size }),
-          signal: transferSignal(),
-        });
-        if (!verifyRes.ok) throw new Error(`verify error ${verifyRes.status}`);
+    // 新しい計画になったら、前の計画に送ったパートは無効なので送り直す
+    job.etags = {};
+    job.planAt = null;
+    if (plan.mode === 'multipart') {
+      const partCount = Object.keys(header).filter((k) => /^\d+$/.test(k)).length;
+      // 1 回の実行に収まらないときだけ計画を保存する（LoRA 程度なら従来どおり使い捨て）
+      if (partCount > LORA_PARTS_PER_RUN) {
+        await this.env.IMAGES.put(this.loraPlanKey(key), JSON.stringify(plan));
+        job.planAt = Date.now();
       }
     }
-    // actions が無い場合は同一オブジェクトがサーバー側に既にある（コミットだけでよい）
+    await this.saveLoraJob(key, job);
+    return plan;
+  }
+
+  // multipart の各パートを送る。header の連番キーが PUT 先 URL で、完了ごとに etag を
+  // 保存して再開できるようにする。パートが進むたび attempts を 1 戻すので、前進が
+  // 続く限りは打ち切られない。全パートを送り終えたときだけ true を返す
+  async loraUploadMultipart(key, job, run, plan, stagingKey, lfsHeaders) {
+    const chunkSize = Number(plan.header.chunk_size);
+    const parts = Object.keys(plan.header)
+      .filter((k) => /^\d+$/.test(k))
+      .sort((a, b) => Number(a) - Number(b));
+    const uploadPartLen = (p) => Math.min(chunkSize, job.size - (Number(p) - 1) * chunkSize);
+    const pending = parts.filter((p) => !job.etags[p]); // 再開時はアップロード済みを飛ばす
+    // 再開時はアップロード済みパートのバイト数から数え直す
+    job.bytesDone = parts.filter((p) => job.etags[p])
+      .reduce((sum, p) => sum + uploadPartLen(p), 0);
+    await this.saveLoraJob(key, job);
+
+    const tally = this.makeProgressTally(key, job);
+    let stagingLost = false;
+    let planStale = false;
+    const uploadWorker = async () => {
+      while (pending.length > 0 && !stagingLost) {
+        if (!this.runBudgetLeft(run)) return; // 予算切れ。残りは次の alarm 実行へ
+        const part = pending.shift();
+        const offset = (Number(part) - 1) * chunkSize;
+        const length = uploadPartLen(part);
+        run.parts += 1;
+        run.bytes += length;
+        const counter = { n: 0 };
+        try {
+          const obj = await this.env.IMAGES.get(stagingKey, { range: { offset, length } });
+          if (!obj) {
+            stagingLost = true;
+            return;
+          }
+          const putRes = await fetch(plan.header[part], {
+            method: 'PUT',
+            body: obj.body.pipeThrough(tally.stream(counter)).pipeThrough(new FixedLengthStream(length)),
+            signal: transferSignal(length),
+          });
+          if (!putRes.ok) {
+            // 署名 URL の失効。計画ごと取り直す（同じ URL で再試行しても通らない）
+            if (putRes.status === 401 || putRes.status === 403) planStale = true;
+            throw new Error(`part ${part} upload error ${putRes.status}`);
+          }
+          job.etags[part] = putRes.headers.get('ETag') ?? '';
+          job.attempts = Math.max(0, job.attempts - 1); // 前進したぶんだけ打ち切りカウントを戻す
+          await tally.save(true);
+        } catch (err) {
+          await tally.rollback(counter);
+          throw err;
+        }
+      }
+    };
+    try {
+      await Promise.all(Array.from({ length: UPLOAD_CONCURRENCY }, uploadWorker));
+    } catch (err) {
+      if (planStale) {
+        job.planAt = null;
+        job.etags = {};
+        await this.saveLoraJob(key, job);
+      }
+      throw err;
+    }
+
+    if (stagingLost) {
+      // 一時ファイルが消えている（R2 掃除など）。download からやり直す
+      job.step = 'download';
+      job.etags = {};
+      job.planAt = null;
+      await this.abortStagingMultipart(key, job);
+      await this.saveLoraJob(key, job);
+      return false;
+    }
+    if (pending.length > 0) {
+      run.yielded = true; // 予算切れ。送信済みの etag は保存済みなので続きから送れる
+      await this.saveLoraJob(key, job);
+      return false;
+    }
+
+    const completeRes = await fetch(plan.href, {
+      method: 'POST',
+      headers: lfsHeaders,
+      body: JSON.stringify({
+        oid: job.sha256,
+        parts: parts.map((p) => ({ partNumber: Number(p), etag: job.etags[p] })),
+      }),
+      signal: transferSignal(),
+    });
+    if (!completeRes.ok) throw new Error(`multipart complete error ${completeRes.status}`);
+    return true;
+  }
+
+  // HF の LFS プロトコルでアップロードする: batch API で転送先を取得し、
+  // multipart（応答 header の chunk_size + 連番 URL）なら分割 PUT + 完了通知、
+  // そうでなければ単発 PUT。verify アクションがあれば最後に呼ぶ
+  async loraStepUpload(key, job, run) {
+    const stagingKey = this.loraStagingKey(key);
+    job.bytesTotal = job.size;
+    if (!job.planAt) job.bytesDone = 0; // 再開時はパートの etag から数え直す
+    await this.saveLoraJob(key, job);
+    const lfsHeaders = {
+      Accept: 'application/vnd.git-lfs+json',
+      'Content-Type': 'application/vnd.git-lfs+json',
+      ...hfAuthHeaders(this.env),
+    };
+
+    const plan = await this.loraUploadPlan(key, job, lfsHeaders);
+    if (!plan) return; // 打ち切り済み（failLoraImport 済み）
+
+    if (plan.mode === 'multipart') {
+      const finished = await this.loraUploadMultipart(key, job, run, plan, stagingKey, lfsHeaders);
+      if (!finished) return; // 予算切れ・一時ファイル消失。続きは次の alarm 実行で
+    } else if (plan.mode === 'basic') {
+      // basic: 応答の header をそのまま付けて単発 PUT
+      const obj = await this.env.IMAGES.get(stagingKey);
+      if (!obj) {
+        job.step = 'download';
+        await this.saveLoraJob(key, job);
+        return;
+      }
+      const putRes = await fetch(plan.href, {
+        method: 'PUT',
+        headers: { ...plan.header },
+        body: obj.body
+          .pipeThrough(this.loraProgressStream(key, job))
+          .pipeThrough(new FixedLengthStream(job.size)),
+        signal: transferSignal(job.size),
+      });
+      if (!putRes.ok) throw new Error(`upload error ${putRes.status}`);
+      run.bytes += job.size;
+    }
+
+    if (plan.verify) {
+      const verifyRes = await fetch(plan.verify.href, {
+        method: 'POST',
+        headers: { ...lfsHeaders, ...plan.verify.header },
+        body: JSON.stringify({ oid: job.sha256, size: job.size }),
+        signal: transferSignal(),
+      });
+      if (!verifyRes.ok) throw new Error(`verify error ${verifyRes.status}`);
+    }
 
     job.step = 'commit';
+    job.planAt = null;
     await this.saveLoraJob(key, job);
   }
 
