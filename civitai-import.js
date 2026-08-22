@@ -61,10 +61,12 @@ let els = null;
 
 /* ---------- helpers（app.js と同じもの。単体で動くよう持たせる） ---------- */
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-function isHtmlResponse(res) {
-  return (res.headers.get('Content-Type') || '').includes('text/html');
+// ジョブ ID はクライアント側で採番する（app.js と同じ理由・同じ形式。
+// このダイアログは app.js を読まない画面からも使うので、ここに持たせる）
+function makeJobId() {
+  if (crypto.randomUUID) return crypto.randomUUID().replaceAll('-', '');
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 function parseHfRepo(raw) {
@@ -351,7 +353,7 @@ async function civitaiStartImport() {
   const rawUrl = els.urlInput.value.trim();
   const repo = parseHfRepo(els.repoInput.value);
   if (!rawUrl || !repo) return;
-  const jobId = makeModalJobId();
+  const jobId = makeJobId();
   civitaiSetError('');
   civitaiSetStatus('取り込みジョブを開始しています…');
   els.startBtn.disabled = true;
@@ -482,10 +484,24 @@ function openCivitaiDialog(mode) {
   civitaiPollWake?.(); // 既にポーリング中なら待機を飛ばして今の進捗をすぐ出す
 }
 
+// ボタンの処理が例外で落ちると「押しても何も起きない」だけになって原因が追えない。
+// 想定外の失敗も必ず画面に出す
+function civitaiOnClick(handler) {
+  return async (e) => {
+    try {
+      await handler(e);
+    } catch (err) {
+      civitaiSetStatus('');
+      civitaiSetError(`処理に失敗しました: ${err?.message ?? err}`);
+      throw err; // コンソールにも残す
+    }
+  };
+}
+
 function initCivitaiDialog() {
-  els.resolveBtn.addEventListener('click', civitaiResolveUrl);
-  els.startBtn.addEventListener('click', civitaiStartImport);
-  els.cancelBtn.addEventListener('click', civitaiCancelImport);
+  els.resolveBtn.addEventListener('click', civitaiOnClick(civitaiResolveUrl));
+  els.startBtn.addEventListener('click', civitaiOnClick(civitaiStartImport));
+  els.cancelBtn.addEventListener('click', civitaiOnClick(civitaiCancelImport));
   els.metaToggle.addEventListener('change', civitaiSyncStartBtn);
 
   // URL・リポジトリを変えたら確認からやり直す（プレビューと開始ボタンを無効化）
