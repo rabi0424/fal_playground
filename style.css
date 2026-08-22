@@ -102,6 +102,7 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 14px 24px;
   /* viewport-fit=cover で Dynamic Island の下に潜らないようにする */
   padding-top: calc(14px + env(safe-area-inset-top));
@@ -115,6 +116,11 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
   font-size: 16px;
   font-weight: 700;
   letter-spacing: -0.02em;
+  /* 縮んだときに中身がボタンの上へはみ出さないよう、末尾を省略する */
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .brand span {
@@ -122,7 +128,21 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
   color: var(--muted);
 }
 
-.topbar-actions { display: flex; gap: 8px; }
+/* 項目が増えて画面幅に収まらなくなったら、バーを広げるのではなく中で横スクロール
+   させる。バーは sticky なので、はみ出すとページ全体が横に広がってしまい、スマホで
+   ピンチすると縮小したまま戻らなくなる（ブラウザは一番広い中身が収まる倍率まで
+   縮小を許すため）。折り返しは 3 段になって画面を食うので採らない */
+.topbar-actions {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  /* 狭いときに縮むのはこちら（ブランドは最後まで残す） */
+  flex-shrink: 999;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.topbar-actions::-webkit-scrollbar { display: none; }
+.topbar-actions > * { flex: none; } /* ボタンは縮めず、スクロールで見せる */
 
 /* ---------- layout ---------- */
 /* 列は minmax(0, 1fr) にする。1fr だけだと最小幅が auto になり、
@@ -396,7 +416,7 @@ details.lora-accordion { display: block; }
 
 .compare-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
   gap: 16px;
 }
 
@@ -685,7 +705,7 @@ button:focus-visible, a.ghost-btn:focus-visible {
 
 .detail-images {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
   gap: 16px;
 }
 
@@ -1225,8 +1245,9 @@ button:focus-visible, a.ghost-btn:focus-visible {
     padding-top: calc(12px + env(safe-area-inset-top));
   }
 
-  /* 項目が増えても 1 行に収める（ブランドは "fal" のみ表示に短縮） */
-  .brand span { display: none; }
+  /* 幅を稼ぐためブランドは "fal" のみに短縮する。ただし今どの画面かを示す
+     タグ（"/ 画像編集" など）は残す。以前は .brand span でまとめて隠していた */
+  .brand span:not(.arena-tag) { display: none; }
   .topbar-actions { gap: 6px; }
   .topbar-actions .ghost-btn { padding: 6px 8px; font-size: 13px; }
 
@@ -1363,7 +1384,7 @@ a.ghost-btn {
 
 .session-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
   gap: 12px;
   margin-top: 16px;
 }
