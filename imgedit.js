@@ -25,7 +25,7 @@ const MAX_INPUT_PX = 2048; // 送信前に長辺をここまで縮める
 const INPUT_QUALITY = 0.92; // 縮小後の JPEG 品質
 
 const LS_THEME = 'fal_theme';
-const LS_LORAS = 'fal_lora_library';
+const HF_DEFAULT_REPO = 'tottie2215/temp_str'; // 取り込み先の既定（app.js と同じ）
 const LS_JOB = 'fal_imgedit_job';
 const LS_FORM = 'fal_imgedit_form';
 
@@ -61,6 +61,7 @@ const els = {
   providerHint: $('#providerHint'),
   loraList: $('#loraList'),
   addLoraBtn: $('#addLoraBtn'),
+  civitaiBtn: $('#civitaiBtn'),
   loraHint: $('#loraHint'),
   sizeSelect: $('#sizeSelect'),
   numImages: $('#numImages'),
@@ -128,47 +129,16 @@ function initTheme() {
 
 /* ---------- LoRA ライブラリ（読み取りのみ・app.js と同じ形式） ---------- */
 
-function loadLoraLibrary() {
-  try {
-    return JSON.parse(localStorage.getItem(LS_LORAS)) || [];
-  } catch {
-    return [];
-  }
-}
+const loraLabel = (path) => loraLib.label(path);
+const loraDefaultScale = (path) => loraLib.defaultScale(path);
+const loraTriggerWords = (path) => loraLib.triggerWords(path);
 
-function loraFileName(path) {
-  const seg = path.split('?')[0].split('/').filter(Boolean).pop() || path;
-  try {
-    return decodeURIComponent(seg).replace(/\.safetensors$/i, '');
-  } catch {
-    return seg.replace(/\.safetensors$/i, '');
-  }
-}
+// このモデルは Qwen Image Edit なので、Qwen 用の LoRA だけを候補にする
+// （Krea 2 用を混ぜても効かないか、出力が壊れる）
+const LORA_BASE = 'qwen';
 
-function loraEntry(path) {
-  return loadLoraLibrary().find((item) => item.path === path) ?? null;
-}
-
-function loraLabel(path) {
-  const item = loraEntry(path);
-  return item?.label?.trim() || item?.name || loraFileName(path);
-}
-
-function loraDefaultScale(path) {
-  const scale = loraEntry(path)?.scale;
-  return Number.isFinite(scale) ? scale : 1;
-}
-
-function loraTriggerWords(path) {
-  return (loraEntry(path)?.trigger || '').split(',').map((w) => w.trim()).filter(Boolean);
-}
-
-// ★ を先頭に、あとは表示名順（生成画面のプルダウンと同じ並び）
 function sortedLoraLibrary() {
-  return [...loadLoraLibrary()].sort((a, b) => {
-    if (!!a.fav !== !!b.fav) return a.fav ? -1 : 1;
-    return loraLabel(a.path).localeCompare(loraLabel(b.path), 'ja', { numeric: true, sensitivity: 'base' });
-  });
+  return loraLib.forBase(LORA_BASE);
 }
 
 /* ---------- LoRA 行 ---------- */
@@ -287,11 +257,16 @@ function insertTriggerWords(words) {
 
 function syncAddLoraBtn() {
   const count = els.loraList.querySelectorAll('.lora-row').length;
-  const empty = sortedLoraLibrary().length === 0;
-  els.addLoraBtn.disabled = count >= MAX_LORAS || empty;
+  const usable = sortedLoraLibrary().length;
+  els.addLoraBtn.disabled = count >= MAX_LORAS || usable === 0;
   els.addLoraBtn.title = count >= MAX_LORAS ? `LoRA はこのモデルでは最大 ${MAX_LORAS} 個までです` : '';
-  // 登録が 1 つも無いときは、追加ボタンが押せない理由を出しておく
-  els.loraHint.hidden = !empty;
+
+  // 使える LoRA が無い / 別のベースモデル向けを隠したことを伝える
+  const hidden = loraLib.load().length - usable;
+  els.loraHint.hidden = usable > 0 && hidden === 0;
+  els.loraHint.textContent = usable === 0
+    ? 'Qwen 用の LoRA が登録されていません。下の「Civitai から取り込み」で追加できます（Krea 2 用の LoRA はこのモデルでは使えません）。'
+    : `Qwen 以外の LoRA ${hidden} 件は候補から外しています（ベースモデルはライブラリ管理で直せます）。`;
 }
 
 function collectLoras() {
@@ -902,6 +877,21 @@ async function restoreForm() {
 
 /* ---------- init ---------- */
 
+// LoRA ライブラリ（共有モジュール）。この画面は同期を持たないので保存だけ行う
+loraLib.migrate();
+
+// Civitai からの取り込み。登録したらその場で候補に出す
+civitaiImport.init({
+  defaultRepo: HF_DEFAULT_REPO,
+  register(kind, hfUrl, meta) {
+    // この画面から入れたものは Qwen 用として扱う（Civitai 側の表記があればそちら優先）
+    loraLib.register(hfUrl, { ...(meta ?? {}), base: meta?.base || 'Qwen' });
+    syncAddLoraBtn();
+    for (const row of els.loraList.querySelectorAll('.lora-row')) renderRowTrigger(row);
+    return `ライブラリに登録しました: ${loraLib.label(hfUrl)}`;
+  },
+});
+
 initTheme();
 
 for (const [id, api] of Object.entries(PROVIDERS)) {
@@ -945,6 +935,7 @@ for (const type of ['dragleave', 'drop']) {
 els.uploadArea.addEventListener('drop', (e) => loadFile(e.dataTransfer?.files?.[0]));
 
 els.addLoraBtn.addEventListener('click', () => addLoraRow());
+els.civitaiBtn.addEventListener('click', () => civitaiImport.open('lora'));
 els.prompt.addEventListener('input', () => { syncRunBtn(); saveForm(); });
 for (const el of [els.sizeSelect, els.numImages, els.steps, els.guidance,
   els.acceleration, els.outputFormat, els.seed, els.seedLock, els.negativePrompt]) {

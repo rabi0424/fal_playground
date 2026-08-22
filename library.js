@@ -22,6 +22,7 @@ const LS_ARENA = 'fal_arena';
 const LS_SYNC_TS = 'fal_sync_ts';
 
 const SAVE_DELAY_MS = 400; // 入力が落ち着いてから保存する
+const HF_DEFAULT_REPO = 'tottie2215/temp_str'; // 取り込み先の既定（app.js と同じ）
 
 /* ---------- helpers ---------- */
 
@@ -33,6 +34,7 @@ const els = {
   filterChips: $('#filterChips'),
   sortSelect: $('#sortSelect'),
   fetchAllBtn: $('#fetchAllBtn'),
+  civitaiBtn: $('#civitaiBtn'),
   status: $('#status'),
   error: $('#error'),
   list: $('#list'),
@@ -81,36 +83,16 @@ function initTheme() {
 /* ---------- ライブラリ ---------- */
 
 function loadLibrary() {
-  try {
-    return JSON.parse(localStorage.getItem(LS_LORAS)) || [];
-  } catch {
-    return [];
-  }
+  return loraLib.load();
 }
 
 function saveLibrary(items) {
-  localStorage.setItem(LS_LORAS, JSON.stringify(items));
-  syncMarkDirty('loras');
+  loraLib.save(items);
 }
 
-// URL 末尾のファイル名（.safetensors 抜き）。生成時に Modal へ渡す名前でもある
-function loraFileName(path) {
-  const seg = path.split('?')[0].split('/').filter(Boolean).pop() || path;
-  try {
-    return decodeURIComponent(seg).replace(/\.safetensors$/i, '');
-  } catch {
-    return seg.replace(/\.safetensors$/i, '');
-  }
-}
-
-// 画面に出す名前。未設定なら取り込み時の自動名にフォールバックする
-function entryLabel(item) {
-  return item.label?.trim() || item.name || loraFileName(item.path);
-}
-
-function triggerWords(item) {
-  return (item.trigger || '').split(',').map((w) => w.trim()).filter(Boolean);
-}
+const loraFileName = (path) => loraLib.fileName(path);
+const entryLabel = (item) => loraLib.labelOf(item);
+const triggerWords = (item) => (item.trigger || '').split(',').map((w) => w.trim()).filter(Boolean);
 
 // 「要整理」＝ .civitai.json をまだ読んでおらず、トリガーワードも入っていないもの
 function needsAttention(item) {
@@ -247,12 +229,14 @@ function renderCard(item) {
   name.textContent = entryLabel(item);
   head.appendChild(name);
 
+  // ベースモデルと「まだ情報を取っていない」ことは別の情報なので両方出す
   if (item.base) {
     const badge = document.createElement('span');
     badge.className = 'lib-badge base';
     badge.textContent = item.base;
     head.appendChild(badge);
-  } else if (needsAttention(item)) {
+  }
+  if (needsAttention(item)) {
     const badge = document.createElement('span');
     badge.className = 'lib-badge warn';
     badge.textContent = 'トリガー未取得';
@@ -671,6 +655,7 @@ async function syncPull() {
   // 編集中に他端末の内容で画面を差し替えると入力が消えるので、保存待ちが
   // 残っている間は取り込みを反映しない（次の pull で追いつく）
   if (changed && saveTimers.size === 0) {
+    loraLib.migrate(); // 同期で届いた古い形式のデータもここで揃える
     library = loadLibrary();
     render();
   }
@@ -699,6 +684,21 @@ function syncToolbarOffset() {
   if (bar) document.documentElement.style.setProperty('--lib-top', `${bar.offsetHeight}px`);
 }
 
+loraLib.onChange = () => syncMarkDirty('loras');
+loraLib.migrate();
+library = loadLibrary(); // 移行後の内容で描画する
+
+// この画面からも Civitai 取り込みができる（登録したらその場で一覧に出す）
+civitaiImport.init({
+  defaultRepo: HF_DEFAULT_REPO,
+  register(kind, hfUrl, meta) {
+    loraLib.register(hfUrl, meta);
+    library = loadLibrary();
+    render();
+    return `ライブラリに登録しました: ${loraLib.label(hfUrl)}`;
+  },
+});
+
 initTheme();
 syncToolbarOffset();
 window.addEventListener('resize', syncToolbarOffset);
@@ -706,6 +706,7 @@ window.addEventListener('resize', syncToolbarOffset);
 els.searchInput.addEventListener('input', render);
 els.sortSelect.addEventListener('change', render);
 els.fetchAllBtn.addEventListener('click', fetchAllMeta);
+els.civitaiBtn.addEventListener('click', () => civitaiImport.open('lora'));
 els.metaApplyBtn.addEventListener('click', applyMeta);
 els.metaDialog.addEventListener('close', () => { metaTarget = null; });
 

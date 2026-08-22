@@ -156,36 +156,15 @@ function initTheme() {
   });
 }
 
-/* ---------- LoRA ライブラリ（読み取りのみ・app.js と同じ形式） ---------- */
+/* ---------- LoRA ライブラリ（共有モジュール経由・読み取りのみ） ---------- */
 
-function loadLoraLibrary() {
-  try {
-    return JSON.parse(localStorage.getItem(LS_LORAS)) || [];
-  } catch {
-    return [];
-  }
-}
+const loadLoraLibrary = () => loraLib.load();
+const loraDisplayName = (path) => loraLib.fileName(path);
+const loraLabel = (path) => loraLib.label(path);
 
-// ライブラリ管理画面で付けた表示名。未設定なら URL 末尾のファイル名を使う
-function loraLabel(path) {
-  const item = loadLoraLibrary().find((l) => l.path === path);
-  return item?.label?.trim() || item?.name || loraDisplayName(path);
-}
-
-function loraDisplayName(path) {
-  const seg = path.split('?')[0].split('/').filter(Boolean).pop() || path;
-  try {
-    return decodeURIComponent(seg).replace(/\.safetensors$/i, '');
-  } catch {
-    return seg.replace(/\.safetensors$/i, '');
-  }
-}
-
-// 名前順（数字は数値比較）。同じ LoRA の別バージョンがステップ数順に並ぶので、
-// この並びの「間」を範囲選択の対象にする
+// 比較アリーナは Krea 2 の LoRA を比べる画面なので、候補もそれだけに絞る
 function sortedLoraLibrary() {
-  return [...loadLoraLibrary()].sort((a, b) =>
-    loraLabel(a.path).localeCompare(loraLabel(b.path), 'ja', { numeric: true, sensitivity: 'base' }));
+  return loraLib.forBase('krea2');
 }
 
 /* ---------- arena state ---------- */
@@ -1240,6 +1219,10 @@ function deleteCurrentSession() {
 }
 
 /* ---------- init ---------- */
+
+// LoRA ライブラリ（共有モジュール）。保存のたびに端末間同期へ知らせる
+loraLib.onChange = () => syncMarkDirty('loras');
+loraLib.migrate();
 
 initTheme();
 initSessionDialog();
