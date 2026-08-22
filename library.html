@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ja" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LoRA ライブラリ - fal playground</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><a href="./">fal <span>playground</span></a><span class="arena-tag">/ LoRA ライブラリ</span></div>
+  <div class="topbar-actions">
+    <a href="./" class="ghost-btn">← 生成画面へ</a>
+    <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
+  </div>
+</header>
+
+<main class="lib-main">
+
+  <div class="lib-toolbar">
+    <input id="searchInput" class="lib-search" type="search" placeholder="名前・トリガー・URL で検索" spellcheck="false">
+    <div class="lib-filters" id="filterChips"></div>
+    <div class="lib-tools">
+      <label class="lib-sort">
+        <span class="label">並び</span>
+        <select id="sortSelect">
+          <option value="name">名前順</option>
+          <option value="added">追加が新しい順</option>
+          <option value="scale">既定 scale 順</option>
+        </select>
+      </label>
+      <span class="spacer"></span>
+      <button id="fetchAllBtn" class="ghost-btn small" title="トリガー未取得の LoRA について、モデルの隣にある .civitai.json をまとめて読み込みます">未取得をまとめて取得</button>
+    </div>
+  </div>
+
+  <div id="status" class="status" hidden></div>
+  <div id="error" class="error" hidden></div>
+
+  <div id="list" class="lib-list"></div>
+
+  <p id="empty" class="hint lib-empty" hidden></p>
+
+</main>
+
+<!-- 取得結果の反映確認 -->
+<dialog id="metaDialog" class="key-dialog">
+  <form method="dialog" class="key-form">
+    <h3 id="metaTitle">Civitai の情報を取得しました</h3>
+    <p class="hint">モデルの隣に保存した <code>.civitai.json</code> から読み込みました。反映する項目を選べます。</p>
+    <div id="metaDiff" class="lib-diff"></div>
+    <div id="metaError" class="error" hidden></div>
+    <div class="key-actions">
+      <button value="cancel" class="ghost-btn" formnovalidate>やめる</button>
+      <button id="metaApplyBtn" class="primary-btn" type="button">反映する</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="library.js"></script>
+</body>
+</html>

@@ -373,9 +373,12 @@ function updateCustomSize() {
 
 /* ---------- LoRA ---------- */
 
-function addLoraRow(path = '', scale = 1, listEl = els.loraList) {
+function addLoraRow(path = '', scale, listEl = els.loraList) {
   // 履歴の再利用などで未登録の URL が来たら自動登録
   if (path) registerLora(path);
+  // scale 未指定（新しい行）のときはライブラリの既定 scale を使う
+  const initialPath = path || sortedLoraLibrary()[0]?.path || LORA_URL_OPTION;
+  const effScale = scale ?? loraDefaultScale(initialPath);
 
   const row = document.createElement('div');
   row.className = 'lora-row';
@@ -404,6 +407,11 @@ function addLoraRow(path = '', scale = 1, listEl = els.loraList) {
   pathInput.spellcheck = false;
   row.appendChild(pathInput);
 
+  // トリガーワード（ライブラリに登録されていれば出す）とプロンプトへの挿入
+  const trigger = document.createElement('div');
+  trigger.className = 'lora-trigger';
+  row.appendChild(trigger);
+
   const scaleWrap = document.createElement('div');
   scaleWrap.className = 'lora-scale';
 
@@ -417,7 +425,7 @@ function addLoraRow(path = '', scale = 1, listEl = els.loraList) {
   slider.min = '0';
   slider.max = '2';
   slider.step = '0.05';
-  slider.value = String(scale);
+  slider.value = String(effScale);
   scaleWrap.appendChild(slider);
 
   const num = document.createElement('input');
@@ -425,7 +433,7 @@ function addLoraRow(path = '', scale = 1, listEl = els.loraList) {
   num.min = '0';
   num.max = '2';
   num.step = '0.05';
-  num.value = String(scale);
+  num.value = String(effScale);
   scaleWrap.appendChild(num);
 
   slider.addEventListener('input', () => { num.value = slider.value; });
@@ -447,9 +455,19 @@ function addLoraRow(path = '', scale = 1, listEl = els.loraList) {
 
   row.appendChild(scaleWrap);
 
-  const initial = path || sortedLoraLibrary()[0]?.path || LORA_URL_OPTION;
-  populateLoraSelect(select, initial);
-  select.addEventListener('change', () => syncLoraRow(row));
+  populateLoraSelect(select, initialPath);
+  // 選択を変えたら scale の初期値もその LoRA の既定に合わせる（手で動かす前だけ）
+  select.addEventListener('change', () => {
+    const def = loraDefaultScale(select.value);
+    if (!row.dataset.scaleTouched) {
+      slider.value = String(def);
+      num.value = String(def);
+    }
+    syncLoraRow(row);
+  });
+  for (const input of [slider, num]) {
+    input.addEventListener('input', () => { row.dataset.scaleTouched = '1'; });
+  }
 
   // URL を入力したら自動登録して、その項目を選択状態にする
   pathInput.addEventListener('change', () => {
@@ -491,10 +509,32 @@ function loraDisplayName(path) {
 function registerLora(path) {
   const library = loadLoraLibrary();
   if (!library.some((item) => item.path === path)) {
-    library.push({ name: loraDisplayName(path), path });
+    library.push({ name: loraDisplayName(path), path, addedAt: Date.now() });
     saveLoraLibrary(library);
   }
   refreshLoraSelects();
+}
+
+// ライブラリ管理画面（library.html）で付けた情報の参照。項目はすべて任意で、
+// path と name しか持たない古いデータもそのまま扱える
+function loraEntry(path) {
+  return loadLoraLibrary().find((item) => item.path === path) ?? null;
+}
+
+// 画面に出す名前。表示名が未設定なら従来どおり URL 末尾のファイル名を使う。
+// 生成時に Modal へ渡す名前は path から作るので、ここを変えても送信内容は変わらない
+function loraLabel(path) {
+  const item = loraEntry(path);
+  return item?.label?.trim() || item?.name || loraDisplayName(path);
+}
+
+function loraDefaultScale(path) {
+  const scale = loraEntry(path)?.scale;
+  return Number.isFinite(scale) ? scale : 1;
+}
+
+function loraTriggerWords(path) {
+  return (loraEntry(path)?.trigger || '').split(',').map((w) => w.trim()).filter(Boolean);
 }
 
 function unregisterLora(path) {
@@ -522,8 +562,10 @@ function unregisterLora(path) {
 // 0005000 など）は数値として比較し、同じ LoRA の別バージョンが小さい順に並ぶ。
 // 登録データ（localStorage）の順序は変えず表示時にだけ並び替える
 function sortedLoraLibrary() {
-  return [...loadLoraLibrary()].sort((a, b) =>
-    a.name.localeCompare(b.name, 'ja', { numeric: true, sensitivity: 'base' }));
+  return [...loadLoraLibrary()].sort((a, b) => {
+    if (!!a.fav !== !!b.fav) return a.fav ? -1 : 1; // ★ は先頭に集める
+    return loraLabel(a.path).localeCompare(loraLabel(b.path), 'ja', { numeric: true, sensitivity: 'base' });
+  });
 }
 
 // 登録済み LoRA（ファイル名表示）+「URL を入力…」でプルダウンを構成する
@@ -532,7 +574,7 @@ function populateLoraSelect(select, selected) {
   for (const item of sortedLoraLibrary()) {
     const opt = document.createElement('option');
     opt.value = item.path;
-    opt.textContent = item.name;
+    opt.textContent = (item.fav ? '★ ' : '') + loraLabel(item.path);
     opt.title = item.path;
     select.appendChild(opt);
   }
@@ -556,9 +598,46 @@ function refreshLoraSelects() {
 }
 
 function syncLoraRow(row) {
-  const urlMode = row.querySelector('.lora-select').value === LORA_URL_OPTION;
+  const path = row.querySelector('.lora-select').value;
+  const urlMode = path === LORA_URL_OPTION;
   row.querySelector('.lora-path').hidden = !urlMode;
   row.querySelector('.lora-unreg').hidden = urlMode;
+  renderLoraTrigger(row, urlMode ? '' : path);
+}
+
+// 選択中の LoRA のトリガーワードと、プロンプトへ足すボタン
+function renderLoraTrigger(row, path) {
+  const box = row.querySelector('.lora-trigger');
+  if (!box) return; // 比較モードの行など、トリガー欄を持たない構造には触らない
+  box.innerHTML = '';
+  const words = path ? loraTriggerWords(path) : [];
+  box.hidden = words.length === 0;
+  if (words.length === 0) return;
+
+  for (const word of words) {
+    const chip = document.createElement('span');
+    chip.className = 'lib-trigger-chip';
+    chip.textContent = word;
+    box.appendChild(chip);
+  }
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ghost-btn small';
+  btn.textContent = '挿入';
+  btn.title = 'トリガーワードをプロンプトの末尾に追加します';
+  btn.addEventListener('click', () => insertTriggerWords(words));
+  box.appendChild(btn);
+}
+
+// プロンプト末尾にトリガーワードを足す。既に書かれている語は足さない
+function insertTriggerWords(words) {
+  const current = els.prompt.value;
+  const lower = current.toLowerCase();
+  const missing = words.filter((w) => !lower.includes(w.toLowerCase()));
+  if (missing.length === 0) return;
+  const sep = current.trim() === '' ? '' : (/[,、]\s*$/.test(current) ? ' ' : ', ');
+  els.prompt.value = current + sep + missing.join(', ');
+  els.prompt.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
 function collectLorasFrom(listEl) {
@@ -1505,7 +1584,7 @@ function addVariant(ownLoras = [], addStarterRow = true) {
   addLoraBtn.className = 'ghost-btn small';
   addLoraBtn.type = 'button';
   addLoraBtn.textContent = '＋ LoRA を追加';
-  addLoraBtn.addEventListener('click', () => addLoraRow('', 1, list));
+  addLoraBtn.addEventListener('click', () => addLoraRow('', undefined, list));
   block.appendChild(addLoraBtn);
 
   els.variantList.appendChild(block);
@@ -1513,7 +1592,7 @@ function addVariant(ownLoras = [], addStarterRow = true) {
   if (ownLoras.length > 0) {
     for (const l of ownLoras) addLoraRow(l.path, l.scale, list);
   } else if (addStarterRow) {
-    addLoraRow('', 1, list);
+    addLoraRow('', undefined, list);
   }
   renumberVariants();
 }
@@ -2291,7 +2370,7 @@ function renderDetail(record) {
   const metaLine = document.createElement('div');
   metaLine.className = 'meta-line';
   const loraText = record.loras?.length
-    ? ` ・ LoRA: ${record.loras.map((l) => loraDisplayName(l.path)).join(', ')}`
+    ? ` ・ LoRA: ${record.loras.map((l) => loraLabel(l.path)).join(', ')}`
     : '';
   metaLine.textContent = `${record.model}${loraText} ・ ${record.elapsed}s${record.seed !== null ? ` ・ seed: ${record.seed}` : ''}`;
   meta.appendChild(metaLine);
@@ -2331,7 +2410,7 @@ function renderCompareDetail(record) {
     const title = document.createElement('div');
     title.className = 'compare-col-title';
     title.textContent = `試行 ${i + 1}: ${variantLabel(v.ownLoras)}`;
-    title.title = v.loras.map((l) => `${loraDisplayName(l.path)} (${l.scale})`).join(', ');
+    title.title = v.loras.map((l) => `${loraLabel(l.path)} (${l.scale})`).join(', ');
     col.appendChild(title);
 
     if (v.error) {

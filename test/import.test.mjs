@@ -330,6 +330,52 @@ async function testStuckPastAlarm() {
   console.log('✓ stuck alarm: 過去の時刻で居座った alarm を張り直して完了');
 }
 
+// LoRA ライブラリのトリガーワード取得（モデルの隣の .civitai.json を読む）
+async function testLoraMetaEndpoint() {
+  const mod = await loadWorker();
+  const calls = [];
+  const doc = {
+    savedAt: '2026-08-01T00:00:00Z',
+    source: 'https://civitai.com/models/45',
+    model: { name: 'High resolution', creator: 'NO8D' },
+    version: { name: 'HighQuality_portrait', baseModel: 'Krea 2', trainedWords: ['hi res portrait', '', 'detailed skin'] },
+  };
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), auth: init?.headers?.Authorization });
+    if (String(url).endsWith('.civitai.json')) {
+      return new Response(JSON.stringify(doc), { headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response('nope', { status: 404 });
+  };
+  const env = {
+    HF_TOKEN: 'hf_test',
+    STATE: { idFromName: (n) => n, get: () => ({}) },
+  };
+  const call = (u) => mod.default.fetch(
+    new Request(`https://app.example/api/lora/meta?url=${encodeURIComponent(u)}`), env);
+
+  const ok = await call('https://huggingface.co/me/repo/resolve/main/sub/HighQuality.safetensors');
+  assert.equal(ok.status, 200);
+  const body = await ok.json();
+  assert.equal(body.trigger, 'hi res portrait, detailed skin', '空の語を除いて連結するはず');
+  assert.equal(body.base, 'Krea 2');
+  assert.equal(body.modelName, 'High resolution');
+  assert.equal(calls[0].url, 'https://huggingface.co/me/repo/resolve/main/sub/HighQuality.civitai.json',
+    `.civitai.json の URL が違う: ${calls[0].url}`);
+  assert.equal(calls[0].auth, 'Bearer hf_test', '非公開リポジトリ用のトークンが付いていない');
+
+  // HF 以外・別拡張子は受け付けない
+  assert.equal((await call('https://example.com/x.safetensors')).status, 422);
+  assert.equal((await call('https://huggingface.co/me/repo/resolve/main/x.gguf')).status, 422);
+
+  // JSON が無い LoRA は 404（クライアントはこれを見て案内を出す）
+  const missing = await call('https://huggingface.co/me/repo/resolve/main/none.safetensors');
+  globalThis.fetch = async () => new Response('not found', { status: 404 });
+  assert.equal((await call('https://huggingface.co/me/repo/resolve/main/none.safetensors')).status, 404);
+  void missing;
+  console.log('✓ lora meta: .civitai.json を読んでトリガーワード・ベースモデルを返す');
+}
+
 await testCheckpoint();
 await testLoraSingleRun();
 await testRetryDuringUpload();
@@ -341,5 +387,6 @@ await testNewJobNotStarved();
 await testNoResurrection();
 await testListAndCancel();
 await testStuckPastAlarm();
+await testLoraMetaEndpoint();
 rmSync(OUT, { force: true });
 console.log('\nすべて成功');

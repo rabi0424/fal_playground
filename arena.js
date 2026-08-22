@@ -166,6 +166,12 @@ function loadLoraLibrary() {
   }
 }
 
+// ライブラリ管理画面で付けた表示名。未設定なら URL 末尾のファイル名を使う
+function loraLabel(path) {
+  const item = loadLoraLibrary().find((l) => l.path === path);
+  return item?.label?.trim() || item?.name || loraDisplayName(path);
+}
+
 function loraDisplayName(path) {
   const seg = path.split('?')[0].split('/').filter(Boolean).pop() || path;
   try {
@@ -179,7 +185,7 @@ function loraDisplayName(path) {
 // この並びの「間」を範囲選択の対象にする
 function sortedLoraLibrary() {
   return [...loadLoraLibrary()].sort((a, b) =>
-    a.name.localeCompare(b.name, 'ja', { numeric: true, sensitivity: 'base' }));
+    loraLabel(a.path).localeCompare(loraLabel(b.path), 'ja', { numeric: true, sensitivity: 'base' }));
 }
 
 /* ---------- arena state ---------- */
@@ -221,14 +227,14 @@ function getSession(id) {
 
 function participantName(session, pid) {
   const p = session.participants.find((x) => x.id === pid);
-  return p ? loraDisplayName(p.path) : pid;
+  return p ? loraLabel(p.path) : pid;
 }
 
 // 同じ LoRA の別チェックポイント同士は名前の前半が共通で、肝心のステップ数は
 // 末尾にある。全参加者の共通プレフィックスを検出して「…0005000」のように
 // 末尾側を残した短縮名を作る（フル名は title で確認できる）
 function participantShortNames(session) {
-  const names = session.participants.map((p) => loraDisplayName(p.path));
+  const names = session.participants.map((p) => loraLabel(p.path));
   let cut = 0;
   if (names.length >= 2) {
     let prefix = names[0];
@@ -923,7 +929,7 @@ function renderLeaderboard(session) {
     const name = document.createElement('td');
     name.className = 'lb-name';
     name.textContent = shortNames[p.id];
-    name.title = `${loraDisplayName(p.path)}\n${p.path}`;
+    name.title = `${loraLabel(p.path)}\n${p.path}`;
     tr.appendChild(name);
 
     const elo = document.createElement('td');
@@ -1061,13 +1067,13 @@ function renderRounds(session) {
         const img = document.createElement('img');
         img.loading = 'lazy';
         img.src = res.url;
-        img.alt = loraDisplayName(p.path);
+        img.alt = loraLabel(p.path);
         img.addEventListener('click', () => openLightbox(res.url));
         cell.appendChild(img);
         const label = document.createElement('div');
         label.className = 'name';
         label.textContent = shortNames[p.id];
-        label.title = `${loraDisplayName(p.path)}\n${p.path}`;
+        label.title = `${loraLabel(p.path)}\n${p.path}`;
         cell.appendChild(label);
         grid.appendChild(cell);
       }
@@ -1124,7 +1130,7 @@ function openSessionDialog() {
     label.appendChild(cb);
     const name = document.createElement('span');
     name.className = 'plist-name';
-    name.textContent = item.name;
+    name.textContent = loraLabel(item.path);
     name.title = item.path;
     label.appendChild(name);
     els.plist.appendChild(label);
@@ -1132,7 +1138,7 @@ function openSessionDialog() {
     for (const select of [els.rangeStart, els.rangeEnd]) {
       const opt = document.createElement('option');
       opt.value = String(i);
-      opt.textContent = item.name;
+      opt.textContent = loraLabel(item.path);
       select.appendChild(opt);
     }
   });
