@@ -108,6 +108,7 @@ const els = {
   civitaiProgress: $('#civitaiProgress'),
   civitaiError: $('#civitaiError'),
   civitaiStartBtn: $('#civitaiStartBtn'),
+  civitaiCancelBtn: $('#civitaiCancelBtn'),
   compareToggle: $('#compareToggle'),
   compareField: $('#compareField'),
   variantList: $('#variantList'),
@@ -992,6 +993,7 @@ function civitaiFormatEta(sec) {
 function civitaiSyncStartBtn() {
   const busy = civitaiActiveJob() != null;
   els.civitaiStartBtn.disabled = busy || !civitaiResolved || !!civitaiResolved.repoError;
+  els.civitaiCancelBtn.hidden = !busy; // 進行中のときだけ中止できる
   // 本体もJSONも新規作業が不要なときだけ「登録」表記にする
   const registerOnly = civitaiResolved?.alreadyUploaded
     && (!els.civitaiMetaToggle.checked || civitaiResolved.metaFileExists || !civitaiResolved.metaDoc);
@@ -1146,6 +1148,21 @@ async function civitaiStartImport() {
   civitaiPollJob();
 }
 
+// 取り込みの中止。サーバー側のジョブも止めてから記録を捨てる
+async function civitaiCancelImport() {
+  const active = civitaiActiveJob();
+  localStorage.removeItem(LS_CIVITAI_JOB); // 先に消してポーリングを止める
+  civitaiSetStatus('取り込みを中止しました', true);
+  civitaiSetProgress(null, null);
+  civitaiSyncStartBtn();
+  civitaiPollWake?.();
+  if (active) {
+    try {
+      await fetch(`/api/lora-import/job/${active.jobId}`, { method: 'DELETE' });
+    } catch { /* 通信できなくても、こちらの記録は消えているので操作は続けられる */ }
+  }
+}
+
 // 進行中ジョブのポーリング。完了時はダイアログが閉じていても登録まで済ませる
 async function civitaiPollJob() {
   if (civitaiPolling) return;
@@ -1154,10 +1171,12 @@ async function civitaiPollJob() {
   civitaiPolling = true;
   try {
     while (true) {
-      // 別タブでの完了・期限切れで記録が消えていたら止める
+      // 別タブでの完了・中止・期限切れで記録が消えていたら止める
       if (!civitaiActiveJob()) {
-        civitaiSetStatus('');
-        civitaiSetProgress(null, null);
+        if (!els.civitaiStatus.classList.contains('done')) { // 完了・中止の表示は残す
+          civitaiSetStatus('');
+          civitaiSetProgress(null, null);
+        }
         break;
       }
       let res;
@@ -1242,6 +1261,7 @@ function initCivitaiDialog() {
 
   els.civitaiResolveBtn.addEventListener('click', civitaiResolveUrl);
   els.civitaiStartBtn.addEventListener('click', civitaiStartImport);
+  els.civitaiCancelBtn.addEventListener('click', civitaiCancelImport);
   els.civitaiMetaToggle.addEventListener('change', civitaiSyncStartBtn);
 
   // URL・リポジトリを変えたら確認からやり直す（プレビューと開始ボタンを無効化）

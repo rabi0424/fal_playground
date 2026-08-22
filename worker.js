@@ -571,7 +571,13 @@ export class SyncState extends DurableObject {
     const run = { parts: 0, bytes: 0, yielded: false };
     for (const prefix of ['krea2:job:', 'poe:job:', 'lora:job:']) {
       const jobs = await this.ctx.storage.list({ prefix });
-      for (const [key, job] of jobs) {
+      let entries = [...jobs];
+      if (prefix === 'lora:job:') {
+        // 最後に前進してから長く待っているジョブを先に回す。大きな取り込みが 1 本
+        // 走っていても、後から入れたジョブが順番待ちで止まったままにならないようにする
+        entries.sort((a, b) => (a[1].progressAt ?? a[1].created ?? 0) - (b[1].progressAt ?? b[1].created ?? 0));
+      }
+      for (const [key, job] of entries) {
         if (job.status !== 'pending') continue;
         if (prefix === 'poe:job:') await this.runPoeJob(key, job);
         else if (prefix === 'lora:job:') await this.runLoraImportJob(key, job, run);
@@ -828,6 +834,7 @@ export class SyncState extends DurableObject {
       if (Date.now() - j.created > JOB_TTL_MS && !this.loraJobIsLive(j)) {
         await this.abortStagingMultipart(k, j); // やりかけの multipart は破棄してから消す
         await this.ctx.storage.delete(k);
+        this.abortedLoraJobs.add(k); // まだ走っている実行があればここで止める
       }
     }
     // 取り残された一時ファイルの掃除（失敗ジョブの分など）
@@ -866,6 +873,12 @@ export class SyncState extends DurableObject {
   // 打ち切り済みのジョブなら例外にして、取り残された実行をここで終わらせる
   async saveLoraJob(key, job) {
     if (this.abortedLoraJobs.has(key)) throw new Error('この取り込みジョブは中断済みです');
+    // 掃除で消えた記録を書き戻して復活させない。取り残された実行がここで止まる
+    //（復活したジョブは alarm を占有し続け、後続の取り込みが resolve から進まなくなる）
+    if (!(await this.ctx.storage.get(key))) {
+      this.abortedLoraJobs.add(key);
+      throw new Error('この取り込みジョブは終了済みです');
+    }
     job.progressAt = Date.now();
     await this.ctx.storage.put(key, job);
   }
@@ -898,6 +911,48 @@ export class SyncState extends DurableObject {
       await this.ctx.storage.setAlarm(Date.now() + 50);
     }
     return job;
+  }
+
+  // 取り込みジョブの一覧（調査用）。表示が進まないときに、ジョブが実際どの段階に
+  // いるのか・alarm が張られているのかを外から確認するために使う
+  async listLoraImports() {
+    const jobs = await this.ctx.storage.list({ prefix: 'lora:job:' });
+    const now = Date.now();
+    return {
+      now: new Date(now).toISOString(),
+      alarmAt: (await this.ctx.storage.getAlarm()) ?? null,
+      alarmInMs: ((await this.ctx.storage.getAlarm()) ?? 0) - now || null,
+      aborted: this.abortedLoraJobs.size,
+      jobs: [...jobs].map(([key, j]) => ({
+        id: key.slice('lora:job:'.length),
+        status: j.status,
+        step: j.step,
+        kind: j.kind ?? 'lora',
+        fileName: j.meta?.fileName ?? null,
+        repo: j.repo ?? null,
+        sourceUrl: j.sourceUrl ?? null,
+        bytesDone: j.bytesDone ?? null,
+        bytesTotal: j.bytesTotal ?? null,
+        runs: j.runs ?? 0,
+        attempts: j.attempts ?? 0,
+        createdAgoSec: Math.round((now - (j.created ?? now)) / 1000),
+        progressAgoSec: Math.round((now - (j.progressAt ?? j.created ?? now)) / 1000),
+        error: j.error ?? null,
+        lastError: j.lastError ?? null,
+      })),
+    };
+  }
+
+  // ジョブの中止（ユーザー操作）。走っている実行も次の保存で止まる
+  async cancelLoraImport(id) {
+    const key = `lora:job:${id}`;
+    const job = await this.ctx.storage.get(key);
+    if (!job) return false;
+    if (job.status === 'pending') {
+      await this.failLoraImport(key, job, '取り込みを中止しました');
+    }
+    this.abortedLoraJobs.add(key);
+    return true;
   }
 
   async getLoraImport(id) {
@@ -1053,8 +1108,9 @@ export class SyncState extends DurableObject {
   // ステップを進められるだけ進める。ネットワーク断などの例外は pending のまま抜けて
   // 次の alarm で再試行する（連続エラー数と通算実行回数の両方で打ち切り）
   async runLoraImportJob(key, job, run) {
-    // この実行の転送予算を既に使い切っているなら、次の alarm に回す
-    if (!this.runBudgetLeft(run)) return;
+    // 転送予算を使い切っていても、転送を伴わないステップ（モデル情報の確認・コミット）は
+    // 進めてよい。大きな取り込みが走っている間、他のジョブが始まらないのを防ぐ
+    if (!this.runBudgetLeft(run) && job.step !== 'resolve' && job.step !== 'commit') return;
     run.yielded = false; // 中断フラグはジョブごとに見る（予算自体は実行全体で共有）
     try {
       job.runs = (job.runs ?? 0) + 1;
@@ -1706,11 +1762,22 @@ export default {
       return Response.json({ queued: true, jobId });
     }
 
-    // 取り込みジョブの状態取得（クライアントはこれをポーリングする）
-    const loraJobMatch = url.pathname.match(/^\/api\/lora-import\/job\/([0-9a-f]{32})$/);
-    if (loraJobMatch) {
+    // 取り込みジョブの一覧（調査用）。ブラウザで開いて状態を確認できるようにしておく
+    if (url.pathname === '/api/lora-import/jobs') {
       if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
       const importStub = env.STATE.get(env.STATE.idFromName('lora-import'));
+      return Response.json(await importStub.listLoraImports());
+    }
+
+    // 取り込みジョブの状態取得（クライアントはこれをポーリングする）。DELETE で中止
+    const loraJobMatch = url.pathname.match(/^\/api\/lora-import\/job\/([0-9a-f]{32})$/);
+    if (loraJobMatch) {
+      const importStub = env.STATE.get(env.STATE.idFromName('lora-import'));
+      if (request.method === 'DELETE') {
+        const ok = await importStub.cancelLoraImport(loraJobMatch[1]);
+        return Response.json({ cancelled: ok });
+      }
+      if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
       const job = await importStub.getLoraImport(loraJobMatch[1]);
       if (!job) return new Response('Job not found', { status: 404 });
       return Response.json(job);
