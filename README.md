@@ -22,6 +22,7 @@ Cloudflare ダッシュボード → 対象の Worker → **Settings** → **Var
 | Variable name | 値 | 用途 |
 |---|---|---|
 | `FAL_KEY` | [fal.ai ダッシュボード](https://fal.ai/dashboard/keys)で発行した API キー（`key_id:key_secret`） | fal での生成 |
+| `WAVESPEED_API_KEY` | [WaveSpeed](https://wavespeed.ai/) のダッシュボードで発行した API キー | 画像編集（WaveSpeed を選んだとき）|
 | `MODAL_PROXY_KEY` | Modal の Proxy Auth Token（`wk-…`） | Modal 版 Krea 2 での生成 |
 | `MODAL_PROXY_SECRET` | 同上（`ws-…`）。[Modal ダッシュボード → Settings → Proxy Auth Tokens](https://modal.com/settings) で発行 | 同上 |
 | `POE_API_KEY` | [poe.com/api_key](https://poe.com/api_key) で発行した Poe の API キー | 部分AI編集（課金は Poe ポイント） |
@@ -46,6 +47,7 @@ npx wrangler r2 bucket create fal-playground-images
 - サイズ（約 1MP 基準のプリセット 6 種 + カスタム px 指定）・枚数・シード（「固定」チェック時のみ適用）・ステップ数・ガイダンスの指定
 - Hugging Face 公開リポジトリからの LoRA 一括登録（.safetensors を一覧表示して選択）
 - Civitai からの LoRA 取り込み（URL を貼ると Hugging Face へアップロードしてライブラリに登録・下記参照）
+- 画像編集（Qwen Image Edit 2511 + LoRA。画像 1 枚と指示文で編集・下記参照）
 - LoRA 比較アリーナ（別画面 `arena.html`・下記参照）
 - 部分AI編集（別画面 `edit.html`・下記参照）
 - 生成履歴とプロンプトの再利用（サーバー保存・全端末で共通）
@@ -69,7 +71,39 @@ LoRA 欄の「Civitai から取り込み」で、Civitai のモデルページ U
   - civitai.red などのミラー URL も受け付けますが、API 互換性が無い場合はダウンロード URL の直接指定を使ってください
   - **公開リポジトリへのアップロードは再配布に当たります**。モデルのライセンスを確認のうえ利用してください。なお非公開リポジトリを取り込み先にすると、fal は認証付き URL をダウンロードできないため fal 系モデルでその LoRA は使えません（Modal 版は modal_comfy 側の設定次第）
 
+## 画像編集（Qwen Image Edit）
+
+トップの「画像編集」（`imgedit.html`）で、画像 1 枚と指示文を渡して Qwen Image Edit 2511 で編集します。範囲を切り抜いてはめ込む「部分AI編集」（Poe）とは別の機能で、画像全体をモデルに渡します。
+
+**プロバイダは fal と WaveSpeed から選べます**（同じモデルですが API の形と課金が違います）。
+
+| | fal（`fal-ai/qwen-image-edit-2511/lora`） | WaveSpeed（`wavespeed-ai/qwen-image/edit-2511-lora`） |
+|---|---|---|
+| 指定できるもの | 解像度・枚数・ステップ・ガイダンス・速度・negative prompt・seed・形式 | 指示文・LoRA・seed・形式のみ |
+| 出力枚数 | 1〜4 | 1 枚固定 |
+| 課金 | $0.035 / メガピクセル（解像度依存） | $0.025 / 枚（固定） |
+| 必要な Secret | `FAL_KEY` | `WAVESPEED_API_KEY` |
+
+プロバイダを切り替えると、対応していない項目は自動で隠れます。大きい画像を少数編集するなら WaveSpeed、細かく詰めたいなら fal、という使い分けになります。
+
+- 入力画像は**端末から**（ファイル / カメラ / ドラッグ＆ドロップ）か**生成履歴から**選べます。長辺 2048px に収まるよう縮小してから送ります
+- LoRA を最大 3 つまで指定できます（ライブラリの表示名・既定 scale・トリガーワードがそのまま使えます）。**候補に出るのは Qwen 用の LoRA だけ**です。この画面からも「Civitai から取り込み」で追加できます
+- fal では出力サイズを既定で入力画像に合わせます。ステップ（28）・ガイダンス（4.5）・速度（acceleration）・seed・negative prompt も指定できます。出力形式（PNG / JPEG / WebP）は両方で指定できます（WaveSpeed の既定は JPEG なので、劣化させないよう常に明示して送ります）
+- 実行ボタンの下に**費用の目安**を出します。fal は解像度から、WaveSpeed は枚数から計算します
+- fal で安全性チェックに引っかかった画像は塗り潰されて返るため、その旨を表示します（WaveSpeed の API にはこのフラグがありません）
+- 結果は生成履歴（`type: 'imgedit'`）に保存され、生成画面のギャラリーにも並びます。入力画像も一緒に残るので、後から何を編集したか分かります
+- 「この結果を編集」で、出力をそのまま次の入力にできます
+- 送信中にページを閉じても、開き直したときに結果を回収します
+
+入力画像は data URI として渡します。このアプリは Cloudflare Access の内側に置く前提で、`/api/image/...` をプロバイダ側から取得できるとは限らないためです。なお **WaveSpeed に指定する LoRA は公開アクセスできる URL である必要があります**（非公開の Hugging Face リポジトリに置いた LoRA は使えません）。
+
 ## LoRA ライブラリの管理
+
+LoRA には**ベースモデル**（Krea 2 / Qwen など）を持たせていて、各画面はそれに合うものだけを候補に出します（生成画面と比較アリーナは Krea 2、画像編集は Qwen）。別のベースモデル向けを隠したときは件数を知らせます。
+
+- Civitai から取り込むと、ベースモデルとトリガーワードは Civitai の情報から自動で入ります
+- Hugging Face の一括登録では、ダイアログでベースモデルを選べます（既定は今のモデル）
+- ベースモデルが未設定だった既存の LoRA は、初回だけ「Krea 2」として扱うよう自動で移行します。違うものはライブラリ管理で直せます
 
 LoRA 欄の「ライブラリを管理」（`library.html`）で、登録済み LoRA の情報をまとめて編集できます。
 

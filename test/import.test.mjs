@@ -376,6 +376,38 @@ async function testLoraMetaEndpoint() {
   console.log('✓ lora meta: .civitai.json を読んでトリガーワード・ベースモデルを返す');
 }
 
+// WaveSpeed プロキシ: 転送先の制限とキー付与
+async function testWavespeedProxy() {
+  const mod = await loadWorker();
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), method: init?.method, auth: init?.headers?.Authorization, body: init?.body });
+    return new Response(JSON.stringify({ code: 200, data: { id: 'pred-1' } }),
+      { headers: { 'Content-Type': 'application/json' } });
+  };
+  const env = { WAVESPEED_API_KEY: 'ws_test', STATE: { idFromName: (n) => n, get: () => ({}) } };
+  const call = (target, init) => mod.default.fetch(
+    new Request(`https://app.example/api/wavespeed/proxy?url=${encodeURIComponent(target)}`, init), env);
+
+  const ok = await call('https://api.wavespeed.ai/api/v3/wavespeed-ai/qwen-image/edit-2511-lora',
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"prompt":"x"}' });
+  assert.equal(ok.status, 200);
+  assert.equal(calls[0].auth, 'Bearer ws_test', 'API キーが付いていない');
+  assert.equal(calls[0].body, '{"prompt":"x"}', '本文がそのまま渡っていない');
+
+  // 別ホストへの転送は拒否する（プロキシを踏み台にさせない）
+  assert.equal((await call('https://example.com/x')).status, 403);
+  assert.equal((await call('http://api.wavespeed.ai/x')).status, 403);
+
+  // キー未設定なら理由の分かるエラー
+  const noKey = await mod.default.fetch(
+    new Request('https://app.example/api/wavespeed/proxy?url=' + encodeURIComponent('https://api.wavespeed.ai/x')),
+    { STATE: env.STATE });
+  assert.equal(noKey.status, 500);
+  assert.match(await noKey.text(), /WAVESPEED_API_KEY/);
+  console.log('✓ wavespeed proxy: キー付与・転送先の制限・未設定時のエラー');
+}
+
 await testCheckpoint();
 await testLoraSingleRun();
 await testRetryDuringUpload();
@@ -388,5 +420,6 @@ await testNoResurrection();
 await testListAndCancel();
 await testStuckPastAlarm();
 await testLoraMetaEndpoint();
+await testWavespeedProxy();
 rmSync(OUT, { force: true });
 console.log('\nすべて成功');

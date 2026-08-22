@@ -11,6 +11,7 @@
 <header class="topbar">
   <div class="brand">fal <span>playground</span></div>
   <div class="topbar-actions">
+    <a href="imgedit.html" class="ghost-btn" title="画像全体を Qwen Image Edit で編集する（LoRA 対応）">画像編集</a>
     <a href="edit.html" class="ghost-btn" title="画像の一部を選択して Poe の画像編集ボットで編集し、元画像にはめ込む">部分AI編集</a>
     <a href="arena.html" class="ghost-btn" title="LoRA チェックポイントの匿名比較と Elo ランキング">比較アリーナ</a>
     <button id="statsBtn" class="ghost-btn" title="アクセスポイント別の生成所要時間の統計">統計</button>
@@ -58,6 +59,7 @@
         <button id="civitaiOpenBtn" class="ghost-btn small" type="button">Civitai から取り込み</button>
         <a href="library.html" class="ghost-btn small" title="表示名・トリガーワード・既定 scale をまとめて編集します">ライブラリを管理</a>
       </div>
+      <p class="hint" id="loraFilterHint" hidden></p>
       <label class="compare-toggle">
         <input type="checkbox" id="compareToggle"> LoRA 比較モード
       </label>
@@ -166,6 +168,14 @@
       <button id="hfLoadBtn" class="ghost-btn" type="button">読み込み</button>
     </div>
     <input id="hfFilterInput" class="hf-filter" type="search" placeholder="ファイル名で絞り込み…" spellcheck="false" autocomplete="off">
+    <label class="field" id="hfBaseField">
+      <span class="label">ベースモデル <em>（どのモデル用の LoRA か。候補の絞り込みに使います）</em></span>
+      <select id="hfBaseSelect">
+        <option value="Krea 2" selected>Krea 2</option>
+        <option value="Qwen">Qwen（画像編集）</option>
+        <option value="">指定しない</option>
+      </select>
+    </label>
     <div id="hfStatus" class="status" hidden></div>
     <div id="hfError" class="error" hidden></div>
     <div id="hfList" class="hf-list"></div>
@@ -192,46 +202,14 @@
   </form>
 </dialog>
 
-<dialog id="civitaiDialog" class="key-dialog civitai-dialog">
-  <form method="dialog" class="key-form">
-    <h2 id="civitaiTitle">Civitai から LoRA を取り込み</h2>
-    <p class="hint" id="civitaiHint">
-      Civitai のモデルページ URL（modelVersionId 付き可）またはダウンロード URL を入力すると、
-      モデルを Hugging Face リポジトリへアップロードして LoRA ライブラリに登録します。<br>
-      公開リポジトリへのアップロードは再配布に当たります。モデルのライセンスを確認してください。
-    </p>
-    <div class="civitai-search">
-      <input id="civitaiUrlInput" type="text" placeholder="https://civitai.com/models/..." spellcheck="false" autocomplete="off">
-      <button id="civitaiResolveBtn" class="ghost-btn" type="button">確認</button>
-    </div>
-    <label class="field">
-      <span class="label">アップロード先リポジトリ（owner/repo）</span>
-      <input id="civitaiRepoInput" type="text" spellcheck="false" autocomplete="off">
-    </label>
-    <label class="civitai-meta-check" title="トリガーワード・説明・サンプルの生成設定などを .civitai.json としてモデルの隣に保存します（画像本体は保存しません）">
-      <input type="checkbox" id="civitaiMetaToggle" checked> サイトの情報（トリガーワード等）を JSON で一緒に保存する
-    </label>
-    <div id="civitaiPreview" class="civitai-preview" hidden></div>
-    <div id="civitaiStatus" class="status" hidden></div>
-    <div id="civitaiProgress" class="civitai-progress" hidden>
-      <div class="civitai-progress-track"><div class="civitai-progress-fill"></div></div>
-      <span class="civitai-progress-text"></span>
-    </div>
-    <div id="civitaiError" class="error" hidden></div>
-    <div class="key-actions">
-      <button value="cancel" class="ghost-btn" formnovalidate>閉じる</button>
-      <button id="civitaiCancelBtn" class="ghost-btn" type="button" hidden>取り込みを中止</button>
-      <button id="civitaiStartBtn" class="primary-btn" type="button" disabled>取り込み開始</button>
-    </div>
-  </form>
-</dialog>
-
 <div id="lightbox" class="lightbox" hidden>
   <button id="lightboxClose" class="lightbox-close mobile-only" type="button" aria-label="閉じる">✕</button>
   <img alt="">
   <div id="lightboxCounter" class="lightbox-counter mobile-only" hidden></div>
 </div>
 
+<script src="lora-library.js"></script>
+<script src="civitai-import.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

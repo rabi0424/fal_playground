@@ -23,8 +23,10 @@ const JOB_POLL_DELAY_MS = 2000;
 const ALARM_OVERDUE_MS = 60 * 1000;
 const JOB_MAX_SUBMIT_ATTEMPTS = 2; // 送信自体の再試行上限（多重生成・多重課金の防止）
 
-// 履歴追加時に取り込む外部画像のホスト（fal の CDN）。それ以外は取り込まず URL のまま残す
-const CAPTURE_HOSTS = /(^|\.)fal\.(media|ai|run)$/;
+// 履歴追加時に取り込む外部画像のホスト（fal / WaveSpeed の CDN）。
+// それ以外は取り込まず URL のまま残す。プロバイダ側の URL は失効しうるので、
+// 履歴に残すものは自分の R2 に持ってくる
+const CAPTURE_HOSTS = /(^|\.)(fal\.(media|ai|run)|wavespeed\.ai)$/;
 
 // Poe の OpenAI 互換 API（部分AI編集で使用）。キーは Worker の Secret（POE_API_KEY）
 const POE_API_URL = 'https://api.poe.com/v1/chat/completions';
@@ -1791,7 +1793,14 @@ export default {
         nameExists = meta.fileName != null
           && tree.some((e) => e.type === 'file' && e.path === meta.fileName);
       } catch (err) {
-        repoError = `アップロード先リポジトリ ${repo} にアクセスできません（HTTP ${err.status ?? '?'}）`;
+        // 401 はトークンの期限切れ・権限不足、404 は ID の誤りか非公開。
+        // タイムアウトや回線断もここに来るので、原因が分かるように理由を添える
+        const why = err.status === 401 ? 'HF_TOKEN の期限切れか権限不足です'
+          : err.status === 404 ? 'リポジトリ ID が違うか、トークンに読み取り権限がありません'
+            : err.name === 'TimeoutError' ? 'Hugging Face が時間内に応答しませんでした'
+              : `${err.message ?? err}`;
+        repoError = `アップロード先リポジトリ ${repo} を確認できません`
+          + `（HTTP ${err.status ?? '-'}: ${String(why).slice(0, 120)}）`;
       }
       return Response.json({ ...meta, metaDoc: doc, alreadyUploaded, nameExists, metaFileExists, repoError });
     }
@@ -1848,6 +1857,41 @@ export default {
       const job = await importStub.getLoraImport(loraJobMatch[1]);
       if (!job) return new Response('Job not found', { status: 404 });
       return Response.json(job);
+    }
+
+    // WaveSpeed API のプロキシ。fal と同じく API キー（Secret の WAVESPEED_API_KEY）は
+    // ここで付与する。転送先は api.wavespeed.ai のみ（submit も結果取得も同じホスト）
+    if (url.pathname === '/api/wavespeed/proxy') {
+      if (!['GET', 'POST'].includes(request.method)) {
+        return new Response('Method not allowed', { status: 405 });
+      }
+      if (request.method !== 'GET' && !isJson) {
+        return new Response('Content-Type must be application/json', { status: 415 });
+      }
+      let target;
+      try {
+        target = new URL(url.searchParams.get('url') || '');
+      } catch {
+        return new Response('Invalid target url', { status: 400 });
+      }
+      if (target.protocol !== 'https:' || target.hostname !== 'api.wavespeed.ai') {
+        return new Response('Target not allowed', { status: 403 });
+      }
+      if (!env.WAVESPEED_API_KEY) {
+        return new Response('WAVESPEED_API_KEY is not configured（Worker の Secret に WaveSpeed の API キーを設定してください）', { status: 500 });
+      }
+      const upstream = await fetch(target, {
+        method: request.method,
+        headers: {
+          Authorization: `Bearer ${env.WAVESPEED_API_KEY}`,
+          ...(request.method !== 'GET' ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body: request.method === 'GET' ? undefined : await request.text(),
+      });
+      return new Response(upstream.body, {
+        status: upstream.status,
+        headers: { 'Content-Type': upstream.headers.get('Content-Type') ?? 'application/json' },
+      });
     }
 
     // fal API のプロキシ。API キー（Secret の FAL_KEY）はここで付与し、ブラウザには
