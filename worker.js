@@ -1793,7 +1793,14 @@ export default {
         nameExists = meta.fileName != null
           && tree.some((e) => e.type === 'file' && e.path === meta.fileName);
       } catch (err) {
-        repoError = `アップロード先リポジトリ ${repo} にアクセスできません（HTTP ${err.status ?? '?'}）`;
+        // 401 はトークンの期限切れ・権限不足、404 は ID の誤りか非公開。
+        // タイムアウトや回線断もここに来るので、原因が分かるように理由を添える
+        const why = err.status === 401 ? 'HF_TOKEN の期限切れか権限不足です'
+          : err.status === 404 ? 'リポジトリ ID が違うか、トークンに読み取り権限がありません'
+            : err.name === 'TimeoutError' ? 'Hugging Face が時間内に応答しませんでした'
+              : `${err.message ?? err}`;
+        repoError = `アップロード先リポジトリ ${repo} を確認できません`
+          + `（HTTP ${err.status ?? '-'}: ${String(why).slice(0, 120)}）`;
       }
       return Response.json({ ...meta, metaDoc: doc, alreadyUploaded, nameExists, metaFileExists, repoError });
     }

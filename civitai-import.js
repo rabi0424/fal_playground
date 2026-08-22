@@ -47,6 +47,7 @@ const DIALOG_HTML = `
       <span class="civitai-progress-text"></span>
     </div>
     <div id="civitaiError" class="error" hidden></div>
+    <p class="hint" id="civitaiBlocked" hidden></p>
     <div class="key-actions">
       <button value="cancel" class="ghost-btn" formnovalidate>閉じる</button>
       <button id="civitaiCancelBtn" class="ghost-btn" type="button" hidden>取り込みを中止</button>
@@ -206,7 +207,16 @@ function civitaiFormatEta(sec) {
 
 function civitaiSyncStartBtn() {
   const busy = civitaiActiveJob() != null;
-  els.startBtn.disabled = busy || !civitaiResolved || !!civitaiResolved.repoError;
+  // 「押せないが理由が分からない」を作らないよう、無効の理由は必ず画面に出す
+  const reason = busy ? '別の取り込みが進行中です。終わるまで待つか「取り込みを中止」してください'
+    : !civitaiResolved ? 'URL を入れて「確認」を押してください'
+      : civitaiResolved.repoError ? civitaiResolved.repoError
+        : '';
+  els.startBtn.disabled = reason !== '';
+  els.startBtn.title = reason;
+  // 確認前の当たり前の案内はうるさいので、確認済み or 進行中のときだけ出す
+  els.blocked.hidden = reason === '' || (!civitaiResolved && !busy);
+  els.blocked.textContent = reason ? `取り込みを開始できません: ${reason}` : '';
   els.cancelBtn.hidden = !busy; // 進行中のときだけ中止できる
   // 本体もJSONも新規作業が不要なときだけ「登録」表記にする
   const registerOnly = civitaiResolved?.alreadyUploaded
@@ -518,6 +528,7 @@ window.civitaiImport = {
       status: $('#civitaiStatus'),
       progress: $('#civitaiProgress'),
       error: $('#civitaiError'),
+      blocked: $('#civitaiBlocked'),
       startBtn: $('#civitaiStartBtn'),
       cancelBtn: $('#civitaiCancelBtn'),
     };
