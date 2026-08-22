@@ -872,9 +872,17 @@ const CIVITAI_STEP_LABELS = {
   commit: 'リポジトリへコミット中…',
 };
 const CIVITAI_POLL_MS = 2000;
+// ダイアログを閉じている／タブが裏にあるときの間隔。ポーリングは 1 回ごとに Worker と
+// Durable Object を起こす（DO は最後のリクエストからしばらく起きたままなので、短い間隔で
+// 叩き続けると常時起動と変わらない）。見ていない間は間隔を空けて呼び出し量を抑える
+const CIVITAI_POLL_IDLE_MS = 30000;
+// これより古い「進行中」記録は捨てる。サーバー側の記録が失われた場合などに、
+// 取り込みボタンが永久に押せないままになるのを防ぐ保険
+const CIVITAI_JOB_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 let civitaiResolved = null; // 「確認」で取得したメタデータ（URL・repo 変更で無効化）
 let civitaiPolling = false;
+let civitaiPollWake = null; // ポーリングの待機を打ち切る関数（ダイアログを開いた時など）
 let civitaiMode = 'lora'; // 'lora' | 'ckpt'（取り込み完了時の登録先ライブラリ）
 
 // ジョブはページを跨いで完了しうるので、登録先はダイアログの状態ではなく
@@ -901,11 +909,40 @@ function civitaiSetError(text) {
 }
 
 function civitaiActiveJob() {
+  let active = null;
   try {
-    return JSON.parse(localStorage.getItem(LS_CIVITAI_JOB));
+    active = JSON.parse(localStorage.getItem(LS_CIVITAI_JOB));
   } catch {
+    active = null;
+  }
+  if (!active?.jobId) return null;
+  // 古すぎる記録（開始時刻が無いものも含む）は「取り残し」とみなして捨てる。
+  // 取り込みボタンが永久に押せないままになるのを防ぐ
+  const ts = Number(active.ts);
+  if (!Number.isFinite(ts) || Date.now() - ts > CIVITAI_JOB_MAX_AGE_MS) {
+    localStorage.removeItem(LS_CIVITAI_JOB);
     return null;
   }
+  return active;
+}
+
+// ポーリングの待機。civitaiPollWake() で待機を打ち切って即時更新できる
+function civitaiPollSleep(ms) {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      civitaiPollWake = null;
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    civitaiPollWake = done;
+  });
+}
+
+// 見えていないときはゆっくり見に行く（Worker / DO の呼び出し量を抑える）
+function civitaiPollDelay() {
+  const watching = els.civitaiDialog.open && document.visibilityState !== 'hidden';
+  return watching ? CIVITAI_POLL_MS : CIVITAI_POLL_IDLE_MS;
 }
 
 // 転送中（download / upload ステップ）のプログレスバー。それ以外では隠す
@@ -1117,11 +1154,17 @@ async function civitaiPollJob() {
   civitaiPolling = true;
   try {
     while (true) {
+      // 別タブでの完了・期限切れで記録が消えていたら止める
+      if (!civitaiActiveJob()) {
+        civitaiSetStatus('');
+        civitaiSetProgress(null, null);
+        break;
+      }
       let res;
       try {
         res = await fetch(`/api/lora-import/job/${active.jobId}`);
       } catch {
-        await sleep(CIVITAI_POLL_MS * 2); // ネットワーク断はそのまま再試行
+        await civitaiPollSleep(civitaiPollDelay() * 2); // ネットワーク断はそのまま再試行
         continue;
       }
       if (res.status === 404) {
@@ -1132,7 +1175,7 @@ async function civitaiPollJob() {
         break;
       }
       if (!res.ok) {
-        await sleep(CIVITAI_POLL_MS * 2);
+        await civitaiPollSleep(civitaiPollDelay() * 2);
         continue;
       }
       const job = await res.json();
@@ -1159,7 +1202,7 @@ async function civitaiPollJob() {
         job.bytesTotal,
         transferring ? civitaiEtaText(job.step, job.bytesDone, job.bytesTotal) : '',
       );
-      await sleep(CIVITAI_POLL_MS);
+      await civitaiPollSleep(civitaiPollDelay());
     }
   } finally {
     civitaiPolling = false;
@@ -1191,6 +1234,7 @@ function openCivitaiDialog(mode) {
   civitaiSyncStartBtn();
   els.civitaiDialog.showModal();
   civitaiPollJob(); // 進行中ジョブがあれば表示を再開する
+  civitaiPollWake?.(); // 既にポーリング中なら待機を飛ばして今の進捗をすぐ出す
 }
 
 function initCivitaiDialog() {
@@ -1214,6 +1258,11 @@ function initCivitaiDialog() {
       }
     });
   }
+
+  // タブに戻ってきたら間隔を戻すため、待機中のポーリングを起こす
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') civitaiPollWake?.();
+  });
 }
 
 /* ---------- 生成時間の統計 ---------- */
