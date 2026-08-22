@@ -61,6 +61,9 @@ const LORA_STALL_TIMEOUT_MS = 15 * 60 * 1000;
 const LORA_RESUME_STALE_MS = 3 * 60 * 1000;
 // 転送 1 本あたりのタイムアウト下限（相手が無音のまま接続を保つケースの保険）
 const LORA_TRANSFER_MIN_TIMEOUT_MS = 10 * 60 * 1000;
+// メタデータ・制御系 API のタイムアウト。応答が小さいので長く待つ意味がなく、
+// ここが返ってこないと「モデル情報を確認中…」のまま alarm ごと固まる
+const LORA_API_TIMEOUT_MS = 60 * 1000;
 const LORA_MAX_BYTES = 4 * 1024 * 1024 * 1024; // 4GB。LoRA としては十分すぎる上限
 // チェックポイント取り込みの上限。R2 ステージングは multipart 保存に対応しているので
 // 本質的な上限ではなく、異常なサイズの取り込みを弾くための安全弁
@@ -84,6 +87,19 @@ function transferSignal(bytes = 0) {
   const budget = (Number(bytes) || 0) / (1024 * 1024) * 1000;
   return AbortSignal.timeout(Math.max(LORA_TRANSFER_MIN_TIMEOUT_MS, budget));
 }
+
+// メタデータ取得やアップロードの制御系リクエスト用の中断シグナル
+function apiSignal() {
+  return AbortSignal.timeout(LORA_API_TIMEOUT_MS);
+}
+
+// エラーメッセージ用のステップ名（クライアント側の表示と揃える）
+const CIVITAI_STEP_NAMES = {
+  resolve: 'モデル情報の確認',
+  download: 'Civitai からのダウンロード',
+  upload: 'Hugging Face へのアップロード',
+  commit: 'リポジトリへのコミット',
+};
 
 // Civitai の URL を解釈する。対応形式:
 //   https://civitai.com/models/{modelId}(?modelVersionId={vid})
@@ -115,7 +131,7 @@ async function civitaiApi(path, origin, env) {
   let lastErr;
   for (const o of origins) {
     try {
-      const res = await fetch(`${o}/api/v1${path}`, { headers });
+      const res = await fetch(`${o}/api/v1${path}`, { headers, signal: apiSignal() });
       if (res.ok) return await res.json();
       lastErr = new Error(`Civitai API error ${res.status}`);
     } catch (err) {
@@ -278,6 +294,7 @@ async function fetchHfTree(repo, env) {
   for (let page = 0; page < 20 && next; page++) {
     const res = await fetch(next, {
       headers: { 'User-Agent': 'fal-playground', ...hfAuthHeaders(env) },
+      signal: apiSignal(),
     });
     if (!res.ok) {
       if (entries.length > 0) break; // 途中で失敗したら取れた分だけ返す
@@ -549,12 +566,15 @@ export class SyncState extends DurableObject {
   // 登録され、singleton 側の生成ジョブのポーリングを妨げない
   async alarm() {
     let pendingLeft = false;
+    // 転送の予算はこの実行ぶんで、取り込みジョブが複数あっても合計で使う
+    // （1 呼び出しあたりの上限はジョブ単位ではなく実行単位のため）
+    const run = { parts: 0, bytes: 0, yielded: false };
     for (const prefix of ['krea2:job:', 'poe:job:', 'lora:job:']) {
       const jobs = await this.ctx.storage.list({ prefix });
       for (const [key, job] of jobs) {
         if (job.status !== 'pending') continue;
         if (prefix === 'poe:job:') await this.runPoeJob(key, job);
-        else if (prefix === 'lora:job:') await this.runLoraImportJob(key, job);
+        else if (prefix === 'lora:job:') await this.runLoraImportJob(key, job, run);
         else await this.runKrea2Job(key, job);
         const after = await this.ctx.storage.get(key);
         if (after?.status === 'pending') pendingLeft = true;
@@ -1032,18 +1052,21 @@ export class SyncState extends DurableObject {
 
   // ステップを進められるだけ進める。ネットワーク断などの例外は pending のまま抜けて
   // 次の alarm で再試行する（連続エラー数と通算実行回数の両方で打ち切り）
-  async runLoraImportJob(key, job) {
+  async runLoraImportJob(key, job, run) {
+    // この実行の転送予算を既に使い切っているなら、次の alarm に回す
+    if (!this.runBudgetLeft(run)) return;
+    run.yielded = false; // 中断フラグはジョブごとに見る（予算自体は実行全体で共有）
     try {
       job.runs = (job.runs ?? 0) + 1;
       if (job.attempts >= LORA_IMPORT_MAX_ATTEMPTS || job.runs > LORA_IMPORT_MAX_RUNS) {
-        await this.failLoraImport(key, job, '取り込みを完了できませんでした（エラーが続いています）');
+        await this.failLoraImport(key, job, job.lastError
+          ? `取り込みを完了できませんでした: ${job.lastError}`
+          : '取り込みを完了できませんでした（エラーが続いています）');
         return;
       }
       job.attempts += 1;
       await this.saveLoraJob(key, job);
 
-      // この実行ぶんの転送予算。使い切ったら pending のまま抜け、alarm が続きを回す
-      const run = { parts: 0, bytes: 0, yielded: false };
       while (job.status === 'pending') {
         const stepBefore = job.step;
         if (job.step === 'resolve') await this.loraStepResolve(key, job);
@@ -1054,14 +1077,22 @@ export class SyncState extends DurableObject {
           await this.failLoraImport(key, job, `不明なステップです: ${job.step}`);
           return;
         }
+        job.lastError = null; // ステップを通せたので、前回の失敗理由は持ち越さない
         if (run.yielded) break;
         // 転送ステップが切り替わったら、予算を使いかけのまま次に進まず一度 alarm に返す。
         // 残り予算が中途半端だとアップロード開始直後に中断することになり、転送先を
         // 取り直すぶんだけ無駄が出る
         if (job.step !== stepBefore && (run.parts > 0 || run.bytes > 0)) break;
       }
-    } catch {
-      // pending のまま次の alarm で再試行
+    } catch (err) {
+      // pending のまま次の alarm で再試行。打ち切り時の説明に使うので理由は控えておく
+      const timedOut = err?.name === 'TimeoutError' || /aborted due to timeout/i.test(String(err?.message ?? ''));
+      job.lastError = timedOut
+        ? `${CIVITAI_STEP_NAMES[job.step] ?? job.step}で応答がありませんでした（タイムアウト）`
+        : String(err?.message ?? err).slice(0, 200);
+      try {
+        await this.saveLoraJob(key, job);
+      } catch { /* 打ち切り済みジョブ（書き戻し禁止）ならそのまま終わる */ }
     }
   }
 
@@ -1345,7 +1376,7 @@ export class SyncState extends DurableObject {
         objects: [{ oid: job.sha256, size: job.size }],
         hash_algo: 'sha256',
       }),
-      signal: transferSignal(),
+      signal: apiSignal(),
     });
     if (!batchRes.ok) {
       if (batchRes.status >= 400 && batchRes.status < 500) {
@@ -1474,7 +1505,7 @@ export class SyncState extends DurableObject {
         oid: job.sha256,
         parts: parts.map((p) => ({ partNumber: Number(p), etag: job.etags[p] })),
       }),
-      signal: transferSignal(),
+      signal: apiSignal(),
     });
     if (!completeRes.ok) throw new Error(`multipart complete error ${completeRes.status}`);
     return true;
@@ -1525,7 +1556,7 @@ export class SyncState extends DurableObject {
         method: 'POST',
         headers: { ...lfsHeaders, ...plan.verify.header },
         body: JSON.stringify({ oid: job.sha256, size: job.size }),
-        signal: transferSignal(),
+        signal: apiSignal(),
       });
       if (!verifyRes.ok) throw new Error(`verify error ${verifyRes.status}`);
     }
@@ -1567,7 +1598,7 @@ export class SyncState extends DurableObject {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-ndjson', ...hfAuthHeaders(this.env) },
       body: lines.map((l) => JSON.stringify(l)).join('\n'),
-      signal: transferSignal(),
+      signal: apiSignal(),
     });
     if (!res.ok) {
       if (res.status >= 400 && res.status < 500) {
