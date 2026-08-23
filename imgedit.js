@@ -273,6 +273,58 @@ function sortedLoraLibrary() {
 
 /* ---------- LoRA 行 ---------- */
 
+// 行のプルダウンを今のライブラリで組み立てる。選択中のものが候補から外れても、
+// 選択そのものは失わせない（黙って別の LoRA に変わるほうが危ない）
+function populateLoraSelect(select, selected = '') {
+  const library = sortedLoraLibrary();
+  const byName = !!provider().loraByName;
+  select.innerHTML = '';
+  for (const item of library) {
+    const opt = document.createElement('option');
+    opt.value = item.path;
+    opt.textContent = (item.fav ? '★ ' : '') + loraLabel(item.path);
+    opt.title = item.path;
+    select.appendChild(opt);
+  }
+  if (byName) {
+    const opt = document.createElement('option');
+    opt.value = LORA_NAME_OPTION;
+    opt.textContent = '名前を直接入力…';
+    select.appendChild(opt);
+  }
+  if (selected && library.some((l) => l.path === selected)) {
+    select.value = selected;
+    return;
+  }
+  // 候補に無い指定は、名前で打ったものとして扱う（名前で指定できるプロバイダのみ）
+  if (selected && byName) {
+    select.value = LORA_NAME_OPTION;
+    return;
+  }
+  // URL 指定のプロバイダで候補から外れたものは、選択を残すために候補へ足す
+  if (selected) {
+    const opt = document.createElement('option');
+    opt.value = selected;
+    opt.textContent = loraLabel(selected);
+    select.insertBefore(opt, select.firstChild);
+    select.value = selected;
+    return;
+  }
+  select.value = library[0]?.path ?? (byName ? LORA_NAME_OPTION : '');
+}
+
+// ライブラリが変わったら、既にある行の候補も入れ替える。行を作ったときの一覧を
+// 持ち続けると、あとから足した LoRA が新しい行にしか出てこない
+function refreshLoraRows() {
+  for (const row of els.loraList.querySelectorAll('.lora-row')) {
+    const select = row.querySelector('.lora-select');
+    populateLoraSelect(select, select.value);
+    row.querySelector('.lora-path').hidden = select.value !== LORA_NAME_OPTION;
+    renderRowTrigger(row);
+  }
+  syncAddLoraBtn();
+}
+
 function addLoraRow(path = '', scale) {
   const library = sortedLoraLibrary();
   // 名前で指定できるプロバイダなら、ライブラリが空でも行は作れる
@@ -288,25 +340,7 @@ function addLoraRow(path = '', scale) {
 
   const select = document.createElement('select');
   select.className = 'lora-select';
-  for (const item of library) {
-    const opt = document.createElement('option');
-    opt.value = item.path;
-    opt.textContent = (item.fav ? '★ ' : '') + loraLabel(item.path);
-    opt.title = item.path;
-    select.appendChild(opt);
-  }
-  if (byName) {
-    const opt = document.createElement('option');
-    opt.value = LORA_NAME_OPTION;
-    opt.textContent = '名前を直接入力…';
-    select.appendChild(opt);
-  }
-  const known = !!path && library.some((l) => l.path === path);
-  // 新しい行は候補の先頭から。ライブラリに無い path（＝名前で打ったものの復元）と、
-  // 候補が空のときだけ「名前を直接入力…」にする
-  select.value = known ? path
-    : (path || library.length === 0) && byName ? LORA_NAME_OPTION
-      : library[0].path;
+  populateLoraSelect(select, path);
   head.appendChild(select);
 
   const delBtn = document.createElement('button');
@@ -329,7 +363,7 @@ function addLoraRow(path = '', scale) {
   nameInput.placeholder = 'LoRA のファイル名（.safetensors は省略可）';
   nameInput.spellcheck = false;
   nameInput.autocomplete = 'off';
-  nameInput.value = known || !byName ? '' : path;
+  nameInput.value = select.value === LORA_NAME_OPTION ? path : '';
   nameInput.hidden = select.value !== LORA_NAME_OPTION;
   nameInput.addEventListener('input', saveForm);
   row.appendChild(nameInput);
@@ -2714,8 +2748,6 @@ civitaiImport.init({
     // Civitai 側にベースモデルの表記があればそれを使い、無ければ今のプロバイダ用として扱う
     const base = meta?.base || loraLib.baseLabel(loraBase());
     loraLib.register(hfUrl, { ...(meta ?? {}), base });
-    syncAddLoraBtn();
-    for (const row of els.loraList.querySelectorAll('.lora-row')) renderRowTrigger(row);
     return `ライブラリに登録しました: ${loraLib.label(hfUrl)}`;
   },
 });
@@ -2729,10 +2761,11 @@ hfImport.init({
   register(kind, url, meta) {
     loraLib.register(url, meta);
   },
-  afterRegister() {
-    syncAddLoraBtn();
-  },
 });
+
+// 登録・登録解除のたびに、既にある行の候補も入れ替える
+// （loraLib は保存のたびにこれを呼ぶので、取り込み経路が増えても取りこぼさない）
+loraLib.onChange = refreshLoraRows;
 els.hfOpenBtn.addEventListener('click', () => hfImport.open('lora'));
 
 // Runware の LoRA（AIR）の控えと取り込みダイアログ。API は画像編集側の
