@@ -1,0 +1,21 @@
+# 静的アセットの配信ヘッダ（Cloudflare Workers Static Assets）。
+#
+# 既定は "public, max-age=0, must-revalidate" で、画面を移るたびに CSS と JS を
+# 1 つずつ再検証しに行く。中身が変わっていなくても往復ぶん遅れ、画面遷移が
+# ワンテンポ遅れて感じられる原因になっていた。
+#
+# JS と CSS にだけ stale-while-revalidate を付けて「キャッシュ済みならすぐ使い、
+# 裏で新しいものを取り直す」に変える。max-age は 0 のままなので、更新は必ず
+# 次の 1 回で反映される（古い版が使われるのは、デプロイ直後の 1 回だけ）。
+#
+# HTML には付けない。参照する JS のファイル名は変わらないので、HTML が古い版に
+# 貼り付いても得がなく、むしろ新しい画面が出てこなくなる。
+#
+# 注意: パターンに splat（*）は 1 つだけ。複数のルールに当たると値がカンマで
+# 連結されるので、HTML に当たるルール（/* など）は足さないこと。
+
+/*.css
+  Cache-Control: public, max-age=0, stale-while-revalidate=604800
+
+/*.js
+  Cache-Control: public, max-age=0, stale-while-revalidate=604800

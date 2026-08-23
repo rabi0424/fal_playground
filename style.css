@@ -113,6 +113,24 @@ a { color: var(--accent); }
 /* 見出しはサイズに応じてトラッキングを詰める（大きい文字ほど負に） */
 h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
 
+/* ---------- 画面遷移 ---------- */
+/* 画面ごとに別ページなので、移るたびに一度白くなる。それが「ワンテンポ遅れる」
+   印象の正体でもあるため、前後の画面を短くクロスフェードでつなぐ。
+   サイドバーとページバーには名前を付けて前後で同じものとして扱わせ、
+   その場に留めたまま本文だけを入れ替える（現在地のハイライトだけが移る）。
+   未対応のブラウザでは何も起きない＝これまでどおり */
+@view-transition { navigation: auto; }
+
+.sidebar { view-transition-name: app-sidebar; }
+.pagebar { view-transition-name: app-pagebar; }
+
+::view-transition-old(root), ::view-transition-new(root),
+::view-transition-old(app-sidebar), ::view-transition-new(app-sidebar),
+::view-transition-old(app-pagebar), ::view-transition-new(app-pagebar) {
+  animation-duration: var(--dur-quick);
+  animation-timing-function: var(--spring);
+}
+
 /* ---------- shell（サイドバー + ページバー） ---------- */
 /* 画面ごとの機能はすべて左のサイドバーに集約する。上部に横並びのバーを置くと、
    項目が増えるたびに幅を食い合い、スマホでは横スクロールに追いやられていた。
@@ -2161,6 +2179,9 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 /* 動きを減らす設定: スライドやスケールは行わず、短いフェードに置き換える
    （フィードバックそのものは残す） */
 @media (prefers-reduced-motion: reduce) {
+  /* ページ間のクロスフェードもやめる（未対応ブラウザではこの規則ごと無視される） */
+  @view-transition { navigation: none; }
+
   body,
   .primary-btn, .ghost-btn,
   .gallery-item, .session-card, .hf-item {
