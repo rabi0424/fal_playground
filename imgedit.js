@@ -129,6 +129,10 @@ const els = {
   historyDialog: $('#historyDialog'),
   historyPicker: $('#historyPicker'),
   historyEmpty: $('#historyEmpty'),
+  rwLoraList: $('#rwLoraList'),
+  rwAddLoraBtn: $('#rwAddLoraBtn'),
+  rwPickLoraBtn: $('#rwPickLoraBtn'),
+  rwLoraHint: $('#rwLoraHint'),
   rwSteps: $('#rwSteps'),
   rwCfg: $('#rwCfg'),
   rwMaskMargin: $('#rwMaskMargin'),
@@ -324,6 +328,154 @@ function collectLoras() {
     }))
     // scale 0 は効果ゼロなのに LoRA 枠を消費するので送らない
     .filter((l) => l.path && l.scale > 0);
+}
+
+/* ---------- Runware の LoRA 行 ---------- */
+
+// Runware は LoRA を AIR（provider:model@version）で指定するので、URL を持つ
+// 既存のライブラリは使えない。控えと取り込みは runware-lora.js が持っている
+const RW_WEIGHT_MIN = -4; // スキーマ上の下限。負の値は「その傾向から遠ざける」
+const RW_WEIGHT_MAX = 4;
+
+function addRwLoraRow(air = '', weight) {
+  const library = runwareLora.sorted();
+  if (library.length === 0) return;
+  if (els.rwLoraList.querySelectorAll('.lora-row').length >= MAX_LORAS) return;
+
+  const row = document.createElement('div');
+  row.className = 'lora-row';
+
+  const head = document.createElement('div');
+  head.className = 'lora-head';
+
+  const select = document.createElement('select');
+  select.className = 'lora-select';
+  for (const item of library) {
+    const opt = document.createElement('option');
+    opt.value = item.air;
+    opt.textContent = runwareLora.labelOf(item);
+    opt.title = item.air;
+    select.appendChild(opt);
+  }
+  select.value = air && library.some((l) => l.air === air) ? air : library[0].air;
+  head.appendChild(select);
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'ghost-btn small';
+  delBtn.type = 'button';
+  delBtn.textContent = '削除';
+  delBtn.addEventListener('click', () => {
+    row.remove();
+    saveForm();
+    syncRwAddLoraBtn();
+  });
+  head.appendChild(delBtn);
+  row.appendChild(head);
+
+  const trigger = document.createElement('div');
+  trigger.className = 'lora-trigger';
+  row.appendChild(trigger);
+
+  const scaleWrap = document.createElement('div');
+  scaleWrap.className = 'lora-scale';
+  const scaleLabel = document.createElement('span');
+  scaleLabel.className = 'scale-label';
+  scaleLabel.textContent = 'weight';
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  const num = document.createElement('input');
+  num.type = 'number';
+  for (const el of [slider, num]) {
+    el.min = String(RW_WEIGHT_MIN);
+    el.max = String(RW_WEIGHT_MAX);
+    el.step = '0.05';
+  }
+  const initial = weight ?? runwareLora.defaultWeight(select.value);
+  slider.value = String(initial);
+  num.value = String(initial);
+  slider.addEventListener('input', () => { num.value = slider.value; row.dataset.scaleTouched = '1'; saveForm(); });
+  num.addEventListener('input', () => { slider.value = num.value; row.dataset.scaleTouched = '1'; saveForm(); });
+  scaleWrap.append(scaleLabel, slider, num);
+  row.appendChild(scaleWrap);
+
+  select.addEventListener('change', () => {
+    if (!row.dataset.scaleTouched) {
+      const def = runwareLora.defaultWeight(select.value);
+      slider.value = String(def);
+      num.value = String(def);
+    }
+    renderRwRowTrigger(row);
+    saveForm();
+  });
+
+  els.rwLoraList.appendChild(row);
+  renderRwRowTrigger(row);
+  syncRwAddLoraBtn();
+}
+
+function renderRwRowTrigger(row) {
+  const box = row.querySelector('.lora-trigger');
+  const words = runwareLora.triggerWords(row.querySelector('.lora-select').value);
+  box.innerHTML = '';
+  box.hidden = words.length === 0;
+  if (words.length === 0) return;
+  for (const word of words) {
+    const chip = document.createElement('span');
+    chip.className = 'lib-trigger-chip';
+    chip.textContent = word;
+    box.appendChild(chip);
+  }
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ghost-btn small';
+  btn.textContent = '挿入';
+  btn.title = 'トリガーワードを指示文の末尾に追加します';
+  btn.addEventListener('click', () => insertTriggerWords(words));
+  box.appendChild(btn);
+}
+
+// 控えが変わったら、行のプルダウンにも新しい候補を出す（選択は保つ）
+function refreshRwRowOptions(row) {
+  const select = row.querySelector('.lora-select');
+  const keep = select.value;
+  select.innerHTML = '';
+  for (const item of runwareLora.sorted()) {
+    const opt = document.createElement('option');
+    opt.value = item.air;
+    opt.textContent = runwareLora.labelOf(item);
+    opt.title = item.air;
+    select.appendChild(opt);
+  }
+  select.value = keep;
+  renderRwRowTrigger(row);
+}
+
+function syncRwAddLoraBtn() {
+  const count = els.rwLoraList.querySelectorAll('.lora-row').length;
+  const usable = runwareLora.sorted().length;
+  els.rwAddLoraBtn.disabled = count >= MAX_LORAS || usable === 0;
+  els.rwAddLoraBtn.title = count >= MAX_LORAS ? `LoRA はこの画面では最大 ${MAX_LORAS} 個までです` : '';
+  els.rwLoraHint.hidden = usable > 0;
+  els.rwLoraHint.textContent = '候補がまだありません。「Runware から取り込み」で、Runware に登録済みの LoRA を探して追加してください。';
+}
+
+// 選択中の行を API の形（[{ model, weight }]）にする。
+// weight は 0.01 刻みでないと弾かれるので、浮動小数の誤差を落としてから送る
+function collectRwLoras() {
+  return [...els.rwLoraList.querySelectorAll('.lora-row')]
+    .map((row) => ({
+      model: row.querySelector('.lora-select').value,
+      weight: Math.round((Number(row.querySelector('input[type="number"]').value) || 0) * 100) / 100,
+    }))
+    .filter((l) => l.model && l.weight !== 0);
+}
+
+// 行の再現用（下書きの保存と復元）。送信と同じ 0.01 刻みに丸めて持つ
+function rwLoraRows() {
+  return [...els.rwLoraList.querySelectorAll('.lora-row')].map((row) => ({
+    air: row.querySelector('.lora-select').value,
+    weight: Math.round((Number(row.querySelector('input[type="number"]').value) || 0) * 100) / 100,
+  }));
 }
 
 /* ---------- 入力画像 ---------- */
@@ -1200,9 +1352,12 @@ const PROVIDERS = {
   runware: {
     label: 'Runware（runware:121@1 / FLUX.1 Fill [dev] OneReward）',
     model: 'runware:121@1',
-    note: 'マスクで塗った範囲だけをモデルが描き直す修復モデルです（マスク必須）。ステップ・CFG・マスクの余白は空欄ならモデル既定に任せます。送信サイズは 64 の倍数に丸めます。LoRA は Runware の AIR 形式でしか指定できないため、この画面のライブラリは使えません。費用は結果に実額を表示します。',
+    note: 'マスクで塗った範囲だけをモデルが描き直す修復モデルです（マスク必須）。ステップ・CFG・マスクの余白は空欄ならモデル既定に任せます。送信サイズは 64 の倍数に丸めます。LoRA は Runware に登録済みのもの（AIR 指定）から選びます。費用は結果に実額を表示します。',
     supports: { size: true, count: true, steps: true, guidance: true, negative: true },
     sizeKind: 'flux',
+    // LoRA の絞り込みに使う。FLUX.1 Fill [dev] は flux-1-dev 系
+    loraArchitecture: 'flux1d',
+    loraArchitectureLabel: 'FLUX.1 dev',
     nativeMask: true,
     requiresMask: true,
     pollMs: 1500,
@@ -1241,6 +1396,8 @@ const PROVIDERS = {
       // negativePrompt は 2 文字未満だと弾かれる
       const negative = els.negativePrompt.value.trim();
       if (negative.length >= 2) task.negativePrompt = negative;
+      const loras = collectRwLoras();
+      if (loras.length > 0) task.lora = loras;
       return task;
     },
 
@@ -1416,7 +1573,9 @@ async function run() {
     sentSize: size,
     // 送信内容のうち、履歴と再開に必要な分だけ控える（画像本体は持たない）
     params: api.strip(input),
-    loras: input.loras ?? [],
+    // 履歴・ギャラリー側は { path, scale } で読むので、Runware の
+    // { model, weight } もその形に寄せる（path には AIR が入る）
+    loras: input.loras ?? (input.lora ?? []).map((l) => ({ path: l.model, scale: l.weight })),
     // 合成はモデルの応答が返ったあとに行うので、そのときのマスクを控えておく
     mask: useMask ? structuredClone(mask) : null,
     // マスクを API にも渡したか（後から塗り直しても描き直しはやり直せない）
@@ -1698,6 +1857,7 @@ function saveForm() {
     seedLock: els.seedLock.checked,
     negativePrompt: els.negativePrompt.value,
     loras: collectLoras(),
+    rwLoras: rwLoraRows(),
     // 画像本体は大きすぎるので保存しない。R2 の URL から読み直す
     source: source ? { url: source.url, from: source.from } : null,
     maskOn: els.maskToggle.checked,
@@ -1737,6 +1897,7 @@ async function restoreForm() {
   els.seedLock.checked = !!s.seedLock;
   els.negativePrompt.value = s.negativePrompt || '';
   for (const l of s.loras || []) addLoraRow(l.path, l.scale);
+  for (const l of s.rwLoras || []) addRwLoraRow(l.air, l.weight);
   els.maskToggle.checked = !!s.maskOn;
   if (s.maskSize) els.maskSize.value = s.maskSize;
   if (s.maskFeather) els.maskFeather.value = s.maskFeather;
@@ -1763,6 +1924,27 @@ civitaiImport.init({
     return `ライブラリに登録しました: ${loraLib.label(hfUrl)}`;
   },
 });
+
+// Runware の LoRA（AIR）の控えと取り込みダイアログ。API は画像編集側の
+// プロキシ経由の呼び出しをそのまま使ってもらう
+runwareLora.init({
+  request: (task) => runwareTasks(task),
+  architecture: PROVIDERS.runware.loraArchitecture,
+  architectureLabel: PROVIDERS.runware.loraArchitectureLabel,
+  // ダイアログで選ばれたら、そのまま使う行に足す。入らなければ false を返す
+  onPick(item) {
+    const rows = [...els.rwLoraList.querySelectorAll('.lora-row')];
+    if (rows.some((row) => row.querySelector('.lora-select').value === item.air)) return true;
+    if (rows.length >= MAX_LORAS) return false;
+    addRwLoraRow(item.air);
+    saveForm();
+    return true;
+  },
+});
+runwareLora.onChange = () => {
+  syncRwAddLoraBtn();
+  for (const row of els.rwLoraList.querySelectorAll('.lora-row')) refreshRwRowOptions(row);
+};
 
 initTheme();
 
@@ -1801,6 +1983,8 @@ els.uploadArea.addEventListener('drop', (e) => loadFile(e.dataTransfer?.files?.[
 
 els.addLoraBtn.addEventListener('click', () => addLoraRow());
 els.civitaiBtn.addEventListener('click', () => civitaiImport.open('lora'));
+els.rwAddLoraBtn.addEventListener('click', () => addRwLoraRow());
+els.rwPickLoraBtn.addEventListener('click', () => runwareLora.open());
 els.prompt.addEventListener('input', () => { syncRunBtn(); saveForm(); });
 for (const el of [els.sizeSelect, els.numImages, els.steps, els.guidance,
   els.acceleration, els.outputFormat, els.seed, els.seedLock, els.negativePrompt,
@@ -1860,6 +2044,7 @@ els.cancelBtn.addEventListener('click', () => {
 });
 
 syncAddLoraBtn();
+syncRwAddLoraBtn();
 syncProviderFields();
 restoreForm();
 fetchHistory().then(resumeJob);

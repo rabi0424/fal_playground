@@ -1164,6 +1164,63 @@ button:focus-visible, a.ghost-btn:focus-visible {
 
 .civitai-note { color: var(--muted); font-size: 12px; }
 
+/* ---------- Runware の LoRA 取り込みダイアログ ---------- */
+
+.rwlora-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.rwlora-results {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 46vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.rwlora-results:empty { display: none; }
+
+.rwlora-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.rwlora-item-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rwlora-item-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.rwlora-item-meta,
+.rwlora-item-trigger {
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.rwlora-item-meta { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+.rwlora-item > button { flex: none; }
+
+.rwlora-manual { margin-top: 4px; }
+
+
 .civitai-note.warn { color: var(--danger); }
 
 .civitai-progress {
