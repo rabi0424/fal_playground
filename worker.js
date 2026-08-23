@@ -281,6 +281,7 @@ async function civitaiResolve(rawUrl, env) {
   if (!version) {
     return {
       versionId: parsed.versionId,
+      modelId: parsed.modelId ?? null,
       modelName: null,
       modelType: null,
       versionName: null,
@@ -302,6 +303,8 @@ async function civitaiResolve(rawUrl, env) {
 
   return {
     versionId: String(version.id ?? parsed.versionId ?? ''),
+    // Runware の AIR（civitai:モデルID@バージョンID）を組み立てるのに要る
+    modelId: String(version.modelId ?? model?.id ?? parsed.modelId ?? '') || null,
     modelName: model?.name ?? version.model?.name ?? null,
     modelType: model?.type ?? version.model?.type ?? null,
     versionName: version.name ?? null,
@@ -1771,7 +1774,11 @@ export default {
     if (url.pathname === '/api/civitai/resolve') {
       if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
       const repo = url.searchParams.get('repo') || '';
-      if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return new Response('Invalid repo', { status: 400 });
+      // repo 省略は「Civitai の情報だけ欲しい」場合（Runware へ AIR で参照するとき）。
+      // 指定された場合だけ、取り込み先リポジトリの重複も見る
+      if (repo !== '' && !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
+        return new Response('Invalid repo', { status: 400 });
+      }
       let resolved;
       try {
         resolved = await civitaiResolve(url.searchParams.get('url'), env);
@@ -1783,6 +1790,9 @@ export default {
       let nameExists = false;
       let metaFileExists = false;
       let repoError = null;
+      if (repo === '') {
+        return Response.json({ ...meta, metaDoc: doc, alreadyUploaded, nameExists, metaFileExists, repoError });
+      }
       try {
         const tree = await fetchHfTree(repo, env);
         if (meta.sha256) {

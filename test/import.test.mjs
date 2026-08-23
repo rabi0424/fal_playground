@@ -408,6 +408,43 @@ async function testWavespeedProxy() {
   console.log('✓ wavespeed proxy: キー付与・転送先の制限・未設定時のエラー');
 }
 
+// Civitai の解決: repo を省くと HF を見に行かず、AIR の材料だけ返す
+//（Runware は civitai:モデルID@バージョンID でモデルを参照する）
+async function testCivitaiResolveWithoutRepo() {
+  const mod = await loadWorker();
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (String(url).includes('/model-versions/222')) {
+      return Response.json({ id: 222, modelId: 111, name: 'v3', baseModel: 'Flux.1 D',
+        files: [{ primary: true, name: 'a.safetensors', sizeKB: 1, hashes: { SHA256: 'AB' } }] });
+    }
+    if (String(url).includes('/models/111')) return Response.json({ id: 111, name: 'テストモデル', type: 'LORA' });
+    return new Response('nope', { status: 404 });
+  };
+  const env = { CIVITAI_TOKEN: 'civ', STATE: { idFromName: (n) => n, get: () => ({}) } };
+  const call = (qs) => mod.default.fetch(
+    new Request(`https://app.example/api/civitai/resolve?${qs}`), env);
+  const target = encodeURIComponent('https://civitai.com/models/111?modelVersionId=222');
+
+  const res = await call(`url=${target}`);
+  assert.equal(res.status, 200);
+  const meta = await res.json();
+  assert.equal(meta.modelId, '111', 'AIR に使うモデル ID が無い');
+  assert.equal(meta.versionId, '222');
+  assert.equal(meta.modelName, 'テストモデル');
+  assert.ok(!calls.some((u) => u.includes('huggingface.co')), 'repo 未指定なのに HF を見に行っている');
+
+  // repo を渡したときは、これまで通り HF の重複も見る
+  calls.length = 0;
+  await call(`url=${target}&repo=me%2Frepo`);
+  assert.ok(calls.some((u) => u.includes('huggingface.co')), 'repo 指定時に HF を見ていない');
+
+  // 形式が不正な repo はこれまで通り弾く
+  assert.equal((await call(`url=${target}&repo=bad`)).status, 400);
+  console.log('✓ civitai resolve: repo 省略で AIR の材料だけ返し、指定時は HF も見る');
+}
+
 // Runware プロキシ: 転送先の制限とキー付与。投入も結果取得も同じ URL への
 // POST なので、GET は受け付けない
 async function testRunwareProxy() {
@@ -536,6 +573,7 @@ await testStuckPastAlarm();
 await testLoraMetaEndpoint();
 await testWavespeedProxy();
 await testRunwareProxy();
+await testCivitaiResolveWithoutRepo();
 await testUploadReplace();
 await testCaptureEndpoint();
 rmSync(OUT, { force: true });
