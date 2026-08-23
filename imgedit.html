@@ -194,6 +194,12 @@
             <input id="rwMaskGrow" type="number" min="0" max="64" step="1" placeholder="0">
           </label>
         </div>
+        <div class="row">
+          <label class="field num-field" title="マスクがこの距離より画像の縁に近い辺を、単色で広げてから送ります。返ってきた画像は元の枠で切り出します。0 で無効">
+            <span class="label">縁の余白 px</span>
+            <input id="rwPadEdges" type="number" min="0" max="256" step="8" placeholder="0">
+          </label>
+        </div>
         <p class="hint" id="rwParamHint"></p>
 
         <details class="field">

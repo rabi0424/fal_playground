@@ -37,7 +37,7 @@ const LS_JOB = 'fal_imgedit_job';
 const LS_FORM = 'fal_imgedit_form';
 // 下書きに入っている Runware の既定値の版。上げると、古い下書きの値を
 // 一度だけ推奨値へ入れ替える（空欄＝モデル既定任せのままだと質が出ない）
-const RW_DEFAULTS_VERSION = 3;
+const RW_DEFAULTS_VERSION = 4;
 
 // 送信サイズ。モデルが学習時に使っている解像度に合わせて送ると崩れにくい。
 // 送った画像と同じサイズで返させるので、出力サイズでもある。
@@ -69,6 +69,9 @@ const SIZE_PRESETS = {
 // 旧バージョンは Qwen の解像度しか無かったので qwen_* で保存されている
 const migrateSizeValue = (value) => String(value ?? '').replace(/^qwen_/, 'ar_');
 
+// Runware の width / height の上限（64 の倍数・128〜2048）
+const RUNWARE_MAX_PX = 2048;
+
 // Runware は投入も結果取得も同じ URL に「タスクの配列」を POST する
 const RUNWARE_API_URL = 'https://api.runware.ai/v1';
 // 出力形式の綴りだけが他と違う（大文字・JPEG ではなく JPG）
@@ -98,6 +101,9 @@ const RUNWARE_RECOMMENDED = {
   // モデルへ渡すマスクを広げる px（送信サイズ基準）。潜在空間のひと単位が
   // 8px なので、2 単位ぶん見ておけば境目の混ざりは合成で捨てられる
   maskGrow: 16,
+  // マスクがこの距離より縁に近い辺を、単色で広げてから送る。
+  // maskMargin（48）より広く取って、切り出しが画像内に詰められないようにする
+  padEdges: 96,
   negativePrompt: 'low quality, blurry, distorted, deformed, artifacts',
 };
 
@@ -176,6 +182,7 @@ const els = {
   rwTrueCfg: $('#rwTrueCfg'),
   rwStrength: $('#rwStrength'),
   rwMaskGrow: $('#rwMaskGrow'),
+  rwPadEdges: $('#rwPadEdges'),
   rwMaskMargin: $('#rwMaskMargin'),
   rwScheduler: $('#rwScheduler'),
   rwOutputQuality: $('#rwOutputQuality'),
@@ -753,8 +760,22 @@ function renderSizeHint() {
     + (maskOn() ? '合成で元の比率へ戻します' : '結果もその比率になります');
   els.sizeHint.hidden = false;
   els.sizeHint.textContent = `${source.width}×${source.height} → ${size.width}×${size.height} で送信`
-    + (off < 0.5 ? '（比率そのまま）' : `（${stretched}）`);
+    + (off < 0.5 ? '（比率そのまま）' : `（${stretched}）`)
+    + padHintText(size);
   els.sizeHint.classList.toggle('warn', off > 12);
+}
+
+// 縁の余白が付く場合、どの辺にどれだけ足すかを送信サイズの説明に添える
+function padHintText(size) {
+  const api = provider();
+  if (!api.padEdges || !api.nativeMask || !maskOn() || mask.strokes.length === 0) return '';
+  const frame = padFrame(size, mask, api.maskGrow ? api.maskGrow() : 0, api.padEdges());
+  if (!frame) return '';
+  const sides = [['上', frame.pad.top], ['下', frame.pad.bottom],
+    ['左', frame.pad.left], ['右', frame.pad.right]]
+    .filter(([, v]) => v > 0).map(([name]) => name).join('・');
+  return ` ・ マスクが縁に近いので ${sides} に余白を足し、${frame.outer.width}×${frame.outer.height}`
+    + ' で送って元の枠で切り出します';
 }
 
 function clearSource() {
@@ -1018,15 +1039,146 @@ function rasterizeMask(w, h, strokes = mask.strokes, feather = mask.feather, gro
 // モデルへ渡すマスク画像。白 = 描き直す / 黒 = そのまま、という約束なので
 // 黒地に白で塗る（Runware の maskImage）。ぼかしはそのまま濃淡になる。
 // PNG なのは、JPEG のブロックノイズで縁がにじむのを避けるため
-function maskDataUri(size, maskData = mask, grow = 0) {
-  const canvas = makeCanvas(size.width, size.height);
+function maskDataUri(outer, inner, maskData = mask, grow = 0) {
+  const canvas = makeCanvas(outer.width, outer.height);
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(
-    rasterizeMask(canvas.width, canvas.height, maskData.strokes, maskData.feather, grow), 0, 0,
-  );
+  const shape = rasterizeMask(inner.width, inner.height, maskData.strokes, maskData.feather, grow);
+  // 余白へは縁を伸ばす。縁まで塗ったマスクは余白の中まで続くので、
+  // モデルにとっての「マスクの境目」は元画像の外に出る
+  drawExtended(ctx, shape, inner, outer);
   return canvas.toDataURL('image/png');
+}
+
+// 送信用の画像。余白は単色で塗り、元画像は inner の位置に置く
+function framedDataUri(img, outer, inner) {
+  const canvas = makeCanvas(outer.width, outer.height);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = borderColor(img);
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, inner.x, inner.y, inner.width, inner.height);
+  return canvas.toDataURL('image/jpeg', INPUT_QUALITY);
+}
+
+/* ---------- 縁の余白（送信前に画像を広げる） ---------- */
+//
+// Runware の maskMargin は「マスクの周りごと切り出して拡大し、修復してから
+// 元に戻す」処理で、最小 32・無効にできない。マスクが画像の縁に近いと切り出しが
+// 画像内に詰められ、その辺だけ処理が変わって元画像が縁に残る。
+//
+// そこで、マスクが縁に近い辺だけ単色で広げてから送り、返ってきた画像を
+// 元の枠で切り出す。モデルから見るとマスクは画像の内側にあるので、
+// どの辺も同じ扱いになる。
+
+const PAD_PROBE_PX = 256; // マスクの外接矩形を測るときの解像度（長辺）
+
+// マスクの外接矩形。各辺までの距離を 0..1 で返す。塗りが無ければ null。
+// ぼかし・消しゴム・広げ幅の効いた後の形をそのまま測りたいので、
+// 実際にラスタライズして走査する
+function maskEdgeGaps(size, maskData, growPx) {
+  const long = Math.max(size.width, size.height);
+  const w = Math.max(8, Math.round(PAD_PROBE_PX * size.width / long));
+  const h = Math.max(8, Math.round(PAD_PROBE_PX * size.height / long));
+  const shape = rasterizeMask(w, h, maskData.strokes, maskData.feather, growPx * w / size.width);
+  const data = shape.getContext('2d', { willReadFrequently: true })
+    .getImageData(0, 0, w, h).data;
+
+  let minX = w; let minY = h; let maxX = -1; let maxY = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (data[(y * w + x) * 4 + 3] <= 8) continue;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (maxX < 0) return null;
+  return {
+    left: minX / w,
+    right: 1 - (maxX + 1) / w,
+    top: minY / h,
+    bottom: 1 - (maxY + 1) / h,
+  };
+}
+
+// 送信する枠。マスクが amount px より縁に近い辺へ余白を足す。
+// 足す必要が無ければ null（これまで通り素の送信サイズで送る）
+function padFrame(size, maskData, growPx, amount) {
+  if (!(amount > 0)) return null;
+  const gap = maskEdgeGaps(size, maskData, growPx);
+  if (!gap) return null;
+  const pad = {
+    left: gap.left * size.width < amount ? amount : 0,
+    right: gap.right * size.width < amount ? amount : 0,
+    top: gap.top * size.height < amount ? amount : 0,
+    bottom: gap.bottom * size.height < amount ? amount : 0,
+  };
+  if (!(pad.left || pad.right || pad.top || pad.bottom)) return null;
+
+  // 64 の倍数・2048 まで。はみ出す場合は全体を縮める（枠の比は保つ）
+  const wantW = size.width + pad.left + pad.right;
+  const wantH = size.height + pad.top + pad.bottom;
+  const k = Math.min(1, RUNWARE_MAX_PX / wantW, RUNWARE_MAX_PX / wantH);
+  // 切り上げる。丸めで足りなくなると余白が痩せる
+  const snap = (v) => Math.min(RUNWARE_MAX_PX, Math.max(128, Math.ceil(v / 64) * 64));
+  const outer = { width: snap(wantW * k), height: snap(wantH * k) };
+
+  // 元画像が入る範囲。丸めた差は余白側で吸収し、中身は引き伸ばさない
+  const width = Math.min(outer.width, Math.max(64, Math.round(size.width * k)));
+  const height = Math.min(outer.height, Math.max(64, Math.round(size.height * k)));
+  const inner = {
+    x: Math.min(Math.round(pad.left * k), outer.width - width),
+    y: Math.min(Math.round(pad.top * k), outer.height - height),
+    width,
+    height,
+  };
+  return { outer, inner, pad };
+}
+
+// 余白を塗る単色。画像の外周の平均色にしておくと、モデルから見て不自然に
+// なりにくい（余白はマスクの外なので描き直されない）
+function borderColor(img) {
+  const s = 32;
+  const c = makeCanvas(s, s);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, 0, 0, s, s);
+  const d = ctx.getImageData(0, 0, s, s).data;
+  let r = 0; let g = 0; let b = 0; let n = 0;
+  for (let y = 0; y < s; y++) {
+    for (let x = 0; x < s; x++) {
+      if (x > 0 && x < s - 1 && y > 0 && y < s - 1) continue; // 外周だけ
+      const o = (y * s + x) * 4;
+      r += d[o];
+      g += d[o + 1];
+      b += d[o + 2];
+      n++;
+    }
+  }
+  return `rgb(${Math.round(r / n)}, ${Math.round(g / n)}, ${Math.round(b / n)})`;
+}
+
+// src を inner の位置へ描き、余白へは縁の 1px を伸ばす。
+// マスクを広げた枠に載せるときに使う（縁まで塗ったマスクが余白へ続く）
+function drawExtended(ctx, src, inner, outer) {
+  const sw = src.width;
+  const sh = src.height;
+  const { x, y, width: w, height: h } = inner;
+  const right = outer.width - x - w;
+  const bottom = outer.height - y - h;
+  ctx.drawImage(src, 0, 0, sw, sh, x, y, w, h);
+  if (x > 0) ctx.drawImage(src, 0, 0, 1, sh, 0, y, x, h);
+  if (right > 0) ctx.drawImage(src, sw - 1, 0, 1, sh, x + w, y, right, h);
+  if (y > 0) ctx.drawImage(src, 0, 0, sw, 1, x, 0, w, y);
+  if (bottom > 0) ctx.drawImage(src, 0, sh - 1, sw, 1, x, y + h, w, bottom);
+  // 四隅
+  if (x > 0 && y > 0) ctx.drawImage(src, 0, 0, 1, 1, 0, 0, x, y);
+  if (right > 0 && y > 0) ctx.drawImage(src, sw - 1, 0, 1, 1, x + w, 0, right, y);
+  if (x > 0 && bottom > 0) ctx.drawImage(src, 0, sh - 1, 1, 1, 0, y + h, x, bottom);
+  if (right > 0 && bottom > 0) ctx.drawImage(src, sw - 1, sh - 1, 1, 1, x + w, y + h, right, bottom);
 }
 
 // 入力画像の上に重ねる表示。差し替わる側を明るいまま残し、外側を暗くする
@@ -1112,6 +1264,7 @@ function onMaskUp() {
 function commitMaskChange() {
   syncMaskUi();
   syncRunBtn();
+  renderSizeHint(); // 塗りの位置で、縁の余白が要るかどうかが変わる
   saveForm();
   refreshResultComposite();
 }
@@ -1143,7 +1296,7 @@ function maskAll() {
 // 合成は「元画像の解像度・縦横比」で行い、出力をそこへ引き伸ばす。モデルへは
 // Qwen の解像度に合わせて縮めた（必要なら比を変えた）画像を送っているので、
 // ここで戻すことで、マスクの外側は元の画素のまま・内側だけが差し替わる
-function compositeWithMask(baseImg, editedImg, maskData) {
+function compositeWithMask(baseImg, editedImg, maskData, crop = null) {
   const w = baseImg.naturalWidth || baseImg.width;
   const h = baseImg.naturalHeight || baseImg.height;
   const out = makeCanvas(w, h);
@@ -1153,7 +1306,16 @@ function compositeWithMask(baseImg, editedImg, maskData) {
 
   const layer = makeCanvas(w, h);
   const lctx = layer.getContext('2d');
-  lctx.drawImage(editedImg, 0, 0, w, h);
+  lctx.imageSmoothingQuality = 'high';
+  // 縁の余白を付けて送った場合は、元画像が入っていた範囲だけを取り出す。
+  // 半画素ぶん内側から取るのは、拡大の補間が余白側の画素を拾わないようにするため
+  // （そのままだと切り出した縁に余白の色が 1px にじむ）
+  if (crop) {
+    const i = 0.5;
+    lctx.drawImage(editedImg, crop.x + i, crop.y + i, crop.width - i * 2, crop.height - i * 2, 0, 0, w, h);
+  } else {
+    lctx.drawImage(editedImg, 0, 0, w, h);
+  }
   lctx.globalCompositeOperation = 'destination-in';
   lctx.drawImage(rasterizeMask(w, h, maskData.strokes, maskData.feather), 0, 0);
 
@@ -1163,11 +1325,11 @@ function compositeWithMask(baseImg, editedImg, maskData) {
 
 // URL から合成した data URI を作る。画像は同一オリジン（R2）である必要がある
 // （別ドメインのままだと canvas が汚染されて取り出せない）
-async function compositeFromUrls(baseUrl, editedUrl, maskData, mime = 'image/png') {
+async function compositeFromUrls(baseUrl, editedUrl, maskData, crop = null, mime = 'image/png') {
   const [baseImg, editedImg] = await Promise.all([
     loadImageForCanvas(baseUrl), loadImageForCanvas(editedUrl),
   ]);
-  const canvas = compositeWithMask(baseImg, editedImg, maskData);
+  const canvas = compositeWithMask(baseImg, editedImg, maskData, crop);
   try {
     return {
       dataUri: canvas.toDataURL(mime, 0.95),
@@ -1466,6 +1628,7 @@ const PROVIDERS = {
     // 送信サイズ基準の px。マスクを広げるのはモデルへ渡す側だけで、
     // 合成に使うマスクは塗ったままの形を保つ
     maskGrow: () => Number(els.rwMaskGrow.value) || 0,
+    padEdges: () => Number(els.rwPadEdges.value) || 0,
     loraArchitecture: 'flux1d',
     loraArchitectureLabel: 'FLUX.1 dev',
     defaultNegative: RUNWARE_RECOMMENDED.negativePrompt,
@@ -1651,6 +1814,7 @@ function applyRunwareRecommended() {
   els.rwTrueCfg.value = String(RUNWARE_RECOMMENDED.trueCfg);
   els.rwStrength.value = String(RUNWARE_RECOMMENDED.strength);
   els.rwMaskGrow.value = String(RUNWARE_RECOMMENDED.maskGrow);
+  els.rwPadEdges.value = String(RUNWARE_RECOMMENDED.padEdges);
   els.rwMaskMargin.value = String(RUNWARE_RECOMMENDED.maskMargin);
   els.rwScheduler.value = '';
   els.rwPromptWeighting.checked = false;
@@ -1679,6 +1843,13 @@ function renderRunwareParamHint() {
   }
   if ((Number(els.rwMaskGrow.value) || 0) === 0) {
     notes.push('塗った縁に元画像が残るときは「広げる」を 16 前後にしてください');
+  }
+  const padEdges = Number(els.rwPadEdges.value) || 0;
+  const margin = Number(els.rwMaskMargin.value) || 0;
+  if (padEdges === 0) {
+    notes.push('画像の縁まで塗るときは「縁の余白」を入れてください（余白より広く）');
+  } else if (margin > 0 && padEdges <= margin) {
+    notes.push(`「縁の余白」は「余白」（${margin}）より広くしてください`);
   }
   const base = trueCfg > 1
     ? 'True CFG は 1 ステップに 2 回推論するので、生成時間は倍近くになります（費用も上がることがあります）。'
@@ -1720,9 +1891,23 @@ async function run() {
 
   // 送るのはここで作る縮小版。元画像は合成の土台として R2 に残っている
   const size = sendSize();
+  const api = provider();
+  // 塗った範囲は「モデルへ渡すマスク」と「返ってきた画像の合成」の両方に使う。
+  // 渡せないプロバイダでは合成だけで同じ見た目に寄せる
+  const useMask = maskOn() && mask.strokes.length > 0;
+  const grow = api.maskGrow ? api.maskGrow() : 0;
+
+  // マスクが画像の縁に近い辺は、単色で広げてから送る（返ってきたら切り出す）。
+  // 広げる必要が無ければ frame は null で、これまで通り素の枠で送る
+  const frame = useMask && api.nativeMask && api.padEdges
+    ? padFrame(size, mask, grow, api.padEdges()) : null;
+  const outer = frame ? frame.outer : size;
+  const inner = frame ? frame.inner : { x: 0, y: 0, width: size.width, height: size.height };
+
   let dataUri;
   try {
-    dataUri = toDataUri(await sourceImageEl(), size).dataUri;
+    const img = await sourceImageEl();
+    dataUri = frame ? framedDataUri(img, outer, inner) : toDataUri(img, size).dataUri;
   } catch (err) {
     setRunning(false);
     setStatus('');
@@ -1730,16 +1915,11 @@ async function run() {
     return;
   }
 
-  const api = provider();
-  // 塗った範囲は「モデルへ渡すマスク」と「返ってきた画像の合成」の両方に使う。
-  // 渡せないプロバイダでは合成だけで同じ見た目に寄せる
-  const useMask = maskOn() && mask.strokes.length > 0;
   // モデルには少し広めのマスクを渡す。修復モデルは輪郭のすぐ内側に元画像を
   // 引きずりやすい（潜在空間では 8px 角がひと単位なので、境目はどうしても
   // 混ざる）。広げたぶんは合成で捨てるので、出来上がりの範囲は変わらない
-  const maskUri = useMask && api.nativeMask
-    ? maskDataUri(size, mask, api.maskGrow ? api.maskGrow() : 0) : null;
-  const input = api.buildInput(dataUri, size, maskUri);
+  const maskUri = useMask && api.nativeMask ? maskDataUri(outer, inner, mask, grow) : null;
+  const input = api.buildInput(dataUri, outer, maskUri);
   const job = {
     id: makeId(),
     provider: providerId,
@@ -1749,7 +1929,9 @@ async function run() {
     sourceUrl: source.url,
     // 元画像と、実際に送った大きさ。合成は元解像度で行うので両方残す
     sourceSize: { width: source.width, height: source.height },
-    sentSize: size,
+    sentSize: outer,
+    // 余白を足して送った場合の、元画像が入っている範囲。合成のときに切り出す
+    crop: frame ? inner : null,
     // 送信内容のうち、履歴と再開に必要な分だけ控える（画像本体は持たない）
     params: api.strip(input),
     // 履歴・ギャラリー側は { path, scale } で読むので、Runware の
@@ -1804,6 +1986,7 @@ async function waitAndFinish(job) {
     // プロバイダが実額を返すときだけ入る（fal / WaveSpeed は返らない）
     ...(cost ? { cost } : {}),
     ...(job.maskNative ? { maskNative: true } : {}),
+    ...(job.crop ? { crop: job.crop } : {}),
     sourceSize: job.sourceSize ?? null,
     sentSize: job.sentSize ?? null,
     // 出力に続けて入力画像も残す（削除時に一括で消える）
@@ -1850,7 +2033,7 @@ async function buildMaskedRecord(record, maskData) {
   const raws = tail.slice(0, n);
   const composites = [];
   for (const [i, raw] of raws.entries()) {
-    const { dataUri, width, height } = await compositeFromUrls(inputUrl, raw.url, maskData);
+    const { dataUri, width, height } = await compositeFromUrls(inputUrl, raw.url, maskData, record.crop ?? null);
     const url = await uploadDataUri(
       dataUri,
       { app: 'fal playground', source: 'imgedit-masked', model: record.model, prompt: record.prompt },
@@ -1964,7 +2147,7 @@ async function refreshResultComposite() {
     for (let i = 0; i < n; i++) {
       const raw = record.images[n + i];
       if (!raw) continue;
-      const { dataUri } = await compositeFromUrls(inputUrl, raw.url, current);
+      const { dataUri } = await compositeFromUrls(inputUrl, raw.url, current, record.crop ?? null);
       if (run !== compositeRun || shownResult !== record) return; // 続けて塗られた
       const el = els.resultImages.querySelector(`[data-result-index="${i}"] img`);
       if (el) el.src = dataUri;
@@ -2033,6 +2216,7 @@ function saveForm() {
     rwTrueCfg: els.rwTrueCfg.value,
     rwStrength: els.rwStrength.value,
     rwMaskGrow: els.rwMaskGrow.value,
+    rwPadEdges: els.rwPadEdges.value,
     rwMaskMargin: els.rwMaskMargin.value,
     rwScheduler: els.rwScheduler.value,
     rwOutputQuality: els.rwOutputQuality.value,
@@ -2080,6 +2264,7 @@ async function restoreForm() {
   els.rwTrueCfg.value = s.rwTrueCfg ?? '';
   els.rwStrength.value = s.rwStrength ?? '';
   els.rwMaskGrow.value = s.rwMaskGrow ?? '';
+  els.rwPadEdges.value = s.rwPadEdges ?? '';
   els.rwMaskMargin.value = s.rwMaskMargin ?? '';
   els.rwScheduler.value = s.rwScheduler ?? '';
   els.rwOutputQuality.value = s.rwOutputQuality ?? '';
@@ -2184,13 +2369,18 @@ els.prompt.addEventListener('input', () => { syncRunBtn(); saveForm(); });
 for (const el of [els.sizeSelect, els.numImages, els.steps, els.guidance,
   els.acceleration, els.outputFormat, els.seed, els.seedLock, els.negativePrompt,
   els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength, els.rwMaskMargin,
-  els.rwMaskGrow, els.rwScheduler, els.rwOutputQuality, els.rwPromptWeighting]) {
+  els.rwMaskGrow, els.rwPadEdges, els.rwScheduler, els.rwOutputQuality,
+  els.rwPromptWeighting]) {
   el.addEventListener('change', saveForm);
 }
 // 推奨から外れたらその場で理由を出す
 for (const el of [els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength,
-  els.rwMaskMargin, els.rwMaskGrow]) {
+  els.rwMaskMargin, els.rwMaskGrow, els.rwPadEdges]) {
   el.addEventListener('input', renderRunwareParamHint);
+}
+// 広げ幅と縁の余白は、何をどの大きさで送るかを変える
+for (const el of [els.rwMaskGrow, els.rwPadEdges]) {
+  el.addEventListener('input', renderSizeHint);
 }
 els.rwPresetBtn.addEventListener('click', () => {
   applyRunwareRecommended();
