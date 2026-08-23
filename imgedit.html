@@ -179,6 +179,12 @@
             <span class="label">True CFG</span>
             <input id="rwTrueCfg" type="number" min="0" max="10" step="0.1" placeholder="なし">
           </label>
+          <label class="field num-field" title="1 未満だと、塗った範囲にも元画像が残ります。Runware の既定は 0.8">
+            <span class="label">変化の強さ</span>
+            <input id="rwStrength" type="number" min="0" max="1" step="0.05" placeholder="既定">
+          </label>
+        </div>
+        <div class="row">
           <label class="field num-field" title="マスクの周囲を何 px ぶん一緒に切り出してモデルへ見せるか（32〜128）">
             <span class="label">余白 px</span>
             <input id="rwMaskMargin" type="number" min="32" max="128" step="1" placeholder="既定">

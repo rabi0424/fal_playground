@@ -37,7 +37,7 @@ const LS_JOB = 'fal_imgedit_job';
 const LS_FORM = 'fal_imgedit_form';
 // 下書きに入っている Runware の既定値の版。上げると、古い下書きの値を
 // 一度だけ推奨値へ入れ替える（空欄＝モデル既定任せのままだと質が出ない）
-const RW_DEFAULTS_VERSION = 1;
+const RW_DEFAULTS_VERSION = 2;
 
 // 送信サイズ。モデルが学習時に使っている解像度に合わせて送ると崩れにくい。
 // 送った画像と同じサイズで返させるので、出力サイズでもある。
@@ -90,6 +90,11 @@ const RUNWARE_RECOMMENDED = {
   // マスクの周りを一緒に切り出して拡大してから描くので、狭い範囲ほど効く。
   // Runware の目安は 32〜64
   maskMargin: 48,
+  // Runware の既定は 0.8。この値は「低いほど元画像の影響を残す」なので、
+  // 既定のままだと塗った範囲にも元画像が 2 割残る。修復モデルなので 1 にする
+  // （ドキュメント上は FLUX Fill 系は strength を見ないとあるが、このモデルの
+  //  スキーマは既定 0.8 を宣言しているので、明示して曖昧さを消す）
+  strength: 1,
   negativePrompt: 'low quality, blurry, distorted, deformed, artifacts',
 };
 
@@ -166,6 +171,7 @@ const els = {
   rwSteps: $('#rwSteps'),
   rwCfg: $('#rwCfg'),
   rwTrueCfg: $('#rwTrueCfg'),
+  rwStrength: $('#rwStrength'),
   rwMaskMargin: $('#rwMaskMargin'),
   rwScheduler: $('#rwScheduler'),
   rwOutputQuality: $('#rwOutputQuality'),
@@ -946,8 +952,27 @@ function blurCanvas(src, radius) {
   return out;
 }
 
+// ぼかしたマスクのアルファを 2 倍して振り切らせる（白のまま濃度だけ上げる）。
+//
+// ぼかしただけだと、輪郭を中心に内外へ均等ににじむので、塗った形そのものが
+// 痩せる。細い塗りに強いぼかしをかけると、マスクがどこも 255 に届かず、
+// 塗った範囲の全体に元画像が混ざったままになる（ブラシ 6・ぼかし 8 で 55%）。
+//
+// 2 倍すると、輪郭上がちょうど 255（ぼかし後は 50% なので）になり、内側は
+// 振り切って完全な差し替えになる。ぼけ足は輪郭の外側だけに残るので、
+// 「塗ったところは必ず差し替わり、その外側へ滑らかに抜ける」形になる
+function boostMaskAlpha(src) {
+  const out = makeCanvas(src.width, src.height);
+  const ctx = out.getContext('2d');
+  // lighter は前乗算のまま加算するので、白のまま alpha だけが 2 倍になる
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.drawImage(src, 0, 0);
+  ctx.drawImage(src, 0, 0);
+  return out;
+}
+
 // マスクを w×h のアルファ（白 = 差し替える）として描く。
-// ぼかしぶんは縁が半透明になり、そのまま合成の混ざり具合になる
+// ぼかしぶんは輪郭の外側が半透明になり、そのまま合成の混ざり具合になる
 function rasterizeMask(w, h, strokes = mask.strokes, feather = mask.feather) {
   const long = Math.max(w, h);
   const c = makeCanvas(w, h);
@@ -978,7 +1003,9 @@ function rasterizeMask(w, h, strokes = mask.strokes, feather = mask.feather) {
     for (const [x, y] of pts.slice(1)) ctx.lineTo(x * w, y * h);
     ctx.stroke();
   }
-  return blurCanvas(c, feather * long);
+  const blurred = blurCanvas(c, feather * long);
+  // ぼかしていない（feather が小さい）ときは既に 0/255 なので何もしない
+  return blurred === c ? c : boostMaskAlpha(blurred);
 }
 
 // モデルへ渡すマスク画像。白 = 描き直す / 黒 = そのまま、という約束なので
@@ -1468,6 +1495,7 @@ const PROVIDERS = {
       if (els.rwTrueCfg.value !== '' && Number(els.rwTrueCfg.value) > 1) {
         task.trueCFGScale = Number(els.rwTrueCfg.value);
       }
+      if (els.rwStrength.value !== '') task.strength = Number(els.rwStrength.value);
       if (els.rwMaskMargin.value !== '') task.maskMargin = Number(els.rwMaskMargin.value);
       if (els.rwScheduler.value) task.scheduler = els.rwScheduler.value;
       if (els.rwPromptWeighting.checked) task.promptWeighting = 'sdEmbeds';
@@ -1609,6 +1637,7 @@ function applyRunwareRecommended() {
   els.rwSteps.value = String(RUNWARE_RECOMMENDED.steps);
   els.rwCfg.value = String(RUNWARE_RECOMMENDED.cfg);
   els.rwTrueCfg.value = String(RUNWARE_RECOMMENDED.trueCfg);
+  els.rwStrength.value = String(RUNWARE_RECOMMENDED.strength);
   els.rwMaskMargin.value = String(RUNWARE_RECOMMENDED.maskMargin);
   els.rwScheduler.value = '';
   els.rwPromptWeighting.checked = false;
@@ -1627,6 +1656,10 @@ function renderRunwareParamHint() {
     notes.push('True CFG を 4 前後にしないと、指示文がほとんど効きません');
   } else if (trueCfg > 6) {
     notes.push('True CFG が 6 を超えると画質が落ちやすくなります');
+  }
+  const strength = els.rwStrength.value === '' ? null : Number(els.rwStrength.value);
+  if (strength === null || strength < 1) {
+    notes.push('変化の強さが 1 未満だと、塗った範囲にも元画像が残ります（空欄のときの既定は 0.8）');
   }
   if (els.rwMaskMargin.value === '') {
     notes.push('余白を 32〜64 にすると、狭い範囲を塗ったときの精細さが上がります');
@@ -1978,6 +2011,7 @@ function saveForm() {
     rwSteps: els.rwSteps.value,
     rwCfg: els.rwCfg.value,
     rwTrueCfg: els.rwTrueCfg.value,
+    rwStrength: els.rwStrength.value,
     rwMaskMargin: els.rwMaskMargin.value,
     rwScheduler: els.rwScheduler.value,
     rwOutputQuality: els.rwOutputQuality.value,
@@ -2023,6 +2057,7 @@ async function restoreForm() {
   els.rwSteps.value = s.rwSteps ?? '';
   els.rwCfg.value = s.rwCfg ?? '';
   els.rwTrueCfg.value = s.rwTrueCfg ?? '';
+  els.rwStrength.value = s.rwStrength ?? '';
   els.rwMaskMargin.value = s.rwMaskMargin ?? '';
   els.rwScheduler.value = s.rwScheduler ?? '';
   els.rwOutputQuality.value = s.rwOutputQuality ?? '';
@@ -2126,12 +2161,12 @@ els.rwPickLoraBtn.addEventListener('click', () => runwareLora.open());
 els.prompt.addEventListener('input', () => { syncRunBtn(); saveForm(); });
 for (const el of [els.sizeSelect, els.numImages, els.steps, els.guidance,
   els.acceleration, els.outputFormat, els.seed, els.seedLock, els.negativePrompt,
-  els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwMaskMargin, els.rwScheduler,
-  els.rwOutputQuality, els.rwPromptWeighting]) {
+  els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength, els.rwMaskMargin,
+  els.rwScheduler, els.rwOutputQuality, els.rwPromptWeighting]) {
   el.addEventListener('change', saveForm);
 }
 // 推奨から外れたらその場で理由を出す
-for (const el of [els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwMaskMargin]) {
+for (const el of [els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength, els.rwMaskMargin]) {
   el.addEventListener('input', renderRunwareParamHint);
 }
 els.rwPresetBtn.addEventListener('click', () => {
