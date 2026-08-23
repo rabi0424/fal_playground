@@ -474,7 +474,9 @@ async function uploadDataUri(dataUri, meta, replace = null) {
   return (await res.json()).url;
 }
 
-async function setSourceFromSrc(src, from) {
+// keepMask は「前の画像に合わせて塗ったマスクをそのまま引き継ぐ」場合だけ。
+// 下書きの復元と、過去の合成結果を開き直すときにしか使わない
+async function setSourceFromSrc(src, from, { keepMask = false } = {}) {
   setError('');
   setStatus('画像を読み込み中…');
   try {
@@ -491,11 +493,17 @@ async function setSourceFromSrc(src, from) {
       const original = toDataUri(img, { width, height }, ORIGINAL_QUALITY);
       url = await uploadDataUri(original.dataUri, { app: 'fal playground', source: 'imgedit-input' });
     }
+    // 別の画像に差し替えたらマスクは引き継がない。前の画像の形に合わせて
+    // 塗った範囲を、関係のない画像へそのまま当ててしまわないようにする
+    const dropMask = !keepMask && url !== source?.url && mask.strokes.length > 0;
+    if (dropMask) resetMask();
+
     sourceImage = img;
     source = { url, width, height, from };
     renderSource();
     saveForm();
-    setStatus('');
+    // 黙って消えると操作ミスに見えるので、消したことだけ伝える
+    setStatus(dropMask ? '入力画像を差し替えたので、マスクは消去しました' : '', true);
   } catch (err) {
     setStatus('');
     // 別ドメインの画像は canvas から取り出せない（fal の CDN 画像を保存前に
@@ -553,6 +561,7 @@ function renderSizeHint() {
 function clearSource() {
   source = null;
   sourceImage = null;
+  resetMask();
   els.fileInput.value = '';
   renderSource();
   saveForm();
@@ -613,24 +622,104 @@ function makeCanvas(w, h) {
   return c;
 }
 
-// ぼかし。ctx.filter が無い環境（古い iOS Safari など）では、縮小して拡大し直す
-// ことで近い見た目にする（完全な gaussian ではないが縁は滑らかになる）
+// src（w×h）を横方向に箱ぼかしして、転置した dst（h×w）へ書く。
+// 端は最外周の値を伸ばして扱う。2 回通すと縦横の両方がぼけ、向きも元に戻る
+function boxBlurTransposed(src, dst, w, h, r) {
+  const scale = 1 / (r * 2 + 1);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    // 走査の初期値。左端より外は src[row] が続いているものとする
+    let sum = src[row] * (r + 1);
+    for (let i = 1; i <= r; i++) sum += src[row + Math.min(i, w - 1)];
+    for (let x = 0; x < w; x++) {
+      dst[x * h + y] = sum * scale;
+      sum += src[row + Math.min(x + r + 1, w - 1)] - src[row + Math.max(x - r, 0)];
+    }
+  }
+}
+
+// アルファチャンネルだけを箱ぼかし 3 回で均す（回数を重ねるとガウスに近づく）。
+// 色は白に揃える。縁が「白の半透明」でないと、黒地に重ねたときに濃淡が出ない
+function blurAlphaInPlace(canvas, radius) {
+  const ctx = canvas.getContext('2d');
+  const { width: w, height: h } = canvas;
+  const image = ctx.getImageData(0, 0, w, h);
+  const px = image.data;
+  // 箱ぼかしは元の値だけを足し引きするので、途中の丸め誤差は蓄積しない
+  let a = new Uint8ClampedArray(w * h);
+  let b = new Uint8ClampedArray(w * h);
+  for (let i = 0; i < a.length; i++) a[i] = px[i * 4 + 3];
+  // 3 回の箱ぼかしでガウス（σ = radius）に近づける箱の半径
+  const r = Math.max(1, Math.round(radius));
+  for (let pass = 0; pass < 3; pass++) {
+    boxBlurTransposed(a, b, w, h, r); // 横 → b は h×w
+    boxBlurTransposed(b, a, h, w, r); // 縦 → a は w×h に戻る
+  }
+  for (let i = 0; i < a.length; i++) {
+    const o = i * 4;
+    px[o] = 255;
+    px[o + 1] = 255;
+    px[o + 2] = 255;
+    px[o + 3] = a[i];
+  }
+  ctx.putImageData(image, 0, 0);
+  return canvas;
+}
+
+// 近似ぼかしを行う作業解像度の上限（長辺）。合成用のマスクは元画像と同じ
+// 大きさ（最大 4096px）で作るので、そのまま JS で回すと重すぎる。
+// ぼかした後のマスクはなだらかなので、この解像度から拡大しても縁は滑らか
+const BLUR_FALLBACK_MAX_PX = 1024;
+
+// ctx.filter は「プロパティはあるが無視される」実装もあるので、型で判定せず
+// 実際ににじむかどうかを 1 度だけ試して覚える
+let filterBlurs = null;
+
+function supportsFilterBlur() {
+  if (filterBlurs !== null) return filterBlurs;
+  try {
+    const dot = makeCanvas(9, 1);
+    const dctx = dot.getContext('2d');
+    if (typeof dctx.filter !== 'string') return (filterBlurs = false);
+    dctx.fillStyle = '#fff';
+    dctx.fillRect(4, 0, 1, 1);
+
+    const out = makeCanvas(9, 1);
+    const octx = out.getContext('2d', { willReadFrequently: true });
+    octx.filter = 'blur(2px)';
+    octx.drawImage(dot, 0, 0);
+    // 2px 離れた画素までにじんでいれば効いている
+    filterBlurs = octx.getImageData(0, 0, 9, 1).data[6 * 4 + 3] > 0;
+  } catch {
+    filterBlurs = false;
+  }
+  return filterBlurs;
+}
+
+// ぼかし。ctx.filter が実際に効く環境ではそれに任せる
 function blurCanvas(src, radius) {
   if (radius < 0.5) return src;
   const out = makeCanvas(src.width, src.height);
   const ctx = out.getContext('2d');
-  if (typeof ctx.filter === 'string') {
+  if (supportsFilterBlur()) {
     ctx.filter = `blur(${radius}px)`;
     ctx.drawImage(src, 0, 0);
     return out;
   }
-  const scale = Math.max(1 / 64, 1 / Math.max(1, radius));
-  const small = makeCanvas(src.width * scale, src.height * scale);
-  const sctx = small.getContext('2d');
-  sctx.imageSmoothingQuality = 'high';
-  sctx.drawImage(src, 0, 0, small.width, small.height);
+
+  // ctx.filter が無い（または効かない）環境。
+  // 以前はぼかし半径のぶんだけ縮小してから拡大し直していたが、それだと縮小率が
+  // そのままブロックの大きさになり、縁が階段状に見えてしまう。作業用の縮小は
+  // 上限までに留めて、ぼかし自体は箱ぼかしで正しくかける
+  const scale = Math.min(1, BLUR_FALLBACK_MAX_PX / Math.max(src.width, src.height));
+  const work = makeCanvas(src.width * scale, src.height * scale);
+  const wctx = work.getContext('2d');
+  wctx.imageSmoothingQuality = 'high';
+  wctx.drawImage(src, 0, 0, work.width, work.height);
+  blurAlphaInPlace(work, radius * scale);
+
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(small, 0, 0, out.width, out.height);
+  ctx.drawImage(work, 0, 0, out.width, out.height);
   return out;
 }
 
@@ -766,6 +855,11 @@ function commitMaskChange() {
   syncRunBtn();
   saveForm();
   refreshResultComposite();
+}
+
+// 塗りだけを捨てる。ぼかしはスライダーの設定なので今の値を引き継ぐ
+function resetMask() {
+  mask = { ...structuredClone(EMPTY_MASK), feather: maskFeatherRatio() };
 }
 
 function maskUndo() {
@@ -906,7 +1000,7 @@ async function reopenMaskedResult(record) {
   mask = record.mask?.strokes ? structuredClone(record.mask) : structuredClone(EMPTY_MASK);
   els.maskFeather.value = String(Math.round((mask.feather ?? 0.01) * 400));
   els.prompt.value = record.prompt || '';
-  await setSourceFromSrc(inputUrl, 'history');
+  await setSourceFromSrc(inputUrl, 'history', { keepMask: true });
   syncMaskUi();
   saveForm();
   renderResult(record);
@@ -1649,7 +1743,7 @@ async function restoreForm() {
   if (Array.isArray(s.mask?.strokes)) mask = s.mask;
   syncProviderFields();
   syncRunBtn();
-  if (s.source?.url) await setSourceFromSrc(s.source.url, s.source.from || 'history');
+  if (s.source?.url) await setSourceFromSrc(s.source.url, s.source.from || 'history', { keepMask: true });
   syncMaskUi();
 }
 
