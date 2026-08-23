@@ -5,16 +5,32 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>画像編集 - fal playground</title>
 <link rel="stylesheet" href="style.css">
+<script>
+/* 保存済みのテーマとサイドバーの開閉は、描画前に反映する。
+   後から JS で当てると、明→暗の切り替わりや幅の跳ねが一瞬見えてしまう */
+(function () {
+  try {
+    var d = document.documentElement, s = localStorage;
+    d.dataset.theme = s.getItem('fal_theme') || 'auto';
+    d.dataset.sidebar = s.getItem('fal_sidebar') || 'open';
+  } catch (e) { /* ストレージが使えない環境では既定のまま */ }
+})();
+</script>
+<script src="lora-library.js" defer></script>
+<script src="device-sync.js" defer></script>
+<script src="hf-import.js" defer></script>
+<script src="runware-lora.js" defer></script>
+<script src="civitai-import.js" defer></script>
+<script src="imgedit.js" defer></script>
 </head>
 <body>
 
-<header class="topbar">
-  <div class="brand"><a href="./">fal <span>playground</span></a><span class="arena-tag">/ 画像編集</span></div>
-  <div class="topbar-actions">
-    <a href="./" class="ghost-btn">← 生成画面へ</a>
-    <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
-  </div>
-</header>
+<div class="shell">
+
+<!-- サイドバーの中身は shell.js が描画する（全ページ共通） -->
+<aside id="appSidebar" class="sidebar" aria-label="ナビゲーション"></aside>
+
+<div class="shell-body">
 
 <main class="ie-main">
 
@@ -51,8 +67,12 @@
         </label>
         <p class="hint" id="maskModeHint"></p>
 
-        <label class="mask-toggle" data-only="fal wavespeed" title="このモデルは画像全体を作り直すので、返ってくる絵が数 px ずれることがあります。マスクの外側（変わらないはずの部分）を手がかりに、重ねる前に位置を合わせます">
+        <label class="mask-toggle" data-only="fal wavespeed modal" title="このモデルは画像全体を作り直すので、返ってくる絵が数 px ずれることがあります。マスクの外側（変わらないはずの部分）を手がかりに、重ねる前に位置を合わせます">
           <input type="checkbox" id="alignToggle" checked> ずれを補正してから重ねる
+        </label>
+
+        <label class="mask-toggle" title="画像全体を作り直すモデルは、露出やホワイトバランスが全体にわずかに動きます。マスクの外側（変わらないはずの部分）だけを見て色味を元画像に寄せてから重ねるので、継ぎ目が出にくくなります">
+          <input type="checkbox" id="colorToggle" checked> 色味を合わせてから重ねる
         </label>
 
         <div id="maskTools" class="ie-mask-tools" hidden>
@@ -120,15 +140,16 @@
       <p class="hint" id="rwLoraHint" hidden></p>
     </details>
 
-    <details class="field lora-accordion" data-only="fal wavespeed" open>
-      <summary class="label">LoRA</summary>
+    <details class="field lora-accordion" data-only="fal wavespeed modal" open>
+      <summary class="label" id="loraLabel">LoRA</summary>
       <div id="loraList" class="lora-list"></div>
       <div class="lora-actions">
         <button id="addLoraBtn" class="ghost-btn small" type="button">＋ LoRA を追加</button>
+        <button id="hfOpenBtn" class="ghost-btn small" type="button">Hugging Face から一括登録</button>
         <button id="civitaiBtn" class="ghost-btn small" type="button">Civitai から取り込み</button>
         <a href="library.html" class="ghost-btn small">ライブラリを管理</a>
       </div>
-      <p class="hint" id="loraHint" hidden>登録済みの LoRA がありません。生成画面の「Hugging Face から一括登録」「Civitai から取り込み」で追加できます。</p>
+      <p class="hint" id="loraHint" hidden></p>
     </details>
 
     <details class="field lora-accordion">
@@ -232,6 +253,29 @@
         </select>
       </label>
 
+      <div class="field" data-only="modal">
+        <span class="label">生成パラメータ <em>（Wan2.2 + VACE）</em></span>
+        <div class="row">
+          <label class="field num-field" title="蒸留 LoRA 前提の既定は 20">
+            <span class="label">ステップ</span>
+            <input id="wanSteps" type="number" min="1" max="60" step="1" placeholder="20">
+          </label>
+          <label class="field num-field" title="蒸留 LoRA を常時適用しているので 1 が前提です">
+            <span class="label">CFG</span>
+            <input id="wanCfg" type="number" min="0" max="10" step="0.1" placeholder="1.0">
+          </label>
+          <label class="field num-field" title="フローマッチングの shift。既定は 1.0">
+            <span class="label">shift</span>
+            <input id="wanShift" type="number" min="0" max="12" step="0.1" placeholder="1.0">
+          </label>
+        </div>
+        <label class="field num-field" title="モデルへ渡すマスクだけを太らせます。塗った縁に元画像が残るときに上げてください（合成に使うマスクは塗ったままの形です）">
+          <span class="label">マスクを広げる（px）</span>
+          <input id="wanMaskGrow" type="number" min="0" max="64" step="1" value="8">
+        </label>
+        <p class="hint">蒸留 LoRA（lightx2v cfg_step_distill / FusionX）を強度 0.4 で常時適用します。CFG 1 と 20 ステップはこの構成が前提です。</p>
+      </div>
+
       <div class="field">
         <span class="label">シード <em>（「固定」にチェック時のみ使用）</em></span>
         <div class="seed-row">
@@ -242,22 +286,25 @@
         </div>
       </div>
 
-      <label class="field" data-only="fal runware">
+      <label class="field" data-only="fal runware modal">
         <span class="label">除外したい要素（negative prompt）</span>
         <input id="negativePrompt" type="text" placeholder="空欄で未指定">
         <span class="hint" id="negativeHint" hidden></span>
       </label>
     </details>
 
-    <div class="ie-run">
-      <button id="runBtn" class="primary-btn" type="button" disabled>編集する</button>
-      <button id="cancelBtn" class="ghost-btn" type="button" hidden>キャンセル</button>
-    </div>
-    <p id="costHint" class="hint" hidden></p>
-
-    <div id="status" class="status" hidden></div>
-    <div id="error" class="error" role="alert" hidden></div>
   </section>
+
+  <!-- 実行バー。生成画面と同じく下端に常駐させ、順番待ちもここにまとめる -->
+  <div class="ie-run">
+    <div class="ie-run-inner">
+      <div id="jobList" class="job-list"></div>
+      <p id="costHint" class="hint" hidden></p>
+      <div id="status" class="status" hidden></div>
+      <div id="error" class="error" role="alert" hidden></div>
+      <button id="runBtn" class="primary-btn" type="button" disabled>編集する</button>
+    </div>
+  </div>
 
   <!-- 結果 -->
   <section id="resultPanel" class="panel ie-panel" hidden>
@@ -281,6 +328,9 @@
 
 </main>
 
+</div><!-- /.shell-body -->
+</div><!-- /.shell -->
+
 <!-- 履歴から入力画像を選ぶ -->
 <dialog id="historyDialog" class="key-dialog">
   <form method="dialog" class="key-form">
@@ -294,9 +344,6 @@
   </form>
 </dialog>
 
-<script src="lora-library.js"></script>
-<script src="runware-lora.js"></script>
-<script src="civitai-import.js"></script>
-<script src="imgedit.js"></script>
+<script src="shell.js"></script>
 </body>
 </html>

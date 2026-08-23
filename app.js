@@ -5,11 +5,14 @@
 // Modal 自前ホスト版 Krea 2（modal_comfy リポジトリ）。fal ではなく
 // Worker のプロキシ（/api/krea2/generate）経由で生成する。
 // エンドポイントは実験版（exp）・GPU スナップショット版（gpusnap）・本番・
-// チェックポイント指定版（ckpt）の 4 系統があり、標準は実験版
+// チェックポイント指定版（ckpt）・統合版（wan）の 5 系統があり、標準は実験版
 const MODAL_KREA2_EXP_ID = 'modal/krea2-turbo-exp';
 const MODAL_KREA2_GPUSNAP_ID = 'modal/krea2-turbo-gpusnap';
 const MODAL_KREA2_ID = 'modal/krea2-turbo';
 const MODAL_KREA2_CKPT_ID = 'modal/krea2-turbo-ckpt';
+// 統合版（modal_comfy の wan_vace_app）。画像編集（Wan2.2 + VACE）と同じコンテナを
+// 共有するので、どちらかが動いていればもう一方もウォームで始められる
+const MODAL_KREA2_WAN_ID = 'modal/krea2-turbo-wan';
 
 const MODELS = [
   { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA', sizeParam: 'image_size', lora: true, loraBase: 'krea2', maxLoras: 3 },
@@ -18,6 +21,9 @@ const MODELS = [
   { id: MODAL_KREA2_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 本番）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'prod' },
   // ckpt: Modal Volume 内のチェックポイント（UNet）を生成ごとに指定できる版
   { id: MODAL_KREA2_CKPT_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal チェックポイント指定版）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'ckpt', ckpt: true },
+  // wan: 画像編集（Wan2.2 + VACE）と同居する統合版。チェックポイント指定に加え、
+  // サンプラー・スケジューラ・denoise も受け付ける
+  { id: MODAL_KREA2_WAN_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・編集と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'wan', ckpt: true, sampler: true },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -45,7 +51,6 @@ const DIM_STEP = 8;
 
 const LS_HISTORY = 'fal_history'; // サーバー履歴の表示用キャッシュ
 const LS_HISTORY_MIGRATED = 'fal_history_migrated';
-const LS_THEME = 'fal_theme';
 const LS_LORAS = 'fal_lora_library';
 const LS_CKPTS = 'fal_ckpt_library'; // Modal チェックポイント指定版のライブラリ
 const LS_ARENA = 'fal_arena'; // 比較アリーナ（arena.js）のデータ。同期のためここでも扱う
@@ -65,8 +70,6 @@ const $ = (sel) => document.querySelector(sel);
 const MOBILE_MQ = window.matchMedia('(max-width: 430px)');
 
 const els = {
-  themeBtn: $('#themeBtn'),
-  statsBtn: $('#statsBtn'),
   statsDialog: $('#statsDialog'),
   statsBody: $('#statsBody'),
   modelSelect: $('#modelSelect'),
@@ -78,8 +81,6 @@ const els = {
   ckptUnregBtn: $('#ckptUnregBtn'),
   ckptHfBtn: $('#ckptHfBtn'),
   ckptCivitaiBtn: $('#ckptCivitaiBtn'),
-  hfTitle: $('#hfTitle'),
-  hfHint: $('#hfHint'),
   prompt: $('#prompt'),
   loraField: $('#loraField'),
   loraLabel: $('#loraLabel'),
@@ -87,16 +88,6 @@ const els = {
   addLoraBtn: $('#addLoraBtn'),
   loraFilterHint: $('#loraFilterHint'),
   hfOpenBtn: $('#hfOpenBtn'),
-  hfDialog: $('#hfDialog'),
-  hfRepoInput: $('#hfRepoInput'),
-  hfLoadBtn: $('#hfLoadBtn'),
-  hfFilterInput: $('#hfFilterInput'),
-  hfStatus: $('#hfStatus'),
-  hfError: $('#hfError'),
-  hfList: $('#hfList'),
-  hfAddBtn: $('#hfAddBtn'),
-  hfBaseField: $('#hfBaseField'),
-  hfBaseSelect: $('#hfBaseSelect'),
   civitaiOpenBtn: $('#civitaiOpenBtn'),
   compareToggle: $('#compareToggle'),
   compareField: $('#compareField'),
@@ -116,6 +107,10 @@ const els = {
   seedLock: $('#seedLock'),
   steps: $('#steps'),
   guidance: $('#guidance'),
+  wanSamplerRow: $('#wanSamplerRow'),
+  samplerName: $('#samplerName'),
+  scheduler: $('#scheduler'),
+  denoise: $('#denoise'),
   generateBtn: $('#generateBtn'),
   jobList: $('#jobList'),
   jobHint: $('#jobHint'),
@@ -253,26 +248,6 @@ function clearHistory() {
   fetch('/api/history', { method: 'DELETE' }).catch(() => {});
 }
 
-/* ---------- theme ---------- */
-
-const THEME_LABELS = { auto: '自動', light: 'ライト', dark: 'ダーク' };
-const THEME_ORDER = ['auto', 'light', 'dark'];
-
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  els.themeBtn.textContent = THEME_LABELS[theme];
-}
-
-function initTheme() {
-  applyTheme(localStorage.getItem(LS_THEME) || 'auto');
-  els.themeBtn.addEventListener('click', () => {
-    const current = document.documentElement.dataset.theme;
-    const next = THEME_ORDER[(THEME_ORDER.indexOf(current) + 1) % THEME_ORDER.length];
-    localStorage.setItem(LS_THEME, next);
-    applyTheme(next);
-  });
-}
-
 /* ---------- form ---------- */
 
 function initForm() {
@@ -319,6 +294,9 @@ function updateModelFields() {
   // Modal 版のデフォルト値・範囲は API の仕様（INTEGRATION.md）に合わせて案内する
   els.steps.placeholder = isModal ? '8（変更非推奨）' : 'デフォルト';
   els.guidance.placeholder = isModal ? '1（0〜1）' : 'デフォルト';
+
+  // サンプラー系は統合版だけが受け付ける
+  els.wanSamplerRow.hidden = !model.sampler;
 
   // aspect_ratio 系モデルはピクセル指定に非対応なのでカスタムを出さない
   const supportsCustom = model.sizeParam !== 'aspect_ratio';
@@ -644,7 +622,7 @@ function loadCkptLibrary() {
 
 function saveCkptLibrary(items) {
   localStorage.setItem(LS_CKPTS, JSON.stringify(items));
-  syncMarkDirty('ckpts');
+  deviceSync.markDirty('ckpts');
 }
 
 // チェックポイントは .gguf / .safetensors の区別が重要なので拡張子ごと表示する
@@ -736,8 +714,6 @@ function initCkptField() {
     populateCkptSelect('');
   });
 
-  els.ckptHfBtn.addEventListener('click', () => openHfDialog('ckpt'));
-
 }
 
 /* ---------- Hugging Face bulk import ---------- */
@@ -750,165 +726,22 @@ function initCkptField() {
 const HF_DEFAULT_REPO = 'tottie2215/temp_str';
 const HF_DEFAULT_CKPT_REPO = 'Abiray/Krea-2-Turbo-GGUF';
 
-let hfMode = 'lora'; // 'lora' | 'ckpt'
-
-function parseHfRepo(raw) {
-  const s = raw.trim().replace(/^https?:\/\/huggingface\.co\//, '');
-  const parts = s.split('/').filter(Boolean);
-  return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null;
-}
-
-function hfSetStatus(text) {
-  els.hfStatus.hidden = !text;
-  els.hfStatus.textContent = text || '';
-}
-
-function hfSetError(text) {
-  els.hfError.hidden = !text;
-  els.hfError.textContent = text || '';
-}
-
-function hfUpdateAddBtn() {
-  const n = els.hfList.querySelectorAll('input:checked:not(:disabled)').length;
-  els.hfAddBtn.disabled = n === 0;
-  els.hfAddBtn.textContent = `選択した ${n} 件を登録`;
-}
-
-async function loadHfRepo() {
-  const repo = parseHfRepo(els.hfRepoInput.value);
-  if (!repo) {
-    hfSetError('リポジトリ ID を owner/repo の形式で入力してください');
-    return;
-  }
-  hfSetError('');
-  els.hfList.innerHTML = '';
-  hfUpdateAddBtn();
-  hfSetStatus('ファイル一覧を取得中…');
-
-  let entries;
-  try {
-    // huggingface.co を直接叩くと CORS で失敗する環境があるため Worker 経由で取得する
-    const res = await fetch(`/api/hf/tree?repo=${encodeURIComponent(repo)}`);
-    if (res.status === 401 || res.status === 404) {
-      throw new Error('リポジトリが見つかりません（非公開または ID の誤り）');
-    }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    entries = await res.json();
-  } catch (err) {
-    hfSetStatus('');
-    hfSetError(`取得に失敗しました: ${err.message}`);
-    return;
-  }
-  hfSetStatus('');
-
-  const pattern = hfMode === 'ckpt' ? /\.(safetensors|gguf)$/i : /\.safetensors$/i;
-  const files = entries.filter((e) => e.type === 'file' && pattern.test(e.path));
-  if (files.length === 0) {
-    hfSetError(hfMode === 'ckpt'
-      ? 'このリポジトリに .safetensors / .gguf ファイルは見つかりませんでした'
-      : 'このリポジトリに .safetensors ファイルは見つかりませんでした');
-    return;
-  }
-
-  // リポジトリへの追加日（= 最終コミット日時）の新しい順。日付が取れなければ元の順序
-  const dateOf = (f) => Date.parse(f.lastCommit?.date ?? '') || 0;
-  files.sort((a, b) => dateOf(b) - dateOf(a));
-
-  const library = hfMode === 'ckpt' ? loadCkptLibrary() : loadLoraLibrary();
-  const registered = new Set(library.map((l) => l.path));
-  for (const f of files) {
-    const url = `https://huggingface.co/${repo}/resolve/main/${f.path}`;
-    const done = registered.has(url);
-
-    const item = document.createElement('label');
-    item.className = 'hf-item';
-    if (done) item.classList.add('registered');
-
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.value = url;
-    cb.checked = done;
-    cb.disabled = done;
-    item.appendChild(cb);
-
-    const name = document.createElement('span');
-    name.className = 'hf-name';
-    name.textContent = f.path;
-    item.appendChild(name);
-
-    const meta = document.createElement('span');
-    meta.className = 'hf-meta';
-    const date = dateOf(f)
-      ? new Date(dateOf(f)).toLocaleDateString('ja-JP', { year: 'numeric', month: 'numeric', day: 'numeric' })
-      : '';
-    const size = f.size ? `${(f.size / 1024 / 1024).toFixed(0)} MB` : '';
-    meta.textContent = done ? '登録済み' : [date, size].filter(Boolean).join(' ・ ');
-    item.appendChild(meta);
-
-    els.hfList.appendChild(item);
-  }
-  hfApplyFilter();
-  hfUpdateAddBtn();
-}
-
-// 一覧をファイル名で絞り込む（選択状態は保持したまま表示だけ切り替える）
-function hfApplyFilter() {
-  const q = els.hfFilterInput.value.trim().toLowerCase();
-  for (const item of els.hfList.querySelectorAll('.hf-item')) {
-    const name = item.querySelector('.hf-name').textContent.toLowerCase();
-    item.classList.toggle('filtered-out', q !== '' && !name.includes(q));
-  }
-}
-
-function openHfDialog(mode) {
-  hfMode = mode;
-  els.hfTitle.textContent = mode === 'ckpt'
-    ? 'Hugging Face からチェックポイントを一括登録'
-    : 'Hugging Face から LoRA を一括登録';
-  els.hfHint.innerHTML = mode === 'ckpt'
-    ? '公開リポジトリの ID（owner/repo）または URL を入力すると、含まれる .safetensors / .gguf を一覧表示します。<br>選択したものはチェックポイントライブラリに登録され、初回使用時に Modal Volume へ取り込まれます。'
-    : '公開リポジトリの ID（owner/repo）または URL を入力すると、含まれる .safetensors を一覧表示します。<br>選択したものは LoRA ライブラリに登録されます（現在の LoRA 設定行には追加されません）。';
-  hfSetError('');
-  hfSetStatus('');
-  // 開くたびに既定リポジトリ・絞り込みへ戻して自動で読み込む
-  els.hfRepoInput.value = mode === 'ckpt' ? HF_DEFAULT_CKPT_REPO : HF_DEFAULT_REPO;
-  els.hfFilterInput.value = '';
-  els.hfList.innerHTML = '';
-  // ベースモデルの指定は LoRA のときだけ。既定は今のモデルに合わせる
-  els.hfBaseField.hidden = mode === 'ckpt';
-  els.hfBaseSelect.value = loraLib.baseLabel(modelLoraBase() ?? 'krea2');
-  hfUpdateAddBtn();
-  els.hfDialog.showModal();
-  loadHfRepo();
-}
-
+// HF からの一括登録（共有コンポーネント）。LoRA とチェックポイントで同じ
+// ダイアログを使う。ベースモデルの初期選択は今のモデルに合わせる
 function initHfDialog() {
-  els.hfOpenBtn.addEventListener('click', () => openHfDialog('lora'));
-
-  els.hfLoadBtn.addEventListener('click', loadHfRepo);
-  els.hfFilterInput.addEventListener('input', hfApplyFilter);
-
-  // Enter で form が「閉じる」ボタンで submit されるのを防いで読み込みにする
-  els.hfRepoInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      loadHfRepo();
-    }
+  hfImport.init({
+    defaultRepo: HF_DEFAULT_REPO,
+    defaultCkptRepo: HF_DEFAULT_CKPT_REPO,
+    currentBase: () => modelLoraBase() ?? 'krea2',
+    registeredPaths: (kind) => (kind === 'ckpt' ? loadCkptLibrary() : loadLoraLibrary())
+      .map((item) => item.path),
+    register(kind, url, meta) {
+      if (kind === 'ckpt') registerCkpt(url);
+      else registerLora(url, meta);
+    },
   });
-
-  els.hfList.addEventListener('change', hfUpdateAddBtn);
-
-  els.hfDialog.addEventListener('close', () => {
-    if (els.hfDialog.returnValue !== 'add') return;
-    const urls = [...els.hfList.querySelectorAll('input:checked:not(:disabled)')]
-      .map((cb) => cb.value);
-    // LoRA はベースモデルを一緒に控える（あとで候補の絞り込みに使う）
-    const base = els.hfBaseSelect.value;
-    for (const url of urls) {
-      if (hfMode === 'ckpt') registerCkpt(url);
-      else registerLora(url, base ? { base } : null);
-    }
-  });
+  els.hfOpenBtn.addEventListener('click', () => hfImport.open('lora'));
+  els.ckptHfBtn.addEventListener('click', () => hfImport.open('ckpt'));
 }
 
 /* ---------- 生成時間の統計 ---------- */
@@ -948,7 +781,9 @@ function collectStatsSamples() {
   const modal = history.filter(isModalRecord).sort((a, b) => a.ts - b.ts);
   let prevEnd = 0;
   for (const r of modal) {
-    const count = Math.max(1, r.images?.length ?? 1);
+    // 画像編集のレコードは images に合成前の生画像と入力画像も並ぶので、
+    // 枚数は outputCount を優先して見る（無い生成レコードは images の数でよい）
+    const count = Math.max(1, r.outputCount ?? r.images?.length ?? 1);
     if (Array.isArray(r.procMs) && r.procMs.length > 0) {
       for (const ms of r.procMs) add(r.model, ms / 1000);
     } else {
@@ -1072,11 +907,22 @@ function renderStats() {
   }
 }
 
+function openStats() {
+  renderStats();
+  els.statsDialog.showModal();
+}
+
 function initStatsDialog() {
-  els.statsBtn.addEventListener('click', () => {
-    renderStats();
-    els.statsDialog.showModal();
-  });
+  // 統計はサイドバーの項目。この画面では直接開き、他の画面からは ./#stats で来る
+  document.getElementById('statsNav').addEventListener('click', openStats);
+  const openIfHash = () => {
+    if (location.hash !== '#stats') return;
+    // 閉じたあとに再読み込みしても開き直さないよう、ハッシュは消しておく
+    history.replaceState(null, '', location.pathname + location.search);
+    openStats();
+  };
+  openIfHash();
+  window.addEventListener('hashchange', openIfHash);
 }
 
 /* ---------- LoRA compare ---------- */
@@ -1492,6 +1338,12 @@ function buildModalInput(prompt) {
   if (seed !== undefined) input.seed = seed;
   if (els.steps.value !== '') input.steps = Number(els.steps.value);
   if (els.guidance.value !== '') input.cfg = Number(els.guidance.value);
+  // 統合版だけの項目。空欄はキーごと落として API の既定に任せる
+  if (!els.wanSamplerRow.hidden) {
+    if (els.samplerName.value.trim() !== '') input.sampler_name = els.samplerName.value.trim();
+    if (els.scheduler.value.trim() !== '') input.scheduler = els.scheduler.value.trim();
+    if (els.denoise.value !== '') input.denoise = Number(els.denoise.value);
+  }
   return input;
 }
 
@@ -1565,10 +1417,12 @@ async function generateModal(model, prompt) {
     setError('この API のガイダンス（cfg）は 0〜1 の範囲で指定してください');
     return;
   }
-  // この API の LoRA は URL ではなく名前（.safetensors 抜き）で指定する仕様のため変換する
+  // この API の LoRA は名前でも HF の resolve URL でも指定できる。名前だけに落とすと
+  // Volume と既定リポジトリ（tottie2215/temp_str）の直下にあるものしか解決できず、
+  // 別のリポジトリから取り込んだ LoRA が 404 になるので、URL はそのまま渡す
   const loras = !els.loraField.hidden ? collectLoras() : [];
   if (loras.length > 0) {
-    input.loras = loras.map((l) => ({ name: loraDisplayName(l.path), strength: l.scale }));
+    input.loras = loras.map((l) => ({ name: loraLib.modalRef(l.path), strength: l.scale }));
   }
 
   const count = Number(els.numImages.value);
@@ -2223,103 +2077,6 @@ function reuseRecord(record) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
-/* ---------- device sync ---------- */
-// LoRA ライブラリを Worker の /api/state（Durable Object）に保存して端末間で
-// 同期する。セクションごとに更新時刻を持ち、新しい方を採用する。
-// 認証は Cloudflare Access が担うため、アプリ内のトークンはない。
-//（生成履歴は /api/history でサーバー保存、fal キーは Worker の Secret なので同期対象外）
-
-// /api/state はドキュメント全体を置き換えるため、比較アリーナ（arena.html）の
-// セクションもここに含めて送る（含めないと本体の送信でアリーナのデータが消える）
-const LS_SYNC_TS = 'fal_sync_ts';
-const SYNC_SECTIONS = { loras: LS_LORAS, arena: LS_ARENA, ckpts: LS_CKPTS };
-const SYNC_PUSH_DELAY_MS = 2000;
-
-let syncPushTimer = null;
-
-function loadSyncTs() {
-  try {
-    return JSON.parse(localStorage.getItem(LS_SYNC_TS)) || {};
-  } catch {
-    return {};
-  }
-}
-
-function saveSyncTs(ts) {
-  localStorage.setItem(LS_SYNC_TS, JSON.stringify(ts));
-}
-
-// 同期対象の localStorage を書き換えたら呼ぶ。連続変更をまとめて少し後に送信する
-function syncMarkDirty(section) {
-  const ts = loadSyncTs();
-  ts[section] = Date.now();
-  saveSyncTs(ts);
-  clearTimeout(syncPushTimer);
-  syncPushTimer = setTimeout(() => {
-    syncPushTimer = null;
-    syncPull(); // 先にリモートの新しい変更を取り込んでから needPush 経由で送信される
-  }, SYNC_PUSH_DELAY_MS);
-}
-
-function syncFetch(method, body) {
-  return fetch('/api/state', {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
-    body,
-    // 離脱間際の送信でも完了できるようにする
-    keepalive: method === 'PUT',
-  });
-}
-
-// リモートの方が新しいセクションを取り込み、ローカルの方が新しければ送信する
-async function syncPull() {
-  let doc;
-  try {
-    const res = await syncFetch('GET');
-    if (!res.ok || isHtmlResponse(res)) return;
-    doc = await res.json();
-  } catch {
-    return; // オフライン・ローカル静的サーバーなどは黙って諦める
-  }
-
-  const ts = loadSyncTs();
-  let changed = false;
-  let needPush = !doc; // サーバーが空（初回）ならローカルをそのまま上げる
-  for (const [section, lsKey] of Object.entries(SYNC_SECTIONS)) {
-    const remote = doc?.[section];
-    const localTs = ts[section] || 0;
-    if (remote && remote.ts > localTs) {
-      if (remote.value) localStorage.setItem(lsKey, remote.value);
-      else localStorage.removeItem(lsKey);
-      ts[section] = remote.ts;
-      changed = true;
-    } else if (localTs > (remote?.ts ?? 0)) {
-      needPush = true;
-    }
-  }
-  saveSyncTs(ts);
-
-  if (changed) {
-    loraLib.migrate(); // 同期で届いた古い形式のデータもここで揃える
-    refreshLoraSelects();
-    populateCkptSelect(els.ckptSelect.value);
-  }
-  if (needPush) syncPush();
-}
-
-async function syncPush() {
-  const ts = loadSyncTs();
-  const doc = {};
-  for (const [section, lsKey] of Object.entries(SYNC_SECTIONS)) {
-    doc[section] = { value: localStorage.getItem(lsKey) ?? '', ts: ts[section] || 0 };
-  }
-  try {
-    await syncFetch('PUT', JSON.stringify(doc));
-  } catch {
-    // 失敗しても次の変更・次回起動時に再送される
-  }
-}
-
 /* ---------- form persistence ---------- */
 
 // LoRA リストの全行を（scale 0 や未登録も含めて）そのまま書き出す
@@ -2348,6 +2105,9 @@ function saveFormState() {
     numImages: els.numImages.value,
     seed: els.seed.value,
     seedLock: els.seedLock.checked,
+    samplerName: els.samplerName.value,
+    scheduler: els.scheduler.value,
+    denoise: els.denoise.value,
     steps: els.steps.value,
     guidance: els.guidance.value,
     compare: compareMode,
@@ -2382,6 +2142,9 @@ function restoreFormState() {
   els.seedLock.checked = !!s.seedLock;
   els.steps.value = s.steps || '';
   els.guidance.value = s.guidance || '';
+  els.samplerName.value = s.samplerName || '';
+  els.scheduler.value = s.scheduler || '';
+  els.denoise.value = s.denoise || '';
   updateCustomSize();
 
   els.loraList.innerHTML = '';
@@ -2403,11 +2166,18 @@ function scheduleSaveForm() {
 
 /* ---------- init ---------- */
 
+// 端末間同期（共有モジュール）。他端末の変更が届いたら候補を作り直す
+deviceSync.init({
+  onRemote() {
+    refreshLoraSelects();
+    populateCkptSelect(els.ckptSelect.value);
+  },
+});
+
 // LoRA ライブラリ（共有モジュール）。保存のたびに端末間同期へ知らせる
-loraLib.onChange = () => syncMarkDirty('loras');
+loraLib.onChange = () => deviceSync.markDirty('loras');
 loraLib.migrate();
 
-initTheme();
 initHfDialog();
 // Civitai 取り込み（共有モジュール）。LoRA とチェックポイントで同じダイアログを使う
 civitaiImport.init({
@@ -2455,7 +2225,7 @@ if (MOBILE_MQ.matches) els.loraField.open = false;
 }
 
 // 起動時に他端末の変更（LoRA ライブラリ）を取り込む
-syncPull();
+deviceSync.pull();
 
 // フォームの変更を localStorage に保存（入力のたび・離脱時）
 document.addEventListener('input', scheduleSaveForm);
@@ -2463,17 +2233,13 @@ document.addEventListener('change', scheduleSaveForm);
 window.addEventListener('pagehide', () => {
   saveFormState();
   // 送信待ちの同期があれば離脱前に送っておく
-  if (syncPushTimer) {
-    clearTimeout(syncPushTimer);
-    syncPushTimer = null;
-    syncPush();
-  }
+  deviceSync.flush(); // 送信待ちの同期があれば離脱前に送っておく
 });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') saveFormState();
   // タブに戻ってきたら他端末の変更（LoRA ライブラリ・履歴）を取り込む
   if (document.visibilityState === 'visible') {
-    syncPull();
+    deviceSync.pull();
     fetchHistoryFromServer();
   }
 });

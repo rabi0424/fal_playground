@@ -8,7 +8,7 @@
  * ライブラリ管理・比較アリーナのすべてがここを通す。
  *
  * レコードは { path, name } だけの古い形でも動く。path（ダウンロード URL）は
- * この LoRA の識別子で、生成時に Modal へ渡す名前も path から作るため書き換えない。
+ * この LoRA の識別子で、生成時に Modal へ渡す指定も path から作るため書き換えない。
  * label はあくまで表示用。
  *
  * 保存のたびに端末間同期へ知らせる必要があるが、同期の実装はページごとに持って
@@ -45,6 +45,23 @@ function fileName(path) {
   }
 }
 
+// Hugging Face の resolve / blob URL（modal_comfy がそのまま受け付ける形）。
+// 判定は modal_comfy 側の HF_URL_RE に合わせてある
+const HF_RESOLVE_RE = /^https:\/\/huggingface\.co\/[\w.-]+\/[\w.-]+\/(?:resolve|blob)\/[^/]+\/.+$/i;
+
+// Modal 系 API（modal_comfy）へ渡す LoRA の識別子。
+//
+// あちらはファイル名でも HF の resolve URL でも受け取るが、ファイル名だけで渡すと
+// Volume にあるものか、既定リポジトリ（tottie2215/temp_str）の直下にあるものしか
+// 解決できない。別のリポジトリから取り込んだ LoRA や、サブフォルダに置かれた
+// ファイルは「lora '...' not found in volume」の 404 になる。
+// URL のまま渡せば Modal 側が初回リクエスト時に取り込めるので、URL を持つものは
+// URL で渡す（「名前を直接入力…」で打たれた素の名前はそのまま名前で渡す）
+function modalRef(path) {
+  const s = String(path ?? '').trim();
+  return HF_RESOLVE_RE.test(s) ? s : fileName(s);
+}
+
 function entry(path) {
   return load().find((item) => item.path === path) ?? null;
 }
@@ -68,17 +85,19 @@ function triggerWords(path) {
   return (entry(path)?.trigger || '').split(',').map((w) => w.trim()).filter(Boolean);
 }
 
-// Civitai のベースモデル表記はゆれるので（"Qwen"／"Qwen-Image"／"Krea 2" など）、
-// 使う側が判定しやすい大まかな種類に寄せる
+// Civitai のベースモデル表記はゆれるので（"Qwen"／"Qwen-Image"／"Krea 2"／
+// "Wan Video 14B t2v" など）、使う側が判定しやすい大まかな種類に寄せる
 function baseKind(base) {
   const s = String(base ?? '').toLowerCase();
   if (s === '') return null;
+  // "qwen" に "wan" は含まれない（wen）ので、この順で取り違えは起きない
+  if (s.includes('wan')) return 'wan';
   if (s.includes('qwen')) return 'qwen';
   if (s.includes('krea')) return 'krea2';
   return 'other';
 }
 
-const BASE_LABELS = { qwen: 'Qwen', krea2: 'Krea 2', other: 'その他' };
+const BASE_LABELS = { qwen: 'Qwen', krea2: 'Krea 2', wan: 'Wan', other: 'その他' };
 
 // ★ を先頭に、あとは表示名順（数字は数値として比較する）
 function sorted(items = load()) {
@@ -156,6 +175,7 @@ window.loraLib = {
   save,
   entry,
   fileName,
+  modalRef,
   label,
   labelOf,
   defaultScale,

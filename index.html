@@ -5,19 +5,31 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>fal playground</title>
 <link rel="stylesheet" href="style.css">
+<script>
+/* 保存済みのテーマとサイドバーの開閉は、描画前に反映する。
+   後から JS で当てると、明→暗の切り替わりや幅の跳ねが一瞬見えてしまう */
+(function () {
+  try {
+    var d = document.documentElement, s = localStorage;
+    d.dataset.theme = s.getItem('fal_theme') || 'auto';
+    d.dataset.sidebar = s.getItem('fal_sidebar') || 'open';
+  } catch (e) { /* ストレージが使えない環境では既定のまま */ }
+})();
+</script>
+<script src="lora-library.js" defer></script>
+<script src="device-sync.js" defer></script>
+<script src="hf-import.js" defer></script>
+<script src="civitai-import.js" defer></script>
+<script src="app.js" defer></script>
 </head>
 <body>
 
-<header class="topbar">
-  <div class="brand">fal <span>playground</span></div>
-  <div class="topbar-actions">
-    <a href="imgedit.html" class="ghost-btn" title="画像 1 枚を指示文で編集する（Qwen Image Edit + LoRA / FLUX.1 Fill の修復）">画像編集</a>
-    <a href="edit.html" class="ghost-btn" title="画像の一部を選択して Poe の画像編集ボットで編集し、元画像にはめ込む">部分AI編集</a>
-    <a href="arena.html" class="ghost-btn" title="LoRA チェックポイントの匿名比較と Elo ランキング">比較アリーナ</a>
-    <button id="statsBtn" class="ghost-btn" title="アクセスポイント別の生成所要時間の統計">統計</button>
-    <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
-  </div>
-</header>
+<div class="shell">
+
+<!-- サイドバーの中身は shell.js が描画する（全ページ共通） -->
+<aside id="appSidebar" class="sidebar" aria-label="ナビゲーション"></aside>
+
+<div class="shell-body">
 
 <main class="layout">
   <aside class="panel controls">
@@ -127,6 +139,22 @@
             <input id="guidance" type="number" min="0" max="30" step="0.5" placeholder="デフォルト">
           </label>
         </div>
+
+        <!-- 統合版（wan_vace_app）の generate だけが受け付ける項目。空欄は送らない -->
+        <div class="row" id="wanSamplerRow" hidden>
+          <label class="field">
+            <span class="label">サンプラー</span>
+            <input id="samplerName" type="text" placeholder="er_sde" spellcheck="false" autocomplete="off">
+          </label>
+          <label class="field">
+            <span class="label">スケジューラ</span>
+            <input id="scheduler" type="text" placeholder="simple" spellcheck="false" autocomplete="off">
+          </label>
+          <label class="field num-field">
+            <span class="label">denoise</span>
+            <input id="denoise" type="number" min="0" max="1" step="0.05" placeholder="1.0">
+          </label>
+        </div>
       </div>
     </details>
 
@@ -156,35 +184,8 @@
   </section>
 </main>
 
-<dialog id="hfDialog" class="key-dialog hf-dialog">
-  <form method="dialog" class="key-form">
-    <h2 id="hfTitle">Hugging Face から LoRA を一括登録</h2>
-    <p class="hint" id="hfHint">
-      公開リポジトリの ID（owner/repo）または URL を入力すると、含まれる .safetensors を一覧表示します。<br>
-      選択したものは LoRA ライブラリに登録されます（現在の LoRA 設定行には追加されません）。
-    </p>
-    <div class="hf-search">
-      <input id="hfRepoInput" type="text" placeholder="owner/repo" spellcheck="false" autocomplete="off">
-      <button id="hfLoadBtn" class="ghost-btn" type="button">読み込み</button>
-    </div>
-    <input id="hfFilterInput" class="hf-filter" type="search" placeholder="ファイル名で絞り込み…" spellcheck="false" autocomplete="off">
-    <label class="field" id="hfBaseField">
-      <span class="label">ベースモデル <em>（どのモデル用の LoRA か。候補の絞り込みに使います）</em></span>
-      <select id="hfBaseSelect">
-        <option value="Krea 2" selected>Krea 2</option>
-        <option value="Qwen">Qwen（画像編集）</option>
-        <option value="">指定しない</option>
-      </select>
-    </label>
-    <div id="hfStatus" class="status" hidden></div>
-    <div id="hfError" class="error" hidden></div>
-    <div id="hfList" class="hf-list"></div>
-    <div class="key-actions">
-      <button value="cancel" class="ghost-btn" formnovalidate>閉じる</button>
-      <button value="add" id="hfAddBtn" class="primary-btn" disabled>選択した 0 件を登録</button>
-    </div>
-  </form>
-</dialog>
+</div><!-- /.shell-body -->
+</div><!-- /.shell -->
 
 <dialog id="statsDialog" class="key-dialog stats-dialog">
   <form method="dialog" class="key-form">
@@ -208,8 +209,6 @@
   <div id="lightboxCounter" class="lightbox-counter mobile-only" hidden></div>
 </div>
 
-<script src="lora-library.js"></script>
-<script src="civitai-import.js"></script>
-<script src="app.js"></script>
+<script src="shell.js"></script>
 </body>
 </html>

@@ -5,16 +5,30 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>LoRA ライブラリ - fal playground</title>
 <link rel="stylesheet" href="style.css">
+<script>
+/* 保存済みのテーマとサイドバーの開閉は、描画前に反映する。
+   後から JS で当てると、明→暗の切り替わりや幅の跳ねが一瞬見えてしまう */
+(function () {
+  try {
+    var d = document.documentElement, s = localStorage;
+    d.dataset.theme = s.getItem('fal_theme') || 'auto';
+    d.dataset.sidebar = s.getItem('fal_sidebar') || 'open';
+  } catch (e) { /* ストレージが使えない環境では既定のまま */ }
+})();
+</script>
+<script src="lora-library.js" defer></script>
+<script src="device-sync.js" defer></script>
+<script src="civitai-import.js" defer></script>
+<script src="library.js" defer></script>
 </head>
 <body>
 
-<header class="topbar">
-  <div class="brand"><a href="./">fal <span>playground</span></a><span class="arena-tag">/ LoRA ライブラリ</span></div>
-  <div class="topbar-actions">
-    <a href="./" class="ghost-btn">← 生成画面へ</a>
-    <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
-  </div>
-</header>
+<div class="shell">
+
+<!-- サイドバーの中身は shell.js が描画する（全ページ共通） -->
+<aside id="appSidebar" class="sidebar" aria-label="ナビゲーション"></aside>
+
+<div class="shell-body">
 
 <main class="lib-main">
 
@@ -45,6 +59,9 @@
 
 </main>
 
+</div><!-- /.shell-body -->
+</div><!-- /.shell -->
+
 <!-- 取得結果の反映確認 -->
 <dialog id="metaDialog" class="key-dialog">
   <form method="dialog" class="key-form">
@@ -59,8 +76,6 @@
   </form>
 </dialog>
 
-<script src="lora-library.js"></script>
-<script src="civitai-import.js"></script>
-<script src="library.js"></script>
+<script src="shell.js"></script>
 </body>
 </html>

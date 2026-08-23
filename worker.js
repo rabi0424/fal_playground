@@ -566,7 +566,9 @@ export class SyncState extends DurableObject {
   /* ---- Modal 生成ジョブ ---- */
 
   // ジョブを登録して alarm を仕込む。同じ id の再送は無視する（多重生成防止）
-  async startKrea2Job(id, payload, endpoint) {
+  // Modal（modal_comfy）への生成・編集ジョブ。生成も編集も 303 で結果ポーリングに
+  // 変わる点・PNG バイナリが返る点が同じなので、同じ機構で扱う
+  async startKrea2Job(id, payload, endpoint, kind = 'generate', endpointKey = null) {
     const key = `krea2:job:${id}`;
     if (await this.ctx.storage.get(key)) return;
 
@@ -580,6 +582,8 @@ export class SyncState extends DurableObject {
       status: 'pending',
       payload,
       endpoint,
+      kind,        // 'generate' | 'edit'
+      endpointKey, // 'exp' | 'prod' | 'ckpt' | 'wan' | 'wan-edit'（画像に焼き込む記録用）
       pollUrl: null,
       attempts: 0,
       created: Date.now(),
@@ -594,6 +598,9 @@ export class SyncState extends DurableObject {
       status: job.status,
       url: job.url ?? null,
       seed: job.seed ?? null,
+      // 編集では入力サイズが 32 の倍数へ丸められる。合成側が元画像に戻すために要る
+      width: job.width ?? null,
+      height: job.height ?? null,
       elapsedMs: job.elapsedMs ?? null, // 実処理時間（DO のキュー待ちを含まない）
       error: job.error ?? null,
     };
@@ -823,21 +830,25 @@ export class SyncState extends DurableObject {
       }
       if (!res.ok) {
         job.status = 'error';
-        job.error = `Krea2 API error ${res.status}: ${(await res.text()).slice(0, 300)}`;
+        job.error = `Modal API error ${res.status}: ${(await res.text()).slice(0, 300)}`;
         await this.ctx.storage.put(key, job);
         return;
       }
 
       const seedHeader = Number(res.headers.get('X-Seed'));
       const seed = Number.isFinite(seedHeader) ? seedHeader : null;
-      // 生成設定を画像に焼き込んでから保存する
+      // 実際に生成された解像度（編集では 32 の倍数に丸められる）
+      const width = Number(res.headers.get('X-Width'));
+      const height = Number(res.headers.get('X-Height'));
+      // 生成設定を画像に焼き込んでから保存する。画像本体（base64）は焼かない
+      const { image: _img, mask: _mask, hf_token: _tok, ...params } = job.payload;
       const meta = {
         app: 'fal playground',
-        source: 'krea2-modal',
-        endpoint: job.endpoint.includes('-exp-') ? 'exp'
+        source: job.kind === 'edit' ? 'wan-vace-edit' : 'krea2-modal',
+        endpoint: job.endpointKey ?? (job.endpoint.includes('-exp-') ? 'exp'
           : job.endpoint.includes('-gpusnap-') ? 'gpusnap'
-            : job.endpoint.includes('-ckpt-') ? 'ckpt' : 'prod',
-        ...job.payload,
+            : job.endpoint.includes('-ckpt-') ? 'ckpt' : 'prod'),
+        ...params,
         seed: seed ?? job.payload.seed ?? null,
         created: new Date(job.created).toISOString(),
       };
@@ -849,6 +860,8 @@ export class SyncState extends DurableObject {
       job.status = 'done';
       job.url = `/api/image/${imageId}`;
       job.seed = seed;
+      if (Number.isFinite(width) && width > 0) job.width = width;
+      if (Number.isFinite(height) && height > 0) job.height = height;
       job.elapsedMs = job.submittedAt ? Date.now() - job.submittedAt : null;
       await this.ctx.storage.put(key, job);
     } catch {
@@ -2185,7 +2198,8 @@ export default {
       }
       delete payload.jobId;
 
-      // エンドポイントはクライアントの endpoint フィールド（"exp" / "gpusnap" / "prod" / "ckpt"）で切り替える。
+      // エンドポイントはクライアントの endpoint フィールド
+      // （"exp" / "gpusnap" / "prod" / "ckpt" / "wan"）で切り替える。
       // URL 自体はクライアントから受け取らず、ここの許可リストでのみ解決する。既定は実験版
       const endpoints = {
         exp: env.KREA2_ENDPOINT_EXP
@@ -2196,11 +2210,52 @@ export default {
           || 'https://rabitteru--krea2-comfy-api-comfyapi-generate.modal.run',
         ckpt: env.KREA2_ENDPOINT_CKPT
           || 'https://rabitteru--krea2-comfy-api-ckpt-comfyapi-generate.modal.run',
+        // 統合版（wan_vace_app）。編集エンドポイントとコンテナを共有するので、
+        // どちらかが動いていればもう一方もウォームになる
+        wan: env.WAN_ENDPOINT_GENERATE
+          || 'https://rabitteru--wan-vace-api-comfyapi-generate.modal.run',
       };
-      const endpoint = endpoints[payload.endpoint] ?? endpoints.exp;
+      const endpointKey = endpoints[payload.endpoint] ? payload.endpoint : 'exp';
       delete payload.endpoint; // Modal API には存在しないフィールドなので転送しない
 
-      await stub.startKrea2Job(jobId, payload, endpoint);
+      await stub.startKrea2Job(jobId, payload, endpoints[endpointKey], 'generate', endpointKey);
+      return Response.json({ queued: true, jobId });
+    }
+
+    // Wan2.2 + VACE のマスク編集（modal_comfy の /edit）。生成と同じくジョブにして
+    // すぐ応答する。編集は 900 秒級で 150 秒を超えると 303 が返るため、長い HTTP
+    // 接続を保持する作りにはできない（INTEGRATION.md 参照）
+    if (url.pathname === '/api/modal/edit') {
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+      if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });
+      if (!env.MODAL_PROXY_KEY || !env.MODAL_PROXY_SECRET) {
+        return new Response('MODAL_PROXY_KEY / MODAL_PROXY_SECRET is not configured', { status: 500 });
+      }
+
+      let payload;
+      try {
+        payload = await request.json();
+      } catch {
+        return new Response('Invalid JSON', { status: 400 });
+      }
+      if (typeof payload?.prompt !== 'string' || payload.prompt.trim() === '') {
+        return new Response('prompt is required', { status: 422 });
+      }
+      // 画像とマスクは必須。base64（data URL 接頭辞付きも可）で受ける
+      for (const field of ['image', 'mask']) {
+        if (typeof payload?.[field] !== 'string' || payload[field] === '') {
+          return new Response(`${field} is required`, { status: 422 });
+        }
+      }
+      const jobId = payload.jobId;
+      if (typeof jobId !== 'string' || !/^[0-9a-f]{32}$/.test(jobId)) {
+        return new Response('jobId is required', { status: 422 });
+      }
+      delete payload.jobId;
+
+      const endpoint = env.WAN_ENDPOINT_EDIT
+        || 'https://rabitteru--wan-vace-api-comfyapi-edit.modal.run';
+      await stub.startKrea2Job(jobId, payload, endpoint, 'edit', 'wan-edit');
       return Response.json({ queued: true, jobId });
     }
 

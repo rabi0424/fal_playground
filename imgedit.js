@@ -6,12 +6,13 @@
  * 入力画像 1 枚 + 指示文で画像を編集する別画面。既存の「部分AI編集」
  * （Poe・範囲を切り抜いてはめ込む）とは別枠で、画像全体をモデルに渡す。
  *
- * - プロバイダは 3 つ。Qwen Image Edit 2511 を fal / WaveSpeed から、
- *   FLUX.1 Fill [dev] OneReward（塗った範囲を描き直す修復モデル）を Runware から
- *   選べる。API の形がそれぞれ違うので PROVIDERS のアダプタで吸収する
+ * - プロバイダは 4 つ。Qwen Image Edit 2511 を fal / WaveSpeed から、
+ *   FLUX.1 Fill [dev] OneReward（塗った範囲を描き直す修復モデル）を Runware から、
+ *   Wan2.2 + VACE のマスク編集を Modal 自前ホスト（modal_comfy）から選べる。
+ *   API の形がそれぞれ違うので PROVIDERS のアダプタで吸収する
  *   （送信内容の組み立て・投入・ポーリング・結果の解釈・費用の目安）
  * - いずれも Worker のプロキシ経由（/api/fal/proxy・/api/wavespeed/proxy・
- *   /api/runware/proxy）で呼ぶ。API キーはブラウザに渡さない
+ *   /api/runware/proxy・/api/modal/edit）で呼ぶ。API キーはブラウザに渡さない
  * - 入力画像（とマスク）は data URI として渡す。このアプリは Cloudflare Access の
  *   内側に置く前提で、/api/image/... をプロバイダ側から取りに行けるとは限らないため
  * - 同じ画像は R2 にも保存し（/api/upload）、履歴レコードと再開用に使う。
@@ -22,7 +23,10 @@
 
 /* ---------- constants ---------- */
 
-const MAX_LORAS = 3; // どちらのプロバイダも最大 3 個
+const MAX_LORAS = 3; // 既定。プロバイダ側で maxLoras を持てば上書きする
+// LoRA を名前で指定するプロバイダ（Modal）向けの「名前を直接入力…」の選択肢。
+// ライブラリのベースモデル表記に頼らずに指定できる逃げ道
+const LORA_NAME_OPTION = '__name__';
 const MAX_INPUT_PX = 2048; // リサイズしない設定のときの上限（長辺）
 const INPUT_QUALITY = 0.92; // 送信用 JPEG の品質
 // 合成の土台に使う元画像の上限。元解像度を保つのが目的なので大きめだが、
@@ -31,7 +35,6 @@ const MAX_ORIGINAL_PX = 4096;
 const MAX_ORIGINAL_AREA = 16 * 1024 * 1024;
 const ORIGINAL_QUALITY = 0.95;
 
-const LS_THEME = 'fal_theme';
 const HF_DEFAULT_REPO = 'tottie2215/temp_str'; // 取り込み先の既定（app.js と同じ）
 const LS_JOB = 'fal_imgedit_job';
 const LS_FORM = 'fal_imgedit_form';
@@ -54,6 +57,17 @@ const SIZE_PRESETS = {
     { value: 'ar_3_4', label: '3:4（1140×1472）', width: 1140, height: 1472 },
     { value: 'ar_3_2', label: '3:2（1584×1056）', width: 1584, height: 1056 },
     { value: 'ar_2_3', label: '2:3（1056×1584）', width: 1056, height: 1584 },
+  ],
+  // wan: Wan は 32 の倍数の解像度しか扱えない。丸めが起きないよう最初から
+  // 32 の倍数で送る（返る X-Width / X-Height と食い違わせない）
+  wan: [
+    { value: 'ar_1_1', label: '1:1（1024×1024）', width: 1024, height: 1024 },
+    { value: 'ar_16_9', label: '16:9（1344×768）', width: 1344, height: 768 },
+    { value: 'ar_9_16', label: '9:16（768×1344）', width: 768, height: 1344 },
+    { value: 'ar_4_3', label: '4:3（1152×864）', width: 1152, height: 864 },
+    { value: 'ar_3_4', label: '3:4（864×1152）', width: 864, height: 1152 },
+    { value: 'ar_3_2', label: '3:2（1248×832）', width: 1248, height: 832 },
+    { value: 'ar_2_3', label: '2:3（832×1248）', width: 832, height: 1248 },
   ],
   flux: [
     { value: 'ar_1_1', label: '1:1（1024×1024）', width: 1024, height: 1024 },
@@ -107,6 +121,22 @@ const RUNWARE_RECOMMENDED = {
   negativePrompt: 'low quality, blurry, distorted, deformed, artifacts',
 };
 
+// Wan2.2 + VACE（Modal 自前ホスト）。元のワークフローが常時適用していた
+// 蒸留 LoRA 2 本を、毎回そのまま送る。
+//
+// この 2 本が「CFG 1 / 20 ステップ」という設定を成立させているので、外すなら
+// CFG とステップも変えないと出力が破綻する（INTEGRATION.md）。値を毎回同じに
+// しておけば ComfyUI のキャッシュが効き、モデルの再ロード（数十秒）も起きない
+const WAN_EDIT_LORAS = [
+  { name: 'Wan21_T2V_14B_lightx2v_cfg_step_distill_lora_rank32', strength: 0.4 },
+  { name: 'Wan2.1_T2V_14B_FusionX_LoRA', strength: 0.4 },
+];
+
+// Wan は 32 の倍数の解像度しか扱えない。1 辺 4096 まで
+const WAN_DIM_STEP = 32;
+const WAN_DIM_MIN = 256;
+const WAN_DIM_MAX = 4096;
+
 // スケジューラ。既定（自動）のままが基本なので、選択肢として出すだけ
 const RUNWARE_SCHEDULERS = ['Default', 'FlowMatchEulerDiscreteScheduler', 'Euler', 'Euler a',
   'Euler Beta', 'Euler Karras', 'Euler Exponential', 'DDIM', 'DEISMultistepScheduler',
@@ -122,7 +152,6 @@ const ACCESS_EXPIRED_MSG = 'セッションが切れました。ページを再�
 const $ = (sel) => document.querySelector(sel);
 
 const els = {
-  themeBtn: $('#themeBtn'),
   uploadArea: $('#uploadArea'),
   fileInput: $('#fileInput'),
   pickFileBtn: $('#pickFileBtn'),
@@ -135,6 +164,7 @@ const els = {
   maskToggle: $('#maskToggle'),
   maskModeHint: $('#maskModeHint'),
   alignToggle: $('#alignToggle'),
+  colorToggle: $('#colorToggle'),
   maskTools: $('#maskTools'),
   maskUndoBtn: $('#maskUndoBtn'),
   maskAllBtn: $('#maskAllBtn'),
@@ -150,6 +180,8 @@ const els = {
   addLoraBtn: $('#addLoraBtn'),
   civitaiBtn: $('#civitaiBtn'),
   loraHint: $('#loraHint'),
+  loraLabel: $('#loraLabel'),
+  hfOpenBtn: $('#hfOpenBtn'),
   sizeSelect: $('#sizeSelect'),
   sizeHint: $('#sizeHint'),
   numImages: $('#numImages'),
@@ -157,12 +189,16 @@ const els = {
   guidance: $('#guidance'),
   acceleration: $('#acceleration'),
   outputFormat: $('#outputFormat'),
+  wanSteps: $('#wanSteps'),
+  wanCfg: $('#wanCfg'),
+  wanShift: $('#wanShift'),
+  wanMaskGrow: $('#wanMaskGrow'),
   seed: $('#seed'),
   seedLock: $('#seedLock'),
   negativePrompt: $('#negativePrompt'),
   runBtn: $('#runBtn'),
   costHint: $('#costHint'),
-  cancelBtn: $('#cancelBtn'),
+  jobList: $('#jobList'),
   status: $('#status'),
   error: $('#error'),
   resultPanel: $('#resultPanel'),
@@ -214,25 +250,6 @@ function makeId() {
   return crypto.randomUUID().replace(/-/g, '');
 }
 
-/* ---------- theme（app.js と同じ） ---------- */
-
-const THEME_LABELS = { auto: '自動', light: 'ライト', dark: 'ダーク' };
-const THEME_ORDER = ['auto', 'light', 'dark'];
-
-function initTheme() {
-  const apply = (theme) => {
-    document.documentElement.dataset.theme = theme;
-    els.themeBtn.textContent = THEME_LABELS[theme];
-  };
-  apply(localStorage.getItem(LS_THEME) || 'auto');
-  els.themeBtn.addEventListener('click', () => {
-    const current = document.documentElement.dataset.theme;
-    const next = THEME_ORDER[(THEME_ORDER.indexOf(current) + 1) % THEME_ORDER.length];
-    localStorage.setItem(LS_THEME, next);
-    apply(next);
-  });
-}
-
 /* ---------- LoRA ライブラリ（読み取りのみ・app.js と同じ形式） ---------- */
 
 const loraLabel = (path) => loraLib.label(path);
@@ -241,18 +258,80 @@ const loraTriggerWords = (path) => loraLib.triggerWords(path);
 
 // LoRA を使えるのは Qwen Image Edit の 2 プロバイダだけなので、候補も Qwen 用に絞る
 // （Krea 2 用を混ぜても効かないか、出力が壊れる）。Runware では LoRA 欄ごと隠す
-const LORA_BASE = 'qwen';
+// 候補に出す LoRA のベースモデル。プロバイダごとに違う（Qwen 用の LoRA は
+// Wan では使えない、という関係なので混ぜない）
+function loraBase() {
+  return provider().loraBase ?? 'qwen';
+}
+
+function maxLoras() {
+  return provider().maxLoras ?? MAX_LORAS;
+}
 
 function sortedLoraLibrary() {
-  return loraLib.forBase(LORA_BASE);
+  return loraLib.forBase(loraBase());
 }
 
 /* ---------- LoRA 行 ---------- */
 
+// 行のプルダウンを今のライブラリで組み立てる。選択中のものが候補から外れても、
+// 選択そのものは失わせない（黙って別の LoRA に変わるほうが危ない）
+function populateLoraSelect(select, selected = '') {
+  const library = sortedLoraLibrary();
+  const byName = !!provider().loraByName;
+  select.innerHTML = '';
+  for (const item of library) {
+    const opt = document.createElement('option');
+    opt.value = item.path;
+    opt.textContent = (item.fav ? '★ ' : '') + loraLabel(item.path);
+    opt.title = item.path;
+    select.appendChild(opt);
+  }
+  if (byName) {
+    const opt = document.createElement('option');
+    opt.value = LORA_NAME_OPTION;
+    opt.textContent = '名前を直接入力…';
+    select.appendChild(opt);
+  }
+  if (selected && library.some((l) => l.path === selected)) {
+    select.value = selected;
+    return;
+  }
+  // 候補に無い指定は、名前で打ったものとして扱う（名前で指定できるプロバイダのみ）
+  if (selected && byName) {
+    select.value = LORA_NAME_OPTION;
+    return;
+  }
+  // URL 指定のプロバイダで候補から外れたものは、選択を残すために候補へ足す
+  if (selected) {
+    const opt = document.createElement('option');
+    opt.value = selected;
+    opt.textContent = loraLabel(selected);
+    select.insertBefore(opt, select.firstChild);
+    select.value = selected;
+    return;
+  }
+  select.value = library[0]?.path ?? (byName ? LORA_NAME_OPTION : '');
+}
+
+// ライブラリが変わったら、既にある行の候補も入れ替える。行を作ったときの一覧を
+// 持ち続けると、あとから足した LoRA が新しい行にしか出てこない
+function refreshLoraRows() {
+  for (const row of els.loraList.querySelectorAll('.lora-row')) {
+    const select = row.querySelector('.lora-select');
+    populateLoraSelect(select, select.value);
+    row.querySelector('.lora-path').hidden = select.value !== LORA_NAME_OPTION;
+    renderRowTrigger(row);
+  }
+  syncAddLoraBtn();
+}
+
 function addLoraRow(path = '', scale) {
   const library = sortedLoraLibrary();
-  if (library.length === 0) return;
-  if (els.loraList.querySelectorAll('.lora-row').length >= MAX_LORAS) return;
+  // 名前で指定できるプロバイダなら、ライブラリが空でも行は作れる
+  const byName = !!provider().loraByName;
+  if (library.length === 0 && !byName) return;
+  if (els.loraList.querySelectorAll('.lora-row').length >= maxLoras()) return;
 
   const row = document.createElement('div');
   row.className = 'lora-row';
@@ -262,14 +341,7 @@ function addLoraRow(path = '', scale) {
 
   const select = document.createElement('select');
   select.className = 'lora-select';
-  for (const item of library) {
-    const opt = document.createElement('option');
-    opt.value = item.path;
-    opt.textContent = (item.fav ? '★ ' : '') + loraLabel(item.path);
-    opt.title = item.path;
-    select.appendChild(opt);
-  }
-  select.value = path && library.some((l) => l.path === path) ? path : library[0].path;
+  populateLoraSelect(select, path);
   head.appendChild(select);
 
   const delBtn = document.createElement('button');
@@ -283,6 +355,19 @@ function addLoraRow(path = '', scale) {
   });
   head.appendChild(delBtn);
   row.appendChild(head);
+
+  // ライブラリに無いものは名前で直接指定する（Modal Volume 内のファイル名。
+  // 無ければ Modal が初回リクエスト時に取り込む）
+  const nameInput = document.createElement('input');
+  nameInput.className = 'lora-path';
+  nameInput.type = 'text';
+  nameInput.placeholder = 'LoRA のファイル名（.safetensors は省略可）';
+  nameInput.spellcheck = false;
+  nameInput.autocomplete = 'off';
+  nameInput.value = select.value === LORA_NAME_OPTION ? path : '';
+  nameInput.hidden = select.value !== LORA_NAME_OPTION;
+  nameInput.addEventListener('input', saveForm);
+  row.appendChild(nameInput);
 
   const trigger = document.createElement('div');
   trigger.className = 'lora-trigger';
@@ -303,7 +388,8 @@ function addLoraRow(path = '', scale) {
   num.min = '0';
   num.max = '2';
   num.step = '0.05';
-  const initialScale = scale ?? loraDefaultScale(select.value);
+  // 名前で指定した行はライブラリを引けないので、既定 scale は 1
+  const initialScale = scale ?? (select.value === LORA_NAME_OPTION ? 1 : loraDefaultScale(select.value));
   slider.value = String(initialScale);
   num.value = String(initialScale);
   slider.addEventListener('input', () => { num.value = slider.value; row.dataset.scaleTouched = '1'; saveForm(); });
@@ -313,7 +399,9 @@ function addLoraRow(path = '', scale) {
 
   // 選択を変えたら、手で動かす前ならライブラリの既定 scale に合わせる
   select.addEventListener('change', () => {
-    if (!row.dataset.scaleTouched) {
+    nameInput.hidden = select.value !== LORA_NAME_OPTION;
+    if (select.value === LORA_NAME_OPTION) nameInput.focus();
+    if (!row.dataset.scaleTouched && select.value !== LORA_NAME_OPTION) {
       const def = loraDefaultScale(select.value);
       slider.value = String(def);
       num.value = String(def);
@@ -364,23 +452,43 @@ function insertTriggerWords(words) {
 function syncAddLoraBtn() {
   const count = els.loraList.querySelectorAll('.lora-row').length;
   const usable = sortedLoraLibrary().length;
-  els.addLoraBtn.disabled = count >= MAX_LORAS || usable === 0;
-  els.addLoraBtn.title = count >= MAX_LORAS ? `LoRA はこのモデルでは最大 ${MAX_LORAS} 個までです` : '';
+  const max = maxLoras();
+  const base = loraLib.baseLabel(loraBase());
+  // 名前で指定できるプロバイダなら、候補が無くても行は足せる
+  els.addLoraBtn.disabled = count >= max || (usable === 0 && !provider().loraByName);
+  els.addLoraBtn.title = count >= max ? `LoRA はこのモデルでは最大 ${max} 個までです` : '';
 
   // 使える LoRA が無い / 別のベースモデル向けを隠したことを伝える
   const hidden = loraLib.load().length - usable;
   els.loraHint.hidden = usable > 0 && hidden === 0;
   els.loraHint.textContent = usable === 0
-    ? 'Qwen 用の LoRA が登録されていません。下の「Civitai から取り込み」で追加できます（Krea 2 用の LoRA はこのモデルでは使えません）。'
-    : `Qwen 以外の LoRA ${hidden} 件は候補から外しています（ベースモデルはライブラリ管理で直せます）。`;
+    ? `${base} 用の LoRA が登録されていません。下の「Hugging Face から一括登録」「Civitai から取り込み」で追加できます（別のベースモデル用の LoRA はこのモデルでは使えません）。`
+    : `${base} 以外の LoRA ${hidden} 件は候補から外しています（ベースモデルはライブラリ管理で直せます）。`;
+}
+
+// 候補に無くなった LoRA 行を落とす。ベースモデルはプロバイダで変わるので、
+// 切り替えたときに前のモデル用の LoRA が残っていると、そのまま送られてしまう
+function pruneLoraRows() {
+  const usable = new Set(sortedLoraLibrary().map((item) => item.path));
+  for (const row of els.loraList.querySelectorAll('.lora-row')) {
+    const value = row.querySelector('.lora-select').value;
+    // 名前で直接指定した行はライブラリに紐づかないので、名前で指定できる
+    // プロバイダのあいだは残す。URL 指定のプロバイダへ移ったら送れないので外す
+    if (value === LORA_NAME_OPTION ? provider().loraByName : usable.has(value)) continue;
+    row.remove();
+  }
+  syncAddLoraBtn();
 }
 
 function collectLoras() {
   return [...els.loraList.querySelectorAll('.lora-row')]
-    .map((row) => ({
-      path: row.querySelector('.lora-select').value,
-      scale: Number(row.querySelector('input[type="number"]').value) || 0,
-    }))
+    .map((row) => {
+      const select = row.querySelector('.lora-select');
+      // 「名前を直接入力…」の行は、選択値ではなく打った名前が識別子になる
+      const path = select.value === LORA_NAME_OPTION
+        ? row.querySelector('.lora-path').value.trim() : select.value;
+      return { path, scale: Number(row.querySelector('input[type="number"]').value) || 0 };
+    })
     // scale 0 は効果ゼロなのに LoRA 枠を消費するので送らない
     .filter((l) => l.path && l.scale > 0);
 }
@@ -789,8 +897,11 @@ function clearSource() {
 }
 
 function syncRunBtn() {
-  els.runBtn.disabled = !source || els.prompt.value.trim() === '' || running
+  const full = queuedCount() >= MAX_QUEUE;
+  els.runBtn.disabled = !source || els.prompt.value.trim() === '' || full
     || (maskOn() && mask.strokes.length === 0);
+  els.runBtn.textContent = queuedCount() > 0 ? '続けて編集する' : '編集する';
+  els.runBtn.title = full ? `同時に流せるのは ${MAX_QUEUE} 件までです` : '';
   renderCostHint();
 }
 
@@ -1449,6 +1560,120 @@ function alignOffset(baseImg, editedImg, maskData, crop = null) {
   return Math.abs(offset.dx) < 0.25 && Math.abs(offset.dy) < 0.25 ? null : offset;
 }
 
+/* ---------- 色合わせ ---------- */
+//
+// 全画面を作り直して返すモデルでは、マスクの外側も「元画像に似せて描き直した
+// もの」で、露出やホワイトバランスが全体にわずかに動く。内側だけを貼り戻すと、
+// その差が継ぎ目として出る。
+//
+// 合わせる先は元画像、比べる場所は**マスクの外側だけ**にする。ここは両方が
+// 同じものを写しているはずの領域なので、「写っているものが違う」内側を混ぜずに
+// 済む。境目は編集がにじむので、ずれ補正と同じ guard を挟んで広めに除く
+// （alignWeights をそのまま使う）。
+//
+// 変換はチャンネルごとの 1 次式で、中央値と幅を合わせる。平均と標準偏差では
+// なく百分位を使うのは、guard を越えてにじんだ画素に引っ張られないため。
+// 3x3 行列やヒストグラム一致まで踏み込むと、参照が少ないときに階調が崩れる。
+//
+// 「合成 → その結果へ寄せる → もう一度」と繰り返す手もあるが、合わせる先
+// （元画像のマスク外）は毎回同じなので、1 回で解いた答えに収束する。しかも
+// 繰り返すほど合成済みの内側が参照に混じり、補正はむしろ弱まる。ここは 1 回で決める。
+
+const COLOR_WORK_PX = 384; // 統計を取るときの作業解像度（長辺）
+const COLOR_MIN_SAMPLES = 512; // これ未満しか比べられないなら合わせない
+const COLOR_MAX_GAIN = 1.6; // 幅の補正の上限。これを超える推定は信用しない
+const COLOR_MAX_SHIFT = 64; // 中央値の移動量の上限（0..255）
+const COLOR_MIN_SPREAD = 8; // 参照が平坦すぎるときは幅を合わせない
+const COLOR_MIN_EFFECT = 1.5; // 変換の最大移動量がこれ未満なら、かけない
+
+// 作業解像度に落として画素を取り出す（crop があれば元画像が入っている範囲だけ）
+function pixelsForStats(img, w, h, crop) {
+  const c = makeCanvas(w, h);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingQuality = 'high';
+  if (crop) ctx.drawImage(img, crop.x, crop.y, crop.width, crop.height, 0, 0, w, h);
+  else ctx.drawImage(img, 0, 0, w, h);
+  return ctx.getImageData(0, 0, w, h).data;
+}
+
+// 重み 1 の画素だけを見た、チャンネルごとの百分位（256 段のヒストグラムから）
+function channelPercentiles(data, weights, qs) {
+  const out = [];
+  for (let ch = 0; ch < 3; ch++) {
+    const hist = new Uint32Array(256);
+    let n = 0;
+    for (let i = 0; i < weights.length; i++) {
+      if (!weights[i]) continue;
+      hist[data[i * 4 + ch]] += 1;
+      n += 1;
+    }
+    const want = qs.map((q) => q * n);
+    const found = new Array(qs.length).fill(0);
+    let acc = 0;
+    let k = 0;
+    for (let v = 0; v < 256 && k < qs.length; v++) {
+      acc += hist[v];
+      while (k < qs.length && acc >= want[k]) {
+        found[k] = v;
+        k += 1;
+      }
+    }
+    out.push(found);
+  }
+  return out;
+}
+
+// 編集結果を元画像の色味へ寄せる、チャンネルごとの変換表。
+// 合わせられない（参照が少ない・効果がほぼ無い）ときは null
+function colorMatchLuts(baseImg, editedImg, maskData, crop) {
+  const baseW = baseImg.naturalWidth || baseImg.width;
+  const baseH = baseImg.naturalHeight || baseImg.height;
+  const aspect = baseW / baseH;
+  const w = aspect >= 1 ? COLOR_WORK_PX : Math.max(16, Math.round(COLOR_WORK_PX * aspect));
+  const h = aspect >= 1 ? Math.max(16, Math.round(COLOR_WORK_PX / aspect)) : COLOR_WORK_PX;
+
+  // マスクの外側だけ（境目の guard 込み）。全面を塗った場合はここで空になる
+  const { weights, count } = alignWeights(maskData, w, h);
+  if (count < COLOR_MIN_SAMPLES) return null;
+
+  const QS = [0.1, 0.5, 0.9];
+  const target = channelPercentiles(pixelsForStats(baseImg, w, h, null), weights, QS);
+  const source = channelPercentiles(pixelsForStats(editedImg, w, h, crop), weights, QS);
+
+  const luts = [];
+  let effect = 0;
+  for (let ch = 0; ch < 3; ch++) {
+    const [tLo, tMid, tHi] = target[ch];
+    const [sLo, sMid, sHi] = source[ch];
+    const tSpread = tHi - tLo;
+    const sSpread = sHi - sLo;
+    const usable = tSpread >= COLOR_MIN_SPREAD && sSpread >= COLOR_MIN_SPREAD;
+    const gain = usable
+      ? Math.min(COLOR_MAX_GAIN, Math.max(1 / COLOR_MAX_GAIN, tSpread / sSpread))
+      : 1;
+    const shift = Math.max(-COLOR_MAX_SHIFT, Math.min(COLOR_MAX_SHIFT, tMid - sMid));
+    const lut = new Uint8ClampedArray(256);
+    for (let v = 0; v < 256; v++) {
+      lut[v] = (v - sMid) * gain + sMid + shift;
+      effect = Math.max(effect, Math.abs(lut[v] - v));
+    }
+    luts.push(lut);
+  }
+  return effect >= COLOR_MIN_EFFECT ? luts : null;
+}
+
+function applyColorLuts(ctx, w, h, luts) {
+  const image = ctx.getImageData(0, 0, w, h);
+  const d = image.data;
+  const [lr, lg, lb] = luts;
+  for (let i = 0; i < d.length; i += 4) {
+    d[i] = lr[d[i]];
+    d[i + 1] = lg[d[i + 1]];
+    d[i + 2] = lb[d[i + 2]];
+  }
+  ctx.putImageData(image, 0, 0);
+}
+
 /* ---------- 合成 ---------- */
 
 // 出力画像をマスクの内側だけ元画像に重ねる。
@@ -1456,7 +1681,7 @@ function alignOffset(baseImg, editedImg, maskData, crop = null) {
 // 合成は「元画像の解像度・縦横比」で行い、出力をそこへ引き伸ばす。モデルへは
 // Qwen の解像度に合わせて縮めた（必要なら比を変えた）画像を送っているので、
 // ここで戻すことで、マスクの外側は元の画素のまま・内側だけが差し替わる
-function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = null) {
+function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = null, colorMatch = false) {
   const w = baseImg.naturalWidth || baseImg.width;
   const h = baseImg.naturalHeight || baseImg.height;
   const out = makeCanvas(w, h);
@@ -1465,7 +1690,7 @@ function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = n
   ctx.drawImage(baseImg, 0, 0, w, h);
 
   const layer = makeCanvas(w, h);
-  const lctx = layer.getContext('2d');
+  const lctx = layer.getContext('2d', { willReadFrequently: colorMatch });
   lctx.imageSmoothingQuality = 'high';
   // 縁の余白を付けて送った場合は、元画像が入っていた範囲だけを取り出す。
   // 半画素ぶん内側から取るのは、拡大の補間が余白側の画素を拾わないようにするため
@@ -1482,6 +1707,14 @@ function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = n
   // ずらすと端が空くので、先に素のまま敷いてから重ねる
   put(0, 0);
   if (offset && (offset.dx || offset.dy)) put(offset.dx, offset.dy);
+
+  // 抜く前に、画面全体を元画像の色味へ寄せる（参照はマスクの外側だけ）。
+  // 抜いたあとだと、比べたい外側が消えていて合わせられない
+  if (colorMatch) {
+    const luts = colorMatchLuts(baseImg, editedImg, maskData, crop);
+    if (luts) applyColorLuts(lctx, w, h, luts);
+  }
+
   lctx.globalCompositeOperation = 'destination-in';
   lctx.drawImage(rasterizeMask(w, h, maskData.strokes, maskData.feather), 0, 0);
 
@@ -1493,12 +1726,13 @@ function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = n
 // （別ドメインのままだと canvas が汚染されて取り出せない）
 // offset に 'auto' を渡すと、その場でずれを測る。測った結果も返すので、
 // 塗り直しのたびに測り直さずに済む
-async function compositeFromUrls(baseUrl, editedUrl, maskData, crop = null, offset = null, mime = 'image/png') {
+async function compositeFromUrls(baseUrl, editedUrl, maskData, crop = null, offset = null,
+  { mime = 'image/png', colorMatch = false } = {}) {
   const [baseImg, editedImg] = await Promise.all([
     loadImageForCanvas(baseUrl), loadImageForCanvas(editedUrl),
   ]);
   const shift = offset === 'auto' ? alignOffset(baseImg, editedImg, maskData, crop) : offset;
-  const canvas = compositeWithMask(baseImg, editedImg, maskData, crop, shift);
+  const canvas = compositeWithMask(baseImg, editedImg, maskData, crop, shift, colorMatch);
   try {
     return {
       dataUri: canvas.toDataURL(mime, 0.95),
@@ -1655,6 +1889,7 @@ const PROVIDERS = {
     note: '解像度・ステップ・ガイダンスまで指定できます。課金はメガピクセル単価（$0.035/MP）。',
     supports: { size: true, count: true, steps: true, guidance: true, acceleration: true, negative: true },
     sizeKind: 'qwen',
+    loraBase: 'qwen',
     // 画像全体を作り直すモデルなので、返ってくる絵が数 px ずれることがある
     alignOutput: true,
     pollMs: 1200,
@@ -1730,6 +1965,7 @@ const PROVIDERS = {
     note: '指定できるのは指示文・LoRA・seed・形式だけです（ステップ等は API に無く、出力は 1 枚）。出力サイズの指定も無いので、送信サイズがそのまま効きます。課金は 1 枚 $0.025 の固定制。LoRA は公開アクセスできる URL である必要があります。',
     supports: {},
     sizeKind: 'qwen',
+    loraBase: 'qwen',
     alignOutput: true,
     pollMs: 2000,
     endpoint: 'https://api.wavespeed.ai/api/v3/wavespeed-ai/qwen-image/edit-2511-lora',
@@ -1903,6 +2139,118 @@ const PROVIDERS = {
         + ' ・ 費用は生成後に実額を表示します';
     },
   },
+
+  // Wan2.2 + VACE（Modal 自前ホスト / modal_comfy の /edit）。
+  //
+  // VACE はマスクの中だけを描くのではなく画面全体を再生成し、生の再生成画像を
+  // そのまま返す。マスクの外側も「元画像に似せて描き直したもの」で、元画像とは
+  // ピクセル一致しない。貼り戻しはこちら（compositeWithMask）で行う。
+  //
+  // 900 秒級で、150 秒を超えると 303 で結果ポーリングに変わる。ブラウザから直接
+  // 掴み続ける作りにはできないので、Worker 側でジョブにして状態をポーリングする
+  // （生成画面の Modal 版と同じ仕組み）
+  modal: {
+    label: 'Modal 自前ホスト（Wan2.2 + VACE マスク編集）',
+    model: 'modal/wan-vace-edit',
+    note: 'マスクで塗った範囲を描き直します（マスク必須）。画面全体を作り直して返すモデルなので、塗った範囲だけを元画像に重ねます。蒸留 LoRA を常時適用するため CFG は 1・20 ステップが前提です。LoRA は Wan 用のものを追加で指定できます（ライブラリから選んだものは Hugging Face の URL で渡すので、Modal Volume に無ければ初回リクエスト時に取り込まれます）。出力は 1 枚で、送信サイズは 32 の倍数に丸めます。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。初回はモデルの読み込みで数分かかります。',
+    supports: { size: true, steps: true, guidance: true, negative: true },
+    sizeKind: 'wan',
+    loraBase: 'wan',
+    // この API の LoRA は URL ではなく名前で指定するので、ライブラリに無いものも
+    // 名前だけで足せる（ベースモデルの表記に左右されない）
+    loraByName: true,
+    // 蒸留 LoRA 2 本と合わせて、API のサニティ上限（10 本）に収まる数
+    maxLoras: 8,
+    fixedLoraNote: '標準の蒸留 2 本に追加',
+    // 全画面を作り直すので、返る絵が数 px ずれることがある
+    alignOutput: true,
+    nativeMask: true,
+    requiresMask: true,
+    // 半透明の縁を送ると、輪郭のゴーストや境界の暗い縁取りになる。
+    // ぼかしは合成のときだけかけ、モデルへはハードエッジで渡す（INTEGRATION.md）
+    hardMask: true,
+    // ぼかす代わりにマスクを数 px 太らせる。広げたぶんは合成で捨てる
+    maskGrow: () => Number(els.wanMaskGrow.value) || 0,
+    pollMs: 2500,
+
+    snapSize(size) {
+      const clamp = (v) => Math.min(WAN_DIM_MAX,
+        Math.max(WAN_DIM_MIN, Math.round(v / WAN_DIM_STEP) * WAN_DIM_STEP));
+      return { width: clamp(size.width), height: clamp(size.height) };
+    },
+
+    buildInput(dataUri, size, maskUri) {
+      const input = {
+        prompt: els.prompt.value.trim(),
+        image: dataUri,
+        mask: maskUri,
+        width: size.width,
+        height: size.height,
+        // 蒸留 LoRA が先。指定した順に数珠つなぎになるので、標準の土台の上に
+        // ユーザーの LoRA を重ねる形にする
+        loras: [...WAN_EDIT_LORAS, ...collectLoras().map((l) => ({
+          // この API の LoRA は名前でも HF の resolve URL でも指定できる。名前だけに
+          // 落とすと Volume と既定リポジトリの直下にあるものしか解決できないので、
+          // URL を持つものは URL のまま渡して Modal 側に取り込ませる
+          name: loraLib.modalRef(l.path),
+          strength: l.scale,
+        }))],
+      };
+      if (els.seedLock.checked && els.seed.value !== '') input.seed = Number(els.seed.value);
+      // 空欄はキーごと落として API の既定に任せる
+      if (els.wanSteps.value !== '') input.steps = Number(els.wanSteps.value);
+      if (els.wanCfg.value !== '') input.cfg = Number(els.wanCfg.value);
+      if (els.wanShift.value !== '') input.shift = Number(els.wanShift.value);
+      const negative = els.negativePrompt.value.trim();
+      if (negative) input.negative_prompt = negative;
+      return input;
+    },
+
+    // 画像本体（base64）は履歴にも再開用の記録にも残さない
+    strip(input) {
+      return { ...input, image: undefined, mask: undefined };
+    },
+
+    async submit(input) {
+      // ジョブ ID はこちらで採番する。送信のリトライや再開で同じ ID を使えば、
+      // サーバー側で二重に走らない
+      const jobId = makeId();
+      const res = await fetch('/api/modal/edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...input, jobId }),
+      });
+      if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
+      return { jobId };
+    },
+
+    async poll(handle) {
+      const res = await fetch(`/api/krea2/job/${handle.jobId}`).catch(() => null);
+      // 一時的な通信断は、次のポーリングで拾い直す
+      if (!res) return { done: false, text: '編集中…' };
+      if (res.status === 404) throw new Error('ジョブが見つかりませんでした（保持期間切れの可能性があります）');
+      if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
+      const job = await res.json();
+      if (job.status === 'error') throw new Error(job.error || '編集に失敗しました');
+      if (job.status !== 'done') return { done: false, text: '編集中…（初回はモデルの読み込みで数分かかります）' };
+      return { done: true, result: job };
+    },
+
+    parse(job) {
+      return {
+        images: [{ url: job.url, width: job.width ?? undefined, height: job.height ?? undefined }],
+        seed: job.seed ?? null,
+        flagged: 0,
+      };
+    },
+
+    costHint() {
+      const size = sendSize();
+      if (!size) return '';
+      return `出力 ${size.width}×${size.height} × 1 枚`
+        + ' ・ 自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です';
+    },
+  },
 };
 
 let providerId = 'fal';
@@ -1973,6 +2321,9 @@ function syncProviderFields() {
   els.maskToggle.title = api.requiresMask
     ? 'このモデルはマスクした範囲を描き直すモデルなので、マスクは外せません' : '';
   if (api.requiresMask) els.maskToggle.checked = true;
+  // 標準の LoRA が別枠で常に入るモデルでは、この欄が「追加ぶん」だと分かるようにする
+  els.loraLabel.textContent = api.fixedLoraNote ? `LoRA（${api.fixedLoraNote}）` : 'LoRA';
+  pruneLoraRows();
   renderSizeOptions();
   renderRunwareParamHint();
   syncMaskUi();
@@ -2033,34 +2384,122 @@ function renderRunwareParamHint() {
   els.rwParamHint.classList.toggle('warn', notes.length > 0);
 }
 
-/* ---------- 実行 ---------- */
+/* ---------- 実行（順番待ちつき） ---------- */
+//
+// 1 件ずつしか流せないと、結果を待っているあいだ手が止まる。投入は即座に返る
+// （どのプロバイダも「投入 → ポーリング」の形）ので、送ったジョブは行として
+// 積んでおき、完了は各々で待つ。生成画面と同じ考え方・同じ見た目の行を使う。
+//
+// 走っている本数には上限を置く。上限が無いと、押した回数だけ課金が走る
 
-let running = false;
-let cancelled = false;
+const MAX_QUEUE = 5;
 
-function setRunning(on) {
-  running = on;
-  cancelled = false;
-  els.cancelBtn.hidden = !on;
+/** 進行中のジョブ。並び順は投入順 */
+let activeJobs = [];
+/** ジョブ id → { row, status }。行は DOM 側の都合なので保存対象に含めない */
+const jobUI = new Map();
+/** 受け取りをやめたジョブの id */
+const cancelledJobs = new Set();
+/** 投入中（まだ handle が返っていない）件数。連打で上限を超えないように数える */
+let submitting = 0;
+
+function queuedCount() {
+  return activeJobs.length + submitting;
+}
+
+function saveJobs() {
+  // 行の DOM は持たない。handle と組み立て済みの情報だけを残す
+  localStorage.setItem(LS_JOB, JSON.stringify(activeJobs));
+}
+
+function loadJobs() {
+  let saved;
+  try {
+    saved = JSON.parse(localStorage.getItem(LS_JOB));
+  } catch {
+    return [];
+  }
+  // 以前は 1 件だけを直に入れていたので、その形も読めるようにしておく
+  if (!saved) return [];
+  return Array.isArray(saved) ? saved : [saved];
+}
+
+function dropJob(job) {
+  activeJobs = activeJobs.filter((j) => j.id !== job.id);
+  cancelledJobs.delete(job.id);
+  saveJobs();
   syncRunBtn();
 }
 
-function saveJob(job) {
-  localStorage.setItem(LS_JOB, JSON.stringify(job));
+/* ---------- 順番待ちの行 ---------- */
+
+function startJobRow(job) {
+  const row = document.createElement('div');
+  row.className = 'job-row';
+
+  const status = document.createElement('div');
+  status.className = 'status';
+  status.textContent = 'リクエストを送信中…';
+  row.appendChild(status);
+
+  const prompt = document.createElement('div');
+  prompt.className = 'job-prompt';
+  prompt.textContent = job.prompt || '';
+  prompt.title = job.prompt || '';
+  row.appendChild(prompt);
+
+  const x = document.createElement('button');
+  x.type = 'button';
+  x.className = 'job-x ghost-btn small';
+  x.textContent = '✕';
+  x.title = 'この編集の結果を受け取るのをやめます（モデル側の処理は止まりません）';
+  x.addEventListener('click', () => {
+    cancelledJobs.add(job.id);
+    setJobStatus(job, 'キャンセルしています…');
+  });
+  row.appendChild(x);
+
+  els.jobList.appendChild(row);
+  row.scrollIntoView({ block: 'nearest' });
+  jobUI.set(job.id, { row, status });
+  syncRunBtn();
 }
 
-function clearJob() {
-  localStorage.removeItem(LS_JOB);
+function setJobStatus(job, text) {
+  const ui = jobUI.get(job.id);
+  if (ui) ui.status.textContent = text;
+}
+
+function endJobRow(job) {
+  jobUI.get(job.id)?.row.remove();
+  jobUI.delete(job.id);
+}
+
+// 失敗した行はエラー表示に切り替えて、閉じるまで残す
+function failJobRow(job, message) {
+  const ui = jobUI.get(job.id);
+  if (!ui) return;
+  ui.row.innerHTML = '';
+  const err = document.createElement('div');
+  err.className = 'error';
+  err.textContent = message;
+  ui.row.appendChild(err);
+  const x = document.createElement('button');
+  x.type = 'button';
+  x.className = 'job-x ghost-btn small';
+  x.textContent = '✕';
+  x.addEventListener('click', () => endJobRow(job));
+  ui.row.appendChild(x);
+  jobUI.delete(job.id);
 }
 
 async function run() {
-  if (!source || running) return;
+  if (!source || queuedCount() >= MAX_QUEUE) return;
   const prompt = els.prompt.value.trim();
   if (prompt === '') return;
 
   setError('');
-  setRunning(true);
-  setStatus('リクエストを送信中…');
+  setStatus('');
 
   // 送るのはここで作る縮小版。元画像は合成の土台として R2 に残っている
   const size = sendSize();
@@ -2082,8 +2521,6 @@ async function run() {
     const img = await sourceImageEl();
     dataUri = frame ? framedDataUri(img, outer, inner) : toDataUri(img, size).dataUri;
   } catch (err) {
-    setRunning(false);
-    setStatus('');
     setError(`入力画像を用意できませんでした: ${err.message}`);
     return;
   }
@@ -2091,7 +2528,10 @@ async function run() {
   // モデルには少し広めのマスクを渡す。修復モデルは輪郭のすぐ内側に元画像を
   // 引きずりやすい（潜在空間では 8px 角がひと単位なので、境目はどうしても
   // 混ざる）。広げたぶんは合成で捨てるので、出来上がりの範囲は変わらない
-  const maskUri = useMask && api.nativeMask ? maskDataUri(outer, inner, mask, grow) : null;
+  // ぼかした縁をそのまま渡すと輪郭のゴーストや暗い縁取りになるモデルがある。
+  // その場合はハードエッジで送り、ぼかしは合成のときだけかける
+  const sendMask = api.hardMask ? { ...mask, feather: 0 } : mask;
+  const maskUri = useMask && api.nativeMask ? maskDataUri(outer, inner, sendMask, grow) : null;
   const input = api.buildInput(dataUri, outer, maskUri);
   const job = {
     id: makeId(),
@@ -2109,37 +2549,68 @@ async function run() {
     params: api.strip(input),
     // 履歴・ギャラリー側は { path, scale } で読むので、Runware の
     // { model, weight } もその形に寄せる（path には AIR が入る）
-    loras: input.loras ?? (input.lora ?? []).map((l) => ({ path: l.model, scale: l.weight })),
+    loras: normalizeJobLoras(input),
     // 合成はモデルの応答が返ったあとに行うので、そのときのマスクを控えておく
     mask: useMask ? structuredClone(mask) : null,
     // マスクを API にも渡したか（後から塗り直しても描き直しはやり直せない）
     maskNative: !!maskUri,
     // 出力がずれて返るモデルでは、重ねる前に位置を合わせる
     alignEnabled: useMask && !!api.alignOutput && els.alignToggle.checked,
+    // 全体の色味が動いて返るので、重ねる前に元画像へ寄せる
+    colorEnabled: useMask && els.colorToggle.checked,
   };
 
+  // 行を先に出しておく（送信のあいだも「受け付けた」ことが分かる）
+  submitting += 1;
+  startJobRow(job);
   try {
     job.handle = await api.submit(input);
-    saveJob(job);
-    await waitAndFinish(job);
   } catch (err) {
-    setRunning(false);
-    setStatus('');
-    setError(cancelled ? 'キャンセルしました' : `編集に失敗しました: ${err.message}`);
-    clearJob();
+    failJobRow(job, `編集に失敗しました: ${err.message}`);
+    return;
+  } finally {
+    submitting -= 1;
   }
+  activeJobs.push(job);
+  setJobStatus(job, '編集中…');
+  saveJobs();
+  syncRunBtn();
+  // 完了はここで待たない。待っているあいだも次を送れるようにする
+  track(job);
+}
+
+// 1 件ぶんの完了待ち。結果の保存・合成までやって、行を片付ける
+async function track(job) {
+  try {
+    await waitAndFinish(job);
+    endJobRow(job);
+  } catch (err) {
+    failJobRow(job, cancelledJobs.has(job.id)
+      ? 'キャンセルしました' : `編集に失敗しました: ${err.message}`);
+  } finally {
+    dropJob(job);
+  }
+}
+
+// 履歴・ギャラリー側は { path, scale } で読む。プロバイダごとに違う形
+// （Runware の { model, weight }・Modal の { name, strength }）をそこへ寄せる
+function normalizeJobLoras(input) {
+  if (Array.isArray(input.lora)) return input.lora.map((l) => ({ path: l.model, scale: l.weight }));
+  if (!Array.isArray(input.loras)) return [];
+  return input.loras.map((l) => (
+    l.path !== undefined ? l : { path: l.name ?? l.path, scale: l.strength ?? l.scale }
+  ));
 }
 
 // 送信済みジョブの完了待ち。ページを開き直したときもここから再開する
 async function waitAndFinish(job) {
   const api = PROVIDERS[job.provider] ?? PROVIDERS.fal;
-  setRunning(true);
   let poll;
   do {
     await sleep(api.pollMs);
-    if (cancelled) throw new Error('キャンセルしました');
+    if (cancelledJobs.has(job.id)) throw new Error('キャンセルしました');
     poll = await api.poll(job.handle);
-    if (!poll.done) setStatus(poll.text);
+    if (!poll.done) setJobStatus(job, poll.text);
   } while (!poll.done);
 
   const { images, seed, flagged, cost } = api.parse(poll.result);
@@ -2163,20 +2634,20 @@ async function waitAndFinish(job) {
     ...(job.maskNative ? { maskNative: true } : {}),
     ...(job.crop ? { crop: job.crop } : {}),
     ...(job.alignEnabled ? { alignEnabled: true } : {}),
+    ...(job.colorEnabled ? { colorEnabled: true } : {}),
     sourceSize: job.sourceSize ?? null,
     sentSize: job.sentSize ?? null,
     // 出力に続けて入力画像も残す（削除時に一括で消える）
     images: [...images, { url: job.sourceUrl }],
   };
-  clearJob();
   // 先に保存する。fal / WaveSpeed の CDN 画像はここで R2 に取り込まれて同一
   // オリジンになり、canvas で合成できるようになる（別ドメインのままだと読めない）
   let saved = await saveHistoryRecord(record);
 
   if (job.mask) {
-    setStatus('マスクの内側だけを合成中…');
+    setJobStatus(job, 'マスクの内側だけを合成中…');
     try {
-      saved = await buildMaskedRecord(saved, job.mask);
+      saved = await buildMaskedRecord(saved, job.mask, (text) => setJobStatus(job, text));
       saved = await saveHistoryRecord(saved);
     } catch (err) {
       // 合成できなくても、生成そのものは成功している。マスクなしの結果を出す
@@ -2184,16 +2655,13 @@ async function waitAndFinish(job) {
     }
   }
 
-  setRunning(false);
-  setStatus(flagged > 0
-    ? `安全性チェックにより ${flagged} 枚が塗り潰されて返りました`
-    : '');
+  if (flagged > 0) setStatus(`安全性チェックにより ${flagged} 枚が塗り潰されて返りました`);
   renderResult(saved);
 }
 
 // 保存済みレコードの各出力をマスク合成し、結果を先頭に足したレコードを返す。
 // images は [合成 …, 生成結果そのまま …, 入力画像] の順になる
-async function buildMaskedRecord(record, maskData) {
+async function buildMaskedRecord(record, maskData, onStatus = () => {}) {
   const n = record.outputCount ?? record.images.length - 1;
   // 既に合成済みなら先頭 n 枚が前回の合成、その後ろが生成結果そのまま
   const previous = record.masked ? record.images.slice(0, n) : []; // 差し替え先
@@ -2212,9 +2680,10 @@ async function buildMaskedRecord(record, maskData) {
   const offsets = [...(record.align ?? [])];
   for (const [i, raw] of raws.entries()) {
     const want = offsets[i] === undefined && record.alignEnabled ? 'auto' : (offsets[i] ?? null);
-    if (want === 'auto') setStatus('ずれを測っています…');
+    if (want === 'auto') onStatus('ずれを測っています…');
     const { dataUri, width, height, offset } = await compositeFromUrls(
       inputUrl, raw.url, maskData, record.crop ?? null, want,
+      { colorMatch: !!record.colorEnabled },
     );
     offsets[i] = offset ?? null;
     const url = await uploadDataUri(
@@ -2269,7 +2738,8 @@ function renderResult(record) {
     + (record.masked && record.sourceSize
       ? ` ・ 合成 ${record.sourceSize.width}×${record.sourceSize.height}` : '')
     + (record.cost ? ` ・ $${Number(record.cost).toFixed(4)}` : '')
-    + alignMetaText(record);
+    + alignMetaText(record)
+    + (record.masked && record.colorEnabled ? ' ・ 色合わせ済み' : '');
   els.resultMaskHint.hidden = !record.masked;
   // マスクをモデルにも渡した場合、塗り直しで変わるのは重ね合わせだけ
   els.resultMaskHint.textContent = record.maskNative
@@ -2349,6 +2819,7 @@ async function refreshResultComposite() {
       if (!raw) continue;
       const { dataUri } = await compositeFromUrls(
         inputUrl, raw.url, current, record.crop ?? null, record.align?.[i] ?? null,
+        { colorMatch: !!record.colorEnabled },
       );
       if (run !== compositeRun || shownResult !== record) return; // 続けて塗られた
       const el = els.resultImages.querySelector(`[data-result-index="${i}"] img`);
@@ -2382,23 +2853,16 @@ async function saveMaskedResult(record) {
   }
 }
 
-// 送信済みのまま閉じられたジョブを拾って続きから待つ
-async function resumeJob() {
-  let job;
-  try {
-    job = JSON.parse(localStorage.getItem(LS_JOB));
-  } catch {
-    job = null;
-  }
-  if (!job?.handle) return;
-  setStatus('前回の編集の結果を確認中…');
-  try {
-    await waitAndFinish(job);
-  } catch (err) {
-    setRunning(false);
-    setStatus('');
-    setError(`前回の編集を再開できませんでした: ${err.message}`);
-    clearJob();
+// 送信済みのまま閉じられたジョブを拾って続きから待つ（順番待ちのぶんも全部）
+function resumeJobs() {
+  const saved = loadJobs().filter((job) => job?.handle);
+  if (saved.length === 0) return;
+  activeJobs = saved;
+  saveJobs();
+  for (const job of saved) {
+    startJobRow(job);
+    setJobStatus(job, '前回の編集の結果を確認中…');
+    track(job);
   }
 }
 
@@ -2420,11 +2884,16 @@ function saveForm() {
     rwMaskGrow: els.rwMaskGrow.value,
     rwPadEdges: els.rwPadEdges.value,
     align: els.alignToggle.checked,
+    color: els.colorToggle.checked,
     rwMaskMargin: els.rwMaskMargin.value,
     rwScheduler: els.rwScheduler.value,
     rwOutputQuality: els.rwOutputQuality.value,
     rwPromptWeighting: els.rwPromptWeighting.checked,
     rwDefaults: RW_DEFAULTS_VERSION,
+    wanSteps: els.wanSteps.value,
+    wanCfg: els.wanCfg.value,
+    wanShift: els.wanShift.value,
+    wanMaskGrow: els.wanMaskGrow.value,
     outputFormat: els.outputFormat.value,
     seed: els.seed.value,
     seedLock: els.seedLock.checked,
@@ -2475,6 +2944,11 @@ async function restoreForm() {
   // 推奨値を入れる前の下書きは、モデル既定任せ（空欄）のままになっている。
   // それだと指示文がほとんど効かないので、一度だけ推奨値に入れ替える
   if ((s.rwDefaults ?? 0) < RW_DEFAULTS_VERSION) applyRunwareRecommended();
+  els.wanSteps.value = s.wanSteps ?? '';
+  els.wanCfg.value = s.wanCfg ?? '';
+  els.wanShift.value = s.wanShift ?? '';
+  // 広げる px だけは既定値がある（0 だと縁に元画像が残りやすい）
+  if (s.wanMaskGrow !== undefined && s.wanMaskGrow !== '') els.wanMaskGrow.value = s.wanMaskGrow;
   if (s.outputFormat) els.outputFormat.value = s.outputFormat;
   els.seed.value = s.seed || '';
   els.seedLock.checked = !!s.seedLock;
@@ -2483,6 +2957,7 @@ async function restoreForm() {
   for (const l of s.rwLoras || []) addRwLoraRow(l.air, l.weight);
   els.maskToggle.checked = !!s.maskOn;
   els.alignToggle.checked = s.align !== false;
+  els.colorToggle.checked = s.color !== false;
   if (s.maskSize) els.maskSize.value = s.maskSize;
   if (s.maskFeather) els.maskFeather.value = s.maskFeather;
   if (Array.isArray(s.mask?.strokes)) mask = s.mask;
@@ -2501,13 +2976,37 @@ loraLib.migrate();
 civitaiImport.init({
   defaultRepo: HF_DEFAULT_REPO,
   register(kind, hfUrl, meta) {
-    // この画面から入れたものは Qwen 用として扱う（Civitai 側の表記があればそちら優先）
-    loraLib.register(hfUrl, { ...(meta ?? {}), base: meta?.base || 'Qwen' });
-    syncAddLoraBtn();
-    for (const row of els.loraList.querySelectorAll('.lora-row')) renderRowTrigger(row);
+    // Civitai 側にベースモデルの表記があればそれを使い、無ければ今のプロバイダ用として扱う
+    const base = meta?.base || loraLib.baseLabel(loraBase());
+    loraLib.register(hfUrl, { ...(meta ?? {}), base });
     return `ライブラリに登録しました: ${loraLib.label(hfUrl)}`;
   },
 });
+
+// Hugging Face からの一括登録（共有コンポーネント）。生成画面と同じダイアログで、
+// ベースモデルの初期選択だけ今のプロバイダに合わせる
+hfImport.init({
+  defaultRepo: HF_DEFAULT_REPO,
+  currentBase: () => loraBase(),
+  registeredPaths: () => loraLib.load().map((item) => item.path),
+  register(kind, url, meta) {
+    loraLib.register(url, meta);
+  },
+});
+
+// 端末間同期（共有モジュール）。この画面からも LoRA を登録できるので、
+// 生成画面などと同じようにサーバーへ送って全端末へ渡す
+deviceSync.init({ onRemote: refreshLoraRows });
+
+// 登録・登録解除のたびに、既にある行の候補を入れ替えたうえで同期へ知らせる
+// （loraLib は保存のたびにこれを呼ぶので、取り込み経路が増えても取りこぼさない）
+loraLib.onChange = () => {
+  refreshLoraRows();
+  deviceSync.markDirty('loras');
+};
+loraLib.migrate(); // 同期で届いた古い形式のデータもここで揃える
+deviceSync.pull();
+els.hfOpenBtn.addEventListener('click', () => hfImport.open('lora'));
 
 // Runware の LoRA（AIR）の控えと取り込みダイアログ。API は画像編集側の
 // プロキシ経由の呼び出しをそのまま使ってもらう
@@ -2530,7 +3029,6 @@ runwareLora.onChange = () => {
   for (const row of els.rwLoraList.querySelectorAll('.lora-row')) refreshRwRowOptions(row);
 };
 
-initTheme();
 
 for (const [id, api] of Object.entries(PROVIDERS)) {
   const opt = document.createElement('option');
@@ -2574,7 +3072,8 @@ for (const el of [els.sizeSelect, els.numImages, els.steps, els.guidance,
   els.acceleration, els.outputFormat, els.seed, els.seedLock, els.negativePrompt,
   els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength, els.rwMaskMargin,
   els.rwMaskGrow, els.rwPadEdges, els.rwScheduler, els.rwOutputQuality,
-  els.rwPromptWeighting]) {
+  els.rwPromptWeighting,
+  els.wanSteps, els.wanCfg, els.wanShift, els.wanMaskGrow]) {
   el.addEventListener('change', saveForm);
 }
 // 推奨から外れたらその場で理由を出す
@@ -2583,7 +3082,7 @@ for (const el of [els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength,
   el.addEventListener('input', renderRunwareParamHint);
 }
 // 広げ幅と縁の余白は、何をどの大きさで送るかを変える
-for (const el of [els.rwMaskGrow, els.rwPadEdges]) {
+for (const el of [els.rwMaskGrow, els.rwPadEdges, els.wanMaskGrow]) {
   el.addEventListener('input', renderSizeHint);
 }
 els.rwPresetBtn.addEventListener('click', () => {
@@ -2625,6 +3124,14 @@ for (const btn of els.maskTools.querySelectorAll('.seg-btn')) {
 }
 
 els.alignToggle.addEventListener('change', saveForm);
+// 色合わせは重ね方の話なので、結果を出したあとでも切り替えたその場で反映する
+// （ずれ補正と違って測り直しが要らず、塗り直しと同じ経路で作り直せる）
+els.colorToggle.addEventListener('change', () => {
+  saveForm();
+  if (!resultFollowsMask()) return;
+  shownResult.colorEnabled = els.colorToggle.checked || undefined;
+  refreshResultComposite();
+});
 els.maskUndoBtn.addEventListener('click', maskUndo);
 els.maskClearBtn.addEventListener('click', maskClear);
 els.maskAllBtn.addEventListener('click', maskAll);
@@ -2647,10 +3154,6 @@ window.addEventListener('resize', () => { if (maskOn()) drawMaskOverlay(); });
 els.sourceImg.addEventListener('load', () => { if (maskOn()) drawMaskOverlay(); });
 
 els.runBtn.addEventListener('click', run);
-els.cancelBtn.addEventListener('click', () => {
-  cancelled = true;
-  setStatus('キャンセルしています…');
-});
 
 for (const name of RUNWARE_SCHEDULERS) {
   const opt = document.createElement('option');
@@ -2665,4 +3168,20 @@ syncRwAddLoraBtn();
 applyRunwareRecommended();
 syncProviderFields();
 restoreForm();
-fetchHistory().then(resumeJob);
+fetchHistory().then(resumeJobs);
+
+// 実行バーは順番待ちの件数で高さが変わる。本文の下余白をその実測値に合わせて、
+// 一番下の内容がバーに隠れないようにする
+const runBar = document.querySelector('.ie-run');
+const syncRunBarHeight = () => {
+  document.documentElement.style.setProperty('--ie-run-h', `${runBar.offsetHeight}px`);
+};
+new ResizeObserver(syncRunBarHeight).observe(runBar);
+syncRunBarHeight();
+
+window.addEventListener('pagehide', () => {
+  deviceSync.flush(); // 送信待ちの同期があれば離脱前に送っておく
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') deviceSync.pull();
+});
