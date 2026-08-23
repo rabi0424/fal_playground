@@ -103,7 +103,7 @@ LoRA 欄の「Civitai から取り込み」で、Civitai のモデルページ U
 
 ### Runware の推奨設定（FLUX.1 Fill [dev] OneReward）
 
-**このモデルは素の FLUX.1 Fill [dev] とは推奨値がまるで違います。** 素の FLUX.1 Fill は内蔵ガイダンス（`CFGScale`）を 30 前後で使いますが、OneReward は**内蔵ガイダンスを 1 まで下げて、本来の CFG（`trueCFGScale`）を効かせる**前提で学習されています。公式の作例（[bytedance-research/OneReward](https://huggingface.co/bytedance-research/OneReward)）は `guidance_scale=1.0` / `true_cfg=4.0` / `num_inference_steps=50` / `negative_prompt="nsfw"` です。
+**このモデルは素の FLUX.1 Fill [dev] とは推奨値がまるで違います。** 素の FLUX.1 Fill は内蔵ガイダンス（`CFGScale`）を 30 前後で使いますが、OneReward は**内蔵ガイダンスを 1 まで下げて、本来の CFG（`trueCFGScale`）を効かせる**前提で学習されています。公式の作例（[bytedance-research/OneReward](https://huggingface.co/bytedance-research/OneReward)）は `guidance_scale=1.0` / `true_cfg=4.0` / `num_inference_steps=50` です。
 
 | 項目 | 既定値 | 根拠 |
 |---|---|---|
@@ -111,7 +111,7 @@ LoRA 欄の「Civitai から取り込み」で、Civitai のモデルページ U
 | CFG（`CFGScale`） | 1 | 公式作例の `guidance_scale=1.0`。FLUX の内蔵ガイダンスなので、上げても効きません |
 | True CFG（`trueCFGScale`） | 4 | 公式作例の `true_cfg=4.0`。**これを入れないと指示文がほとんど効きません**。1 ステップに 2 回推論するので生成時間は倍近くになります |
 | マスクの余白（`maskMargin`） | 48 | Runware の目安は 32〜64。マスクの周りごと切り出して拡大してから描くので、狭い範囲を塗ったときの精細さが上がります |
-| negative prompt | `nsfw`（空欄時） | 公式作例と同じ。True CFG は対になる negative prompt があって初めて効きます |
+| negative prompt | `low quality, blurry, distorted, deformed, artifacts`（空欄時） | True CFG は対になる negative prompt があって初めて効くので、空欄のときだけ補います。**どんな絵でも避けたい破綻だけ**を並べていて、内容の方向づけはしません（公式作例は `nsfw` ですが、それは採っていません）。何か書けばそちらが優先されます |
 
 - 値を推奨から外すと、実行ボタンの上に**なぜまずいかを表示**します。「**推奨値に戻す**」でいつでも戻せます
 - スケジューラ・出力品質（JPG / WebP のときのみ）・プロンプトの強調記法（`sdEmbeds`）は「さらに細かい設定」から指定できます。スケジューラは「自動」のままで構いません（FLUX 系はフローマッチング前提です）

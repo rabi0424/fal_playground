@@ -76,9 +76,13 @@ const RUNWARE_FORMATS = { png: 'PNG', jpeg: 'JPG', webp: 'WEBP' };
 
 // FLUX.1 Fill [dev] OneReward の推奨値。素の FLUX.1 Fill とはまるで違い、
 // 内蔵ガイダンス（CFG）を 1 まで下げて本来の CFG（True CFG）を効かせる。
-// ByteDance の公式作例が guidance_scale=1.0 / true_cfg=4.0 / steps=50 /
-// negative_prompt="nsfw" なので、それに合わせている
+// ByteDance の公式作例が guidance_scale=1.0 / true_cfg=4.0 / steps=50 なので、
+// それに合わせている
 // https://huggingface.co/bytedance-research/OneReward
+//
+// negative prompt だけは公式作例（"nsfw"）に従わない。True CFG は対になる
+// negative prompt があって初めて効くので何かは要るが、内容の方向づけを黙って
+// 加えるのは筋が違う。どんな絵でも避けたい破綻だけを並べる
 const RUNWARE_RECOMMENDED = {
   steps: 50,
   cfg: 1,
@@ -86,7 +90,7 @@ const RUNWARE_RECOMMENDED = {
   // マスクの周りを一緒に切り出して拡大してから描くので、狭い範囲ほど効く。
   // Runware の目安は 32〜64
   maskMargin: 48,
-  negativePrompt: 'nsfw',
+  negativePrompt: 'low quality, blurry, distorted, deformed, artifacts',
 };
 
 // スケジューラ。既定（自動）のままが基本なので、選択肢として出すだけ
@@ -168,6 +172,7 @@ const els = {
   rwPromptWeighting: $('#rwPromptWeighting'),
   rwPresetBtn: $('#rwPresetBtn'),
   rwParamHint: $('#rwParamHint'),
+  negativeHint: $('#negativeHint'),
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1547,8 +1552,11 @@ function syncProviderFields() {
   const api = provider();
   els.providerHint.textContent = api.note;
   // 共用の欄なので、値は書き換えず「空欄のときに何が送られるか」だけ見せる
-  els.negativePrompt.placeholder = api.defaultNegative
-    ? `空欄なら ${api.defaultNegative}（このモデルの既定）` : '空欄で未指定';
+  els.negativePrompt.placeholder = api.defaultNegative ? '空欄なら下の既定を送ります' : '空欄で未指定';
+  els.negativeHint.hidden = !api.defaultNegative;
+  els.negativeHint.textContent = api.defaultNegative
+    ? `空欄のときは「${api.defaultNegative}」を送ります（True CFG は対になる negative prompt があって初めて効くため）。`
+    : '';
   els.maskModeHint.textContent = MASK_MODE_HINTS[api.nativeMask ? 'native' : 'composite'];
   // マスク前提のモデルでは切れないようにする（切ると送るものが無くなる）
   els.maskToggle.disabled = !!api.requiresMask;
