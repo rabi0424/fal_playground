@@ -453,8 +453,10 @@ function recordImageLists(record) {
 }
 
 // このアプリが配信している画像 URL から id を取り出す（/api/krea2/image/ は旧 URL 互換）
+// 末尾の ?v=... は差し替え時のキャッシュ避け（/api/upload の replace）。
+// 同じキーを指すので、削除対象の判定では無視する
 function localImageId(u) {
-  const m = typeof u === 'string' ? u.match(/^\/api(?:\/krea2)?\/image\/([0-9a-f]{32})$/) : null;
+  const m = typeof u === 'string' ? u.match(/^\/api(?:\/krea2)?\/image\/([0-9a-f]{32})(?:\?.*)?$/) : null;
   return m ? m[1] : null;
 }
 
@@ -2019,11 +2021,15 @@ export default {
       if (body.meta && typeof body.meta === 'object') {
         buf = embedPngMetadata(buf, JSON.stringify(body.meta));
       }
-      const id = randomId();
+      // replace 指定があれば同じキーへ上書きする。画像編集のマスクを後から
+      // 変えたときに、合成画像が 1 回ごとに増えて置き去りになるのを防ぐ。
+      // 配信は immutable キャッシュなので、URL に版を付けて返す
+      const replaceId = localImageId(body?.replace);
+      const id = replaceId ?? randomId();
       await env.IMAGES.put(`${id}.png`, buf, {
         httpMetadata: { contentType: decoded.mime },
       });
-      return Response.json({ url: `/api/image/${id}` });
+      return Response.json({ url: replaceId ? `/api/image/${id}?v=${Date.now()}` : `/api/image/${id}` });
     }
 
     // Poe（OpenAI 互換 API）での部分AI編集ジョブの投入。API キー（Secret の

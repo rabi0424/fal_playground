@@ -408,6 +408,43 @@ async function testWavespeedProxy() {
   console.log('✓ wavespeed proxy: キー付与・転送先の制限・未設定時のエラー');
 }
 
+// 画像のアップロード。replace 付きは同じキーへ上書きする
+//（画像編集のマスクを塗り直すたびに合成画像が増えて残らないように）
+async function testUploadReplace() {
+  const mod = await loadWorker();
+  const counters = { sub: 0 };
+  const bucket = makeBucket(counters);
+  const env = { IMAGES: bucket, STATE: { idFromName: (n) => n, get: () => ({}) } };
+  // 1x1 の PNG
+  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const upload = (body) => mod.default.fetch(new Request('https://app.example/api/upload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }), env);
+
+  const first = await (await upload({ image: png })).json();
+  assert.match(first.url, /^\/api\/image\/[0-9a-f]{32}$/, `初回の URL が不正: ${first.url}`);
+  assert.equal(bucket.objects.size, 1);
+
+  // replace 付きは新しいキーを作らず、URL には版が付く（immutable キャッシュ避け）
+  const again = await (await upload({ image: png, replace: first.url })).json();
+  assert.equal(bucket.objects.size, 1, '差し替えなのに画像が増えている');
+  assert.equal(again.url.split('?')[0], first.url, '差し替え先が違う');
+  assert.match(again.url, /\?v=\d+$/, 'キャッシュ避けの版が付いていない');
+
+  // 版付きの URL をさらに差し替え先に渡しても同じキーを指す
+  const third = await (await upload({ image: png, replace: again.url })).json();
+  assert.equal(bucket.objects.size, 1);
+  assert.equal(third.url.split('?')[0], first.url);
+
+  // 他人の URL や壊れた指定は無視して新規作成にフォールバックする
+  const other = await (await upload({ image: png, replace: 'https://evil.example/x' })).json();
+  assert.equal(bucket.objects.size, 2);
+  assert.notEqual(other.url, first.url);
+  console.log('✓ upload: replace で同じ画像を上書きし、版付き URL を返す');
+}
+
 await testCheckpoint();
 await testLoraSingleRun();
 await testRetryDuringUpload();
@@ -421,5 +458,6 @@ await testListAndCancel();
 await testStuckPastAlarm();
 await testLoraMetaEndpoint();
 await testWavespeedProxy();
+await testUploadReplace();
 rmSync(OUT, { force: true });
 console.log('\nすべて成功');

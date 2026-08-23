@@ -2199,12 +2199,109 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
   background: var(--bg);
   border: 1px solid var(--border);
 }
+
+/* 塗っている間は高さを抑えない。抑えると object-fit で上下（左右）に余白が
+   でき、重ねた canvas と画像の位置がずれて塗った場所と合わなくなる。
+   大きく表示されるぶん細かく塗れる */
+.ie-source.masking img {
+  max-height: none;
+  height: auto;
+  object-fit: fill;
+}
+/* 入力画像とマスクの重ね描き。canvas は画像にぴったり重ねる */
+.ie-canvas-wrap {
+  position: relative;
+  line-height: 0;
+}
+
+.ie-canvas-wrap canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 8px;
+  /* 濃さは描画側（外側を暗くする veil）で決めるので、ここでは薄めない */
+  /* 塗っている間にページがスクロール・ズームしないように */
+  touch-action: none;
+  cursor: crosshair;
+}
+
 .ie-source-meta {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
+
+/* ---------- マスク ---------- */
+.ie-mask {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.mask-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.mask-toggle input {
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.ie-mask-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ie-mask-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* ブラシ / 消しゴムの切り替え */
+.seg {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.seg-btn {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.seg-btn.active { background: var(--accent); color: var(--accent-text); }
+
+.ie-mask-range {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ie-mask-range .label em {
+  font-style: normal;
+  font-weight: 400;
+  color: var(--text);
+}
+
+.ie-gallery-adjust { margin-top: 4px; width: 100%; }
 .ie-source-meta .hint { margin: 0; }
 
 .ie-run {

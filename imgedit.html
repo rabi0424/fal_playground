@@ -36,10 +36,43 @@
     </div>
 
     <div id="sourcePreview" class="ie-source" hidden>
-      <img id="sourceImg" alt="入力画像">
+      <div class="ie-canvas-wrap">
+        <img id="sourceImg" alt="入力画像">
+        <canvas id="maskCanvas" hidden></canvas>
+      </div>
       <div class="ie-source-meta">
         <span id="sourceInfo" class="hint"></span>
         <button id="clearSourceBtn" class="ghost-btn small" type="button">取り消す</button>
+      </div>
+
+      <div class="ie-mask">
+        <label class="mask-toggle" title="マスクで塗った範囲だけを編集後の画像に差し替えます。範囲は後からでも変えられます">
+          <input type="checkbox" id="maskToggle"> マスクした部分だけを差し替える
+        </label>
+
+        <div id="maskTools" class="ie-mask-tools" hidden>
+          <div class="ie-mask-row">
+            <div class="seg" role="group" aria-label="ツール">
+              <button type="button" class="seg-btn active" data-tool="add">ブラシ</button>
+              <button type="button" class="seg-btn" data-tool="erase">消しゴム</button>
+            </div>
+            <button id="maskUndoBtn" class="ghost-btn small" type="button" title="直前のひと塗りを取り消す">戻す</button>
+            <button id="maskAllBtn" class="ghost-btn small" type="button" title="画像全体をマスクする">全面</button>
+            <button id="maskClearBtn" class="ghost-btn small" type="button">全消去</button>
+          </div>
+
+          <label class="ie-mask-range">
+            <span class="label">ブラシの太さ <em id="maskSizeVal"></em></span>
+            <input id="maskSize" type="range" min="1" max="40" step="1" value="12">
+          </label>
+
+          <label class="ie-mask-range">
+            <span class="label">縁のぼかし <em id="maskFeatherVal"></em></span>
+            <input id="maskFeather" type="range" min="0" max="20" step="1" value="4">
+          </label>
+
+          <p class="hint">画像をなぞって範囲を塗ります。縁はぼかしぶんだけ半透明にブレンドされます。</p>
+        </div>
       </div>
     </div>
   </section>
@@ -147,6 +180,7 @@
       <h2>結果</h2>
       <span id="resultMeta" class="hint"></span>
     </div>
+    <p id="resultMaskHint" class="hint" hidden>マスクは後からでも変えられます。上の「入力画像」で塗り直すと、この結果に即座に反映されます（作り直しは不要です）。</p>
     <div id="resultImages" class="ie-results"></div>
   </section>
 

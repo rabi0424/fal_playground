@@ -73,7 +73,9 @@ export function makeBucket(counters) {
     async put(key, value) {
       counters.sub++;
       const body = typeof value === 'string' ? Buffer.from(value)
-        : value instanceof Uint8Array ? Buffer.from(value) : await drain(value);
+        : value instanceof Uint8Array ? Buffer.from(value)
+          : value instanceof ArrayBuffer ? Buffer.from(new Uint8Array(value))
+            : await drain(value);
       objects.set(key, { body, uploaded: new Date() });
     },
     async get(key, opts) {
