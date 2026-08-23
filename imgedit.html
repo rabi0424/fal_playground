@@ -71,6 +71,10 @@
           <input type="checkbox" id="alignToggle" checked> ずれを補正してから重ねる
         </label>
 
+        <label class="mask-toggle" title="画像全体を作り直すモデルは、露出やホワイトバランスが全体にわずかに動きます。マスクの外側（変わらないはずの部分）だけを見て色味を元画像に寄せてから重ねるので、継ぎ目が出にくくなります">
+          <input type="checkbox" id="colorToggle" checked> 色味を合わせてから重ねる
+        </label>
+
         <div id="maskTools" class="ie-mask-tools" hidden>
           <div class="ie-mask-row">
             <div class="seg" role="group" aria-label="ツール">

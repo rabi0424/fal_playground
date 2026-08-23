@@ -164,6 +164,7 @@ const els = {
   maskToggle: $('#maskToggle'),
   maskModeHint: $('#maskModeHint'),
   alignToggle: $('#alignToggle'),
+  colorToggle: $('#colorToggle'),
   maskTools: $('#maskTools'),
   maskUndoBtn: $('#maskUndoBtn'),
   maskAllBtn: $('#maskAllBtn'),
@@ -1556,6 +1557,120 @@ function alignOffset(baseImg, editedImg, maskData, crop = null) {
   return Math.abs(offset.dx) < 0.25 && Math.abs(offset.dy) < 0.25 ? null : offset;
 }
 
+/* ---------- 色合わせ ---------- */
+//
+// 全画面を作り直して返すモデルでは、マスクの外側も「元画像に似せて描き直した
+// もの」で、露出やホワイトバランスが全体にわずかに動く。内側だけを貼り戻すと、
+// その差が継ぎ目として出る。
+//
+// 合わせる先は元画像、比べる場所は**マスクの外側だけ**にする。ここは両方が
+// 同じものを写しているはずの領域なので、「写っているものが違う」内側を混ぜずに
+// 済む。境目は編集がにじむので、ずれ補正と同じ guard を挟んで広めに除く
+// （alignWeights をそのまま使う）。
+//
+// 変換はチャンネルごとの 1 次式で、中央値と幅を合わせる。平均と標準偏差では
+// なく百分位を使うのは、guard を越えてにじんだ画素に引っ張られないため。
+// 3x3 行列やヒストグラム一致まで踏み込むと、参照が少ないときに階調が崩れる。
+//
+// 「合成 → その結果へ寄せる → もう一度」と繰り返す手もあるが、合わせる先
+// （元画像のマスク外）は毎回同じなので、1 回で解いた答えに収束する。しかも
+// 繰り返すほど合成済みの内側が参照に混じり、補正はむしろ弱まる。ここは 1 回で決める。
+
+const COLOR_WORK_PX = 384; // 統計を取るときの作業解像度（長辺）
+const COLOR_MIN_SAMPLES = 512; // これ未満しか比べられないなら合わせない
+const COLOR_MAX_GAIN = 1.6; // 幅の補正の上限。これを超える推定は信用しない
+const COLOR_MAX_SHIFT = 64; // 中央値の移動量の上限（0..255）
+const COLOR_MIN_SPREAD = 8; // 参照が平坦すぎるときは幅を合わせない
+const COLOR_MIN_EFFECT = 1.5; // 変換の最大移動量がこれ未満なら、かけない
+
+// 作業解像度に落として画素を取り出す（crop があれば元画像が入っている範囲だけ）
+function pixelsForStats(img, w, h, crop) {
+  const c = makeCanvas(w, h);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingQuality = 'high';
+  if (crop) ctx.drawImage(img, crop.x, crop.y, crop.width, crop.height, 0, 0, w, h);
+  else ctx.drawImage(img, 0, 0, w, h);
+  return ctx.getImageData(0, 0, w, h).data;
+}
+
+// 重み 1 の画素だけを見た、チャンネルごとの百分位（256 段のヒストグラムから）
+function channelPercentiles(data, weights, qs) {
+  const out = [];
+  for (let ch = 0; ch < 3; ch++) {
+    const hist = new Uint32Array(256);
+    let n = 0;
+    for (let i = 0; i < weights.length; i++) {
+      if (!weights[i]) continue;
+      hist[data[i * 4 + ch]] += 1;
+      n += 1;
+    }
+    const want = qs.map((q) => q * n);
+    const found = new Array(qs.length).fill(0);
+    let acc = 0;
+    let k = 0;
+    for (let v = 0; v < 256 && k < qs.length; v++) {
+      acc += hist[v];
+      while (k < qs.length && acc >= want[k]) {
+        found[k] = v;
+        k += 1;
+      }
+    }
+    out.push(found);
+  }
+  return out;
+}
+
+// 編集結果を元画像の色味へ寄せる、チャンネルごとの変換表。
+// 合わせられない（参照が少ない・効果がほぼ無い）ときは null
+function colorMatchLuts(baseImg, editedImg, maskData, crop) {
+  const baseW = baseImg.naturalWidth || baseImg.width;
+  const baseH = baseImg.naturalHeight || baseImg.height;
+  const aspect = baseW / baseH;
+  const w = aspect >= 1 ? COLOR_WORK_PX : Math.max(16, Math.round(COLOR_WORK_PX * aspect));
+  const h = aspect >= 1 ? Math.max(16, Math.round(COLOR_WORK_PX / aspect)) : COLOR_WORK_PX;
+
+  // マスクの外側だけ（境目の guard 込み）。全面を塗った場合はここで空になる
+  const { weights, count } = alignWeights(maskData, w, h);
+  if (count < COLOR_MIN_SAMPLES) return null;
+
+  const QS = [0.1, 0.5, 0.9];
+  const target = channelPercentiles(pixelsForStats(baseImg, w, h, null), weights, QS);
+  const source = channelPercentiles(pixelsForStats(editedImg, w, h, crop), weights, QS);
+
+  const luts = [];
+  let effect = 0;
+  for (let ch = 0; ch < 3; ch++) {
+    const [tLo, tMid, tHi] = target[ch];
+    const [sLo, sMid, sHi] = source[ch];
+    const tSpread = tHi - tLo;
+    const sSpread = sHi - sLo;
+    const usable = tSpread >= COLOR_MIN_SPREAD && sSpread >= COLOR_MIN_SPREAD;
+    const gain = usable
+      ? Math.min(COLOR_MAX_GAIN, Math.max(1 / COLOR_MAX_GAIN, tSpread / sSpread))
+      : 1;
+    const shift = Math.max(-COLOR_MAX_SHIFT, Math.min(COLOR_MAX_SHIFT, tMid - sMid));
+    const lut = new Uint8ClampedArray(256);
+    for (let v = 0; v < 256; v++) {
+      lut[v] = (v - sMid) * gain + sMid + shift;
+      effect = Math.max(effect, Math.abs(lut[v] - v));
+    }
+    luts.push(lut);
+  }
+  return effect >= COLOR_MIN_EFFECT ? luts : null;
+}
+
+function applyColorLuts(ctx, w, h, luts) {
+  const image = ctx.getImageData(0, 0, w, h);
+  const d = image.data;
+  const [lr, lg, lb] = luts;
+  for (let i = 0; i < d.length; i += 4) {
+    d[i] = lr[d[i]];
+    d[i + 1] = lg[d[i + 1]];
+    d[i + 2] = lb[d[i + 2]];
+  }
+  ctx.putImageData(image, 0, 0);
+}
+
 /* ---------- 合成 ---------- */
 
 // 出力画像をマスクの内側だけ元画像に重ねる。
@@ -1563,7 +1678,7 @@ function alignOffset(baseImg, editedImg, maskData, crop = null) {
 // 合成は「元画像の解像度・縦横比」で行い、出力をそこへ引き伸ばす。モデルへは
 // Qwen の解像度に合わせて縮めた（必要なら比を変えた）画像を送っているので、
 // ここで戻すことで、マスクの外側は元の画素のまま・内側だけが差し替わる
-function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = null) {
+function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = null, colorMatch = false) {
   const w = baseImg.naturalWidth || baseImg.width;
   const h = baseImg.naturalHeight || baseImg.height;
   const out = makeCanvas(w, h);
@@ -1572,7 +1687,7 @@ function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = n
   ctx.drawImage(baseImg, 0, 0, w, h);
 
   const layer = makeCanvas(w, h);
-  const lctx = layer.getContext('2d');
+  const lctx = layer.getContext('2d', { willReadFrequently: colorMatch });
   lctx.imageSmoothingQuality = 'high';
   // 縁の余白を付けて送った場合は、元画像が入っていた範囲だけを取り出す。
   // 半画素ぶん内側から取るのは、拡大の補間が余白側の画素を拾わないようにするため
@@ -1589,6 +1704,14 @@ function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = n
   // ずらすと端が空くので、先に素のまま敷いてから重ねる
   put(0, 0);
   if (offset && (offset.dx || offset.dy)) put(offset.dx, offset.dy);
+
+  // 抜く前に、画面全体を元画像の色味へ寄せる（参照はマスクの外側だけ）。
+  // 抜いたあとだと、比べたい外側が消えていて合わせられない
+  if (colorMatch) {
+    const luts = colorMatchLuts(baseImg, editedImg, maskData, crop);
+    if (luts) applyColorLuts(lctx, w, h, luts);
+  }
+
   lctx.globalCompositeOperation = 'destination-in';
   lctx.drawImage(rasterizeMask(w, h, maskData.strokes, maskData.feather), 0, 0);
 
@@ -1600,12 +1723,13 @@ function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = n
 // （別ドメインのままだと canvas が汚染されて取り出せない）
 // offset に 'auto' を渡すと、その場でずれを測る。測った結果も返すので、
 // 塗り直しのたびに測り直さずに済む
-async function compositeFromUrls(baseUrl, editedUrl, maskData, crop = null, offset = null, mime = 'image/png') {
+async function compositeFromUrls(baseUrl, editedUrl, maskData, crop = null, offset = null,
+  { mime = 'image/png', colorMatch = false } = {}) {
   const [baseImg, editedImg] = await Promise.all([
     loadImageForCanvas(baseUrl), loadImageForCanvas(editedUrl),
   ]);
   const shift = offset === 'auto' ? alignOffset(baseImg, editedImg, maskData, crop) : offset;
-  const canvas = compositeWithMask(baseImg, editedImg, maskData, crop, shift);
+  const canvas = compositeWithMask(baseImg, editedImg, maskData, crop, shift, colorMatch);
   try {
     return {
       dataUri: canvas.toDataURL(mime, 0.95),
@@ -2341,6 +2465,8 @@ async function run() {
     maskNative: !!maskUri,
     // 出力がずれて返るモデルでは、重ねる前に位置を合わせる
     alignEnabled: useMask && !!api.alignOutput && els.alignToggle.checked,
+    // 全体の色味が動いて返るので、重ねる前に元画像へ寄せる
+    colorEnabled: useMask && els.colorToggle.checked,
   };
 
   try {
@@ -2398,6 +2524,7 @@ async function waitAndFinish(job) {
     ...(job.maskNative ? { maskNative: true } : {}),
     ...(job.crop ? { crop: job.crop } : {}),
     ...(job.alignEnabled ? { alignEnabled: true } : {}),
+    ...(job.colorEnabled ? { colorEnabled: true } : {}),
     sourceSize: job.sourceSize ?? null,
     sentSize: job.sentSize ?? null,
     // 出力に続けて入力画像も残す（削除時に一括で消える）
@@ -2450,6 +2577,7 @@ async function buildMaskedRecord(record, maskData) {
     if (want === 'auto') setStatus('ずれを測っています…');
     const { dataUri, width, height, offset } = await compositeFromUrls(
       inputUrl, raw.url, maskData, record.crop ?? null, want,
+      { colorMatch: !!record.colorEnabled },
     );
     offsets[i] = offset ?? null;
     const url = await uploadDataUri(
@@ -2504,7 +2632,8 @@ function renderResult(record) {
     + (record.masked && record.sourceSize
       ? ` ・ 合成 ${record.sourceSize.width}×${record.sourceSize.height}` : '')
     + (record.cost ? ` ・ $${Number(record.cost).toFixed(4)}` : '')
-    + alignMetaText(record);
+    + alignMetaText(record)
+    + (record.masked && record.colorEnabled ? ' ・ 色合わせ済み' : '');
   els.resultMaskHint.hidden = !record.masked;
   // マスクをモデルにも渡した場合、塗り直しで変わるのは重ね合わせだけ
   els.resultMaskHint.textContent = record.maskNative
@@ -2584,6 +2713,7 @@ async function refreshResultComposite() {
       if (!raw) continue;
       const { dataUri } = await compositeFromUrls(
         inputUrl, raw.url, current, record.crop ?? null, record.align?.[i] ?? null,
+        { colorMatch: !!record.colorEnabled },
       );
       if (run !== compositeRun || shownResult !== record) return; // 続けて塗られた
       const el = els.resultImages.querySelector(`[data-result-index="${i}"] img`);
@@ -2655,6 +2785,7 @@ function saveForm() {
     rwMaskGrow: els.rwMaskGrow.value,
     rwPadEdges: els.rwPadEdges.value,
     align: els.alignToggle.checked,
+    color: els.colorToggle.checked,
     rwMaskMargin: els.rwMaskMargin.value,
     rwScheduler: els.rwScheduler.value,
     rwOutputQuality: els.rwOutputQuality.value,
@@ -2727,6 +2858,7 @@ async function restoreForm() {
   for (const l of s.rwLoras || []) addRwLoraRow(l.air, l.weight);
   els.maskToggle.checked = !!s.maskOn;
   els.alignToggle.checked = s.align !== false;
+  els.colorToggle.checked = s.color !== false;
   if (s.maskSize) els.maskSize.value = s.maskSize;
   if (s.maskFeather) els.maskFeather.value = s.maskFeather;
   if (Array.isArray(s.mask?.strokes)) mask = s.mask;
@@ -2893,6 +3025,14 @@ for (const btn of els.maskTools.querySelectorAll('.seg-btn')) {
 }
 
 els.alignToggle.addEventListener('change', saveForm);
+// 色合わせは重ね方の話なので、結果を出したあとでも切り替えたその場で反映する
+// （ずれ補正と違って測り直しが要らず、塗り直しと同じ経路で作り直せる）
+els.colorToggle.addEventListener('change', () => {
+  saveForm();
+  if (!resultFollowsMask()) return;
+  shownResult.colorEnabled = els.colorToggle.checked || undefined;
+  refreshResultComposite();
+});
 els.maskUndoBtn.addEventListener('click', maskUndo);
 els.maskClearBtn.addEventListener('click', maskClear);
 els.maskAllBtn.addEventListener('click', maskAll);
