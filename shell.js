@@ -71,7 +71,7 @@
       href: 'imgedit.html',
       label: '画像編集',
       icon: 'pencil',
-      hint: '画像 1 枚を指示文で編集する（Qwen Image Edit + LoRA / FLUX.1 Fill の修復）',
+      hint: '画像 1 枚を指示文で編集する（Qwen Image Edit + LoRA / FLUX.1 Fill / Wan2.2 + VACE）',
     },
     {
       file: 'edit.html',

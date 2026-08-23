@@ -65,7 +65,7 @@
         </label>
         <p class="hint" id="maskModeHint"></p>
 
-        <label class="mask-toggle" data-only="fal wavespeed" title="このモデルは画像全体を作り直すので、返ってくる絵が数 px ずれることがあります。マスクの外側（変わらないはずの部分）を手がかりに、重ねる前に位置を合わせます">
+        <label class="mask-toggle" data-only="fal wavespeed modal" title="このモデルは画像全体を作り直すので、返ってくる絵が数 px ずれることがあります。マスクの外側（変わらないはずの部分）を手がかりに、重ねる前に位置を合わせます">
           <input type="checkbox" id="alignToggle" checked> ずれを補正してから重ねる
         </label>
 
@@ -246,6 +246,29 @@
         </select>
       </label>
 
+      <div class="field" data-only="modal">
+        <span class="label">生成パラメータ <em>（Wan2.2 + VACE）</em></span>
+        <div class="row">
+          <label class="field num-field" title="蒸留 LoRA 前提の既定は 20">
+            <span class="label">ステップ</span>
+            <input id="wanSteps" type="number" min="1" max="60" step="1" placeholder="20">
+          </label>
+          <label class="field num-field" title="蒸留 LoRA を常時適用しているので 1 が前提です">
+            <span class="label">CFG</span>
+            <input id="wanCfg" type="number" min="0" max="10" step="0.1" placeholder="1.0">
+          </label>
+          <label class="field num-field" title="フローマッチングの shift。既定は 1.0">
+            <span class="label">shift</span>
+            <input id="wanShift" type="number" min="0" max="12" step="0.1" placeholder="1.0">
+          </label>
+        </div>
+        <label class="field num-field" title="モデルへ渡すマスクだけを太らせます。塗った縁に元画像が残るときに上げてください（合成に使うマスクは塗ったままの形です）">
+          <span class="label">マスクを広げる（px）</span>
+          <input id="wanMaskGrow" type="number" min="0" max="64" step="1" value="8">
+        </label>
+        <p class="hint">蒸留 LoRA（lightx2v cfg_step_distill / FusionX）を強度 0.4 で常時適用します。CFG 1 と 20 ステップはこの構成が前提です。</p>
+      </div>
+
       <div class="field">
         <span class="label">シード <em>（「固定」にチェック時のみ使用）</em></span>
         <div class="seed-row">
@@ -256,7 +279,7 @@
         </div>
       </div>
 
-      <label class="field" data-only="fal runware">
+      <label class="field" data-only="fal runware modal">
         <span class="label">除外したい要素（negative prompt）</span>
         <input id="negativePrompt" type="text" placeholder="空欄で未指定">
         <span class="hint" id="negativeHint" hidden></span>

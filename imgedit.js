@@ -6,12 +6,13 @@
  * 入力画像 1 枚 + 指示文で画像を編集する別画面。既存の「部分AI編集」
  * （Poe・範囲を切り抜いてはめ込む）とは別枠で、画像全体をモデルに渡す。
  *
- * - プロバイダは 3 つ。Qwen Image Edit 2511 を fal / WaveSpeed から、
- *   FLUX.1 Fill [dev] OneReward（塗った範囲を描き直す修復モデル）を Runware から
- *   選べる。API の形がそれぞれ違うので PROVIDERS のアダプタで吸収する
+ * - プロバイダは 4 つ。Qwen Image Edit 2511 を fal / WaveSpeed から、
+ *   FLUX.1 Fill [dev] OneReward（塗った範囲を描き直す修復モデル）を Runware から、
+ *   Wan2.2 + VACE のマスク編集を Modal 自前ホスト（modal_comfy）から選べる。
+ *   API の形がそれぞれ違うので PROVIDERS のアダプタで吸収する
  *   （送信内容の組み立て・投入・ポーリング・結果の解釈・費用の目安）
  * - いずれも Worker のプロキシ経由（/api/fal/proxy・/api/wavespeed/proxy・
- *   /api/runware/proxy）で呼ぶ。API キーはブラウザに渡さない
+ *   /api/runware/proxy・/api/modal/edit）で呼ぶ。API キーはブラウザに渡さない
  * - 入力画像（とマスク）は data URI として渡す。このアプリは Cloudflare Access の
  *   内側に置く前提で、/api/image/... をプロバイダ側から取りに行けるとは限らないため
  * - 同じ画像は R2 にも保存し（/api/upload）、履歴レコードと再開用に使う。
@@ -53,6 +54,17 @@ const SIZE_PRESETS = {
     { value: 'ar_3_4', label: '3:4（1140×1472）', width: 1140, height: 1472 },
     { value: 'ar_3_2', label: '3:2（1584×1056）', width: 1584, height: 1056 },
     { value: 'ar_2_3', label: '2:3（1056×1584）', width: 1056, height: 1584 },
+  ],
+  // wan: Wan は 32 の倍数の解像度しか扱えない。丸めが起きないよう最初から
+  // 32 の倍数で送る（返る X-Width / X-Height と食い違わせない）
+  wan: [
+    { value: 'ar_1_1', label: '1:1（1024×1024）', width: 1024, height: 1024 },
+    { value: 'ar_16_9', label: '16:9（1344×768）', width: 1344, height: 768 },
+    { value: 'ar_9_16', label: '9:16（768×1344）', width: 768, height: 1344 },
+    { value: 'ar_4_3', label: '4:3（1152×864）', width: 1152, height: 864 },
+    { value: 'ar_3_4', label: '3:4（864×1152）', width: 864, height: 1152 },
+    { value: 'ar_3_2', label: '3:2（1248×832）', width: 1248, height: 832 },
+    { value: 'ar_2_3', label: '2:3（832×1248）', width: 832, height: 1248 },
   ],
   flux: [
     { value: 'ar_1_1', label: '1:1（1024×1024）', width: 1024, height: 1024 },
@@ -106,6 +118,22 @@ const RUNWARE_RECOMMENDED = {
   negativePrompt: 'low quality, blurry, distorted, deformed, artifacts',
 };
 
+// Wan2.2 + VACE（Modal 自前ホスト）。元のワークフローが常時適用していた
+// 蒸留 LoRA 2 本を、毎回そのまま送る。
+//
+// この 2 本が「CFG 1 / 20 ステップ」という設定を成立させているので、外すなら
+// CFG とステップも変えないと出力が破綻する（INTEGRATION.md）。値を毎回同じに
+// しておけば ComfyUI のキャッシュが効き、モデルの再ロード（数十秒）も起きない
+const WAN_EDIT_LORAS = [
+  { name: 'Wan21_T2V_14B_lightx2v_cfg_step_distill_lora_rank32', strength: 0.4 },
+  { name: 'Wan2.1_T2V_14B_FusionX_LoRA', strength: 0.4 },
+];
+
+// Wan は 32 の倍数の解像度しか扱えない。1 辺 4096 まで
+const WAN_DIM_STEP = 32;
+const WAN_DIM_MIN = 256;
+const WAN_DIM_MAX = 4096;
+
 // スケジューラ。既定（自動）のままが基本なので、選択肢として出すだけ
 const RUNWARE_SCHEDULERS = ['Default', 'FlowMatchEulerDiscreteScheduler', 'Euler', 'Euler a',
   'Euler Beta', 'Euler Karras', 'Euler Exponential', 'DDIM', 'DEISMultistepScheduler',
@@ -155,6 +183,10 @@ const els = {
   guidance: $('#guidance'),
   acceleration: $('#acceleration'),
   outputFormat: $('#outputFormat'),
+  wanSteps: $('#wanSteps'),
+  wanCfg: $('#wanCfg'),
+  wanShift: $('#wanShift'),
+  wanMaskGrow: $('#wanMaskGrow'),
   seed: $('#seed'),
   seedLock: $('#seedLock'),
   negativePrompt: $('#negativePrompt'),
@@ -1882,6 +1914,103 @@ const PROVIDERS = {
         + ' ・ 費用は生成後に実額を表示します';
     },
   },
+
+  // Wan2.2 + VACE（Modal 自前ホスト / modal_comfy の /edit）。
+  //
+  // VACE はマスクの中だけを描くのではなく画面全体を再生成し、生の再生成画像を
+  // そのまま返す。マスクの外側も「元画像に似せて描き直したもの」で、元画像とは
+  // ピクセル一致しない。貼り戻しはこちら（compositeWithMask）で行う。
+  //
+  // 900 秒級で、150 秒を超えると 303 で結果ポーリングに変わる。ブラウザから直接
+  // 掴み続ける作りにはできないので、Worker 側でジョブにして状態をポーリングする
+  // （生成画面の Modal 版と同じ仕組み）
+  modal: {
+    label: 'Modal 自前ホスト（Wan2.2 + VACE マスク編集）',
+    model: 'modal/wan-vace-edit',
+    note: 'マスクで塗った範囲を描き直します（マスク必須）。画面全体を作り直して返すモデルなので、塗った範囲だけを元画像に重ねます。蒸留 LoRA を常時適用するため CFG は 1・20 ステップが前提です。出力は 1 枚で、送信サイズは 32 の倍数に丸めます。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。初回はモデルの読み込みで数分かかります。',
+    supports: { size: true, steps: true, guidance: true, negative: true },
+    sizeKind: 'wan',
+    // 全画面を作り直すので、返る絵が数 px ずれることがある
+    alignOutput: true,
+    nativeMask: true,
+    requiresMask: true,
+    // 半透明の縁を送ると、輪郭のゴーストや境界の暗い縁取りになる。
+    // ぼかしは合成のときだけかけ、モデルへはハードエッジで渡す（INTEGRATION.md）
+    hardMask: true,
+    // ぼかす代わりにマスクを数 px 太らせる。広げたぶんは合成で捨てる
+    maskGrow: () => Number(els.wanMaskGrow.value) || 0,
+    pollMs: 2500,
+
+    snapSize(size) {
+      const clamp = (v) => Math.min(WAN_DIM_MAX,
+        Math.max(WAN_DIM_MIN, Math.round(v / WAN_DIM_STEP) * WAN_DIM_STEP));
+      return { width: clamp(size.width), height: clamp(size.height) };
+    },
+
+    buildInput(dataUri, size, maskUri) {
+      const input = {
+        prompt: els.prompt.value.trim(),
+        image: dataUri,
+        mask: maskUri,
+        width: size.width,
+        height: size.height,
+        loras: WAN_EDIT_LORAS,
+      };
+      if (els.seedLock.checked && els.seed.value !== '') input.seed = Number(els.seed.value);
+      // 空欄はキーごと落として API の既定に任せる
+      if (els.wanSteps.value !== '') input.steps = Number(els.wanSteps.value);
+      if (els.wanCfg.value !== '') input.cfg = Number(els.wanCfg.value);
+      if (els.wanShift.value !== '') input.shift = Number(els.wanShift.value);
+      const negative = els.negativePrompt.value.trim();
+      if (negative) input.negative_prompt = negative;
+      return input;
+    },
+
+    // 画像本体（base64）は履歴にも再開用の記録にも残さない
+    strip(input) {
+      return { ...input, image: undefined, mask: undefined };
+    },
+
+    async submit(input) {
+      // ジョブ ID はこちらで採番する。送信のリトライや再開で同じ ID を使えば、
+      // サーバー側で二重に走らない
+      const jobId = makeId();
+      const res = await fetch('/api/modal/edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...input, jobId }),
+      });
+      if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
+      return { jobId };
+    },
+
+    async poll(handle) {
+      const res = await fetch(`/api/krea2/job/${handle.jobId}`).catch(() => null);
+      // 一時的な通信断は、次のポーリングで拾い直す
+      if (!res) return { done: false, text: '編集中…' };
+      if (res.status === 404) throw new Error('ジョブが見つかりませんでした（保持期間切れの可能性があります）');
+      if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
+      const job = await res.json();
+      if (job.status === 'error') throw new Error(job.error || '編集に失敗しました');
+      if (job.status !== 'done') return { done: false, text: '編集中…（初回はモデルの読み込みで数分かかります）' };
+      return { done: true, result: job };
+    },
+
+    parse(job) {
+      return {
+        images: [{ url: job.url, width: job.width ?? undefined, height: job.height ?? undefined }],
+        seed: job.seed ?? null,
+        flagged: 0,
+      };
+    },
+
+    costHint() {
+      const size = sendSize();
+      if (!size) return '';
+      return `出力 ${size.width}×${size.height} × 1 枚`
+        + ' ・ 自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です';
+    },
+  },
 };
 
 let providerId = 'fal';
@@ -2070,7 +2199,10 @@ async function run() {
   // モデルには少し広めのマスクを渡す。修復モデルは輪郭のすぐ内側に元画像を
   // 引きずりやすい（潜在空間では 8px 角がひと単位なので、境目はどうしても
   // 混ざる）。広げたぶんは合成で捨てるので、出来上がりの範囲は変わらない
-  const maskUri = useMask && api.nativeMask ? maskDataUri(outer, inner, mask, grow) : null;
+  // ぼかした縁をそのまま渡すと輪郭のゴーストや暗い縁取りになるモデルがある。
+  // その場合はハードエッジで送り、ぼかしは合成のときだけかける
+  const sendMask = api.hardMask ? { ...mask, feather: 0 } : mask;
+  const maskUri = useMask && api.nativeMask ? maskDataUri(outer, inner, sendMask, grow) : null;
   const input = api.buildInput(dataUri, outer, maskUri);
   const job = {
     id: makeId(),
@@ -2088,7 +2220,7 @@ async function run() {
     params: api.strip(input),
     // 履歴・ギャラリー側は { path, scale } で読むので、Runware の
     // { model, weight } もその形に寄せる（path には AIR が入る）
-    loras: input.loras ?? (input.lora ?? []).map((l) => ({ path: l.model, scale: l.weight })),
+    loras: normalizeJobLoras(input),
     // 合成はモデルの応答が返ったあとに行うので、そのときのマスクを控えておく
     mask: useMask ? structuredClone(mask) : null,
     // マスクを API にも渡したか（後から塗り直しても描き直しはやり直せない）
@@ -2107,6 +2239,16 @@ async function run() {
     setError(cancelled ? 'キャンセルしました' : `編集に失敗しました: ${err.message}`);
     clearJob();
   }
+}
+
+// 履歴・ギャラリー側は { path, scale } で読む。プロバイダごとに違う形
+// （Runware の { model, weight }・Modal の { name, strength }）をそこへ寄せる
+function normalizeJobLoras(input) {
+  if (Array.isArray(input.lora)) return input.lora.map((l) => ({ path: l.model, scale: l.weight }));
+  if (!Array.isArray(input.loras)) return [];
+  return input.loras.map((l) => (
+    l.path !== undefined ? l : { path: l.name ?? l.path, scale: l.strength ?? l.scale }
+  ));
 }
 
 // 送信済みジョブの完了待ち。ページを開き直したときもここから再開する
@@ -2404,6 +2546,10 @@ function saveForm() {
     rwOutputQuality: els.rwOutputQuality.value,
     rwPromptWeighting: els.rwPromptWeighting.checked,
     rwDefaults: RW_DEFAULTS_VERSION,
+    wanSteps: els.wanSteps.value,
+    wanCfg: els.wanCfg.value,
+    wanShift: els.wanShift.value,
+    wanMaskGrow: els.wanMaskGrow.value,
     outputFormat: els.outputFormat.value,
     seed: els.seed.value,
     seedLock: els.seedLock.checked,
@@ -2454,6 +2600,11 @@ async function restoreForm() {
   // 推奨値を入れる前の下書きは、モデル既定任せ（空欄）のままになっている。
   // それだと指示文がほとんど効かないので、一度だけ推奨値に入れ替える
   if ((s.rwDefaults ?? 0) < RW_DEFAULTS_VERSION) applyRunwareRecommended();
+  els.wanSteps.value = s.wanSteps ?? '';
+  els.wanCfg.value = s.wanCfg ?? '';
+  els.wanShift.value = s.wanShift ?? '';
+  // 広げる px だけは既定値がある（0 だと縁に元画像が残りやすい）
+  if (s.wanMaskGrow !== undefined && s.wanMaskGrow !== '') els.wanMaskGrow.value = s.wanMaskGrow;
   if (s.outputFormat) els.outputFormat.value = s.outputFormat;
   els.seed.value = s.seed || '';
   els.seedLock.checked = !!s.seedLock;
@@ -2552,7 +2703,8 @@ for (const el of [els.sizeSelect, els.numImages, els.steps, els.guidance,
   els.acceleration, els.outputFormat, els.seed, els.seedLock, els.negativePrompt,
   els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength, els.rwMaskMargin,
   els.rwMaskGrow, els.rwPadEdges, els.rwScheduler, els.rwOutputQuality,
-  els.rwPromptWeighting]) {
+  els.rwPromptWeighting,
+  els.wanSteps, els.wanCfg, els.wanShift, els.wanMaskGrow]) {
   el.addEventListener('change', saveForm);
 }
 // 推奨から外れたらその場で理由を出す
@@ -2561,7 +2713,7 @@ for (const el of [els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength,
   el.addEventListener('input', renderRunwareParamHint);
 }
 // 広げ幅と縁の余白は、何をどの大きさで送るかを変える
-for (const el of [els.rwMaskGrow, els.rwPadEdges]) {
+for (const el of [els.rwMaskGrow, els.rwPadEdges, els.wanMaskGrow]) {
   el.addEventListener('input', renderSizeHint);
 }
 els.rwPresetBtn.addEventListener('click', () => {

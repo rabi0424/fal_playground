@@ -5,11 +5,14 @@
 // Modal 自前ホスト版 Krea 2（modal_comfy リポジトリ）。fal ではなく
 // Worker のプロキシ（/api/krea2/generate）経由で生成する。
 // エンドポイントは実験版（exp）・GPU スナップショット版（gpusnap）・本番・
-// チェックポイント指定版（ckpt）の 4 系統があり、標準は実験版
+// チェックポイント指定版（ckpt）・統合版（wan）の 5 系統があり、標準は実験版
 const MODAL_KREA2_EXP_ID = 'modal/krea2-turbo-exp';
 const MODAL_KREA2_GPUSNAP_ID = 'modal/krea2-turbo-gpusnap';
 const MODAL_KREA2_ID = 'modal/krea2-turbo';
 const MODAL_KREA2_CKPT_ID = 'modal/krea2-turbo-ckpt';
+// 統合版（modal_comfy の wan_vace_app）。画像編集（Wan2.2 + VACE）と同じコンテナを
+// 共有するので、どちらかが動いていればもう一方もウォームで始められる
+const MODAL_KREA2_WAN_ID = 'modal/krea2-turbo-wan';
 
 const MODELS = [
   { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA', sizeParam: 'image_size', lora: true, loraBase: 'krea2', maxLoras: 3 },
@@ -18,6 +21,9 @@ const MODELS = [
   { id: MODAL_KREA2_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 本番）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'prod' },
   // ckpt: Modal Volume 内のチェックポイント（UNet）を生成ごとに指定できる版
   { id: MODAL_KREA2_CKPT_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal チェックポイント指定版）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'ckpt', ckpt: true },
+  // wan: 画像編集（Wan2.2 + VACE）と同居する統合版。チェックポイント指定に加え、
+  // サンプラー・スケジューラ・denoise も受け付ける
+  { id: MODAL_KREA2_WAN_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・編集と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'wan', ckpt: true, sampler: true },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -113,6 +119,10 @@ const els = {
   seedLock: $('#seedLock'),
   steps: $('#steps'),
   guidance: $('#guidance'),
+  wanSamplerRow: $('#wanSamplerRow'),
+  samplerName: $('#samplerName'),
+  scheduler: $('#scheduler'),
+  denoise: $('#denoise'),
   generateBtn: $('#generateBtn'),
   jobList: $('#jobList'),
   jobHint: $('#jobHint'),
@@ -296,6 +306,9 @@ function updateModelFields() {
   // Modal 版のデフォルト値・範囲は API の仕様（INTEGRATION.md）に合わせて案内する
   els.steps.placeholder = isModal ? '8（変更非推奨）' : 'デフォルト';
   els.guidance.placeholder = isModal ? '1（0〜1）' : 'デフォルト';
+
+  // サンプラー系は統合版だけが受け付ける
+  els.wanSamplerRow.hidden = !model.sampler;
 
   // aspect_ratio 系モデルはピクセル指定に非対応なのでカスタムを出さない
   const supportsCustom = model.sizeParam !== 'aspect_ratio';
@@ -925,7 +938,9 @@ function collectStatsSamples() {
   const modal = history.filter(isModalRecord).sort((a, b) => a.ts - b.ts);
   let prevEnd = 0;
   for (const r of modal) {
-    const count = Math.max(1, r.images?.length ?? 1);
+    // 画像編集のレコードは images に合成前の生画像と入力画像も並ぶので、
+    // 枚数は outputCount を優先して見る（無い生成レコードは images の数でよい）
+    const count = Math.max(1, r.outputCount ?? r.images?.length ?? 1);
     if (Array.isArray(r.procMs) && r.procMs.length > 0) {
       for (const ms of r.procMs) add(r.model, ms / 1000);
     } else {
@@ -1480,6 +1495,12 @@ function buildModalInput(prompt) {
   if (seed !== undefined) input.seed = seed;
   if (els.steps.value !== '') input.steps = Number(els.steps.value);
   if (els.guidance.value !== '') input.cfg = Number(els.guidance.value);
+  // 統合版だけの項目。空欄はキーごと落として API の既定に任せる
+  if (!els.wanSamplerRow.hidden) {
+    if (els.samplerName.value.trim() !== '') input.sampler_name = els.samplerName.value.trim();
+    if (els.scheduler.value.trim() !== '') input.scheduler = els.scheduler.value.trim();
+    if (els.denoise.value !== '') input.denoise = Number(els.denoise.value);
+  }
   return input;
 }
 
@@ -2336,6 +2357,9 @@ function saveFormState() {
     numImages: els.numImages.value,
     seed: els.seed.value,
     seedLock: els.seedLock.checked,
+    samplerName: els.samplerName.value,
+    scheduler: els.scheduler.value,
+    denoise: els.denoise.value,
     steps: els.steps.value,
     guidance: els.guidance.value,
     compare: compareMode,
@@ -2370,6 +2394,9 @@ function restoreFormState() {
   els.seedLock.checked = !!s.seedLock;
   els.steps.value = s.steps || '';
   els.guidance.value = s.guidance || '';
+  els.samplerName.value = s.samplerName || '';
+  els.scheduler.value = s.scheduler || '';
+  els.denoise.value = s.denoise || '';
   updateCustomSize();
 
   els.loraList.innerHTML = '';

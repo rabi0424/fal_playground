@@ -48,7 +48,7 @@ npx wrangler r2 bucket create fal-playground-images
 - サイズ（約 1MP 基準のプリセット 6 種 + カスタム px 指定）・枚数・シード（「固定」チェック時のみ適用）・ステップ数・ガイダンスの指定
 - Hugging Face 公開リポジトリからの LoRA 一括登録（.safetensors を一覧表示して選択）
 - Civitai からの LoRA 取り込み（URL を貼ると Hugging Face へアップロードしてライブラリに登録・下記参照）
-- 画像編集（Qwen Image Edit 2511 + LoRA / FLUX.1 Fill [dev] OneReward。画像 1 枚と指示文で編集・下記参照）
+- 画像編集（Qwen Image Edit 2511 + LoRA / FLUX.1 Fill [dev] OneReward / Wan2.2 + VACE。画像 1 枚と指示文で編集・下記参照）
 - LoRA 比較アリーナ（別画面 `arena.html`・下記参照）
 - 部分AI編集（別画面 `edit.html`・下記参照）
 - 生成履歴とプロンプトの再利用（サーバー保存・全端末で共通）
@@ -77,20 +77,29 @@ LoRA 欄の「Civitai から取り込み」で、Civitai のモデルページ U
 
 トップの「画像編集」（`imgedit.html`）で、画像 1 枚と指示文を渡して編集します。範囲を切り抜いてはめ込む「部分AI編集」（Poe）とは別の機能で、画像全体をモデルに渡します。
 
-**プロバイダは fal / WaveSpeed / Runware から選べます**。fal と WaveSpeed は同じ Qwen Image Edit 2511（API の形と課金が違うだけ）で、Runware だけ**マスクした範囲を描き直す修復（inpainting）モデル**です。
+**プロバイダは fal / WaveSpeed / Runware / Modal から選べます**。fal と WaveSpeed は同じ Qwen Image Edit 2511（API の形と課金が違うだけ）で、Runware と Modal は**マスクした範囲を描き直す**モデルです。
 
-| | fal（`fal-ai/qwen-image-edit-2511/lora`） | WaveSpeed（`wavespeed-ai/qwen-image/edit-2511-lora`） | Runware（`runware:121@1`） |
-|---|---|---|---|
-| モデル | Qwen Image Edit 2511 | Qwen Image Edit 2511 | FLUX.1 Fill [dev] OneReward |
-| 得意なこと | 画像全体への指示 | 画像全体への指示 | 塗った範囲だけの描き直し・物体の除去 |
-| 指定できるもの | 解像度・枚数・ステップ・ガイダンス・速度・negative prompt・seed・形式 | 指示文・LoRA・seed・形式のみ | 解像度・枚数・ステップ・CFG・True CFG・マスクの余白・スケジューラ・出力品質・negative prompt・seed・形式 |
-| 出力枚数 | 1〜4 | 1 枚固定 | 1〜4 |
-| マスク | ブラウザ側の合成のみ（ずれ補正あり） | ブラウザ側の合成のみ（ずれ補正あり） | **API に渡す（必須）** + 合成 |
-| LoRA | 使える（ライブラリ） | 使える（ライブラリ・公開 URL のみ） | 使える（Runware 登録済みの AIR） |
-| 課金 | $0.035 / メガピクセル（解像度依存） | $0.025 / 枚（固定） | 生成後に実額を表示 |
-| 必要な Secret | `FAL_KEY` | `WAVESPEED_API_KEY` | `RUNWARE_API_KEY` |
+| | fal（`fal-ai/qwen-image-edit-2511/lora`） | WaveSpeed（`wavespeed-ai/qwen-image/edit-2511-lora`） | Runware（`runware:121@1`） | Modal（自前ホスト） |
+|---|---|---|---|---|
+| モデル | Qwen Image Edit 2511 | Qwen Image Edit 2511 | FLUX.1 Fill [dev] OneReward | Wan2.2 + VACE |
+| 得意なこと | 画像全体への指示 | 画像全体への指示 | 塗った範囲だけの描き直し・物体の除去 | 塗った範囲の描き直し（動画モデル譲りの整合性） |
+| 指定できるもの | 解像度・枚数・ステップ・ガイダンス・速度・negative prompt・seed・形式 | 指示文・LoRA・seed・形式のみ | 解像度・枚数・ステップ・CFG・True CFG・マスクの余白・スケジューラ・出力品質・negative prompt・seed・形式 | 解像度・ステップ・CFG・shift・マスクを広げる px・negative prompt・seed・形式 |
+| 出力枚数 | 1〜4 | 1 枚固定 | 1〜4 | 1 枚固定 |
+| マスク | ブラウザ側の合成のみ（ずれ補正あり） | ブラウザ側の合成のみ（ずれ補正あり） | **API に渡す（必須）** + 合成 | **API に渡す（必須）** + 合成（ずれ補正あり） |
+| LoRA | 使える（ライブラリ） | 使える（ライブラリ・公開 URL のみ） | 使える（Runware 登録済みの AIR） | 蒸留 LoRA 2 本を固定で適用（下記） |
+| 課金 | $0.035 / メガピクセル（解像度依存） | $0.025 / 枚（固定） | 生成後に実額を表示 | 自前ホスト（GPU の秒課金） |
+| 必要な Secret | `FAL_KEY` | `WAVESPEED_API_KEY` | `RUNWARE_API_KEY` | `MODAL_PROXY_KEY` / `MODAL_PROXY_SECRET` |
 
-プロバイダを切り替えると、対応していない項目は自動で隠れます。大きい画像を少数編集するなら WaveSpeed、細かく詰めたいなら fal、一部だけを描き直したいなら Runware、という使い分けになります。
+プロバイダを切り替えると、対応していない項目は自動で隠れます。大きい画像を少数編集するなら WaveSpeed、細かく詰めたいなら fal、一部だけを描き直したいなら Runware か Modal、という使い分けになります。
+
+#### Modal（Wan2.2 + VACE）
+
+生成側の「統合版」と**同じコンテナを共有**します（片方を使えばもう片方もウォームになります）。VACE はマスクの中だけを描くのではなく**画面全体を再生成**し、生の再生成画像をそのまま返すので、マスクの内側だけを元画像に重ねる合成はブラウザ側で行います（ほかのプロバイダと同じ仕組みなので、塗り直しは作り直さずに反映されます）。
+
+- 送信サイズは **32 の倍数**に丸めます。Wan がその解像度しか扱えないためで、最初から合わせて送ることで丸めのズレを避けています
+- モデルへ渡すマスクは**ハードエッジ**です。半透明の縁をそのまま渡すと、消したいものの輪郭がゴーストとして残ったり、境界に暗い縁取りが出たりします。ぼかしは合成のときだけかけ、輪郭のリークには「マスクを広げる（px）」を使います
+- 蒸留 LoRA（`lightx2v cfg_step_distill` / `FusionX`）を強度 0.4 で**常時適用**します。CFG 1・20 ステップという既定はこの構成が前提で、外すと出力が破綻します。値を毎回同じにしているので ComfyUI のキャッシュが効き、モデルの再ロード（数十秒）も起きません
+- 編集は 900 秒級の処理で、150 秒を超えると Modal が結果ポーリング用の URL を返します。そのため生成と同じく **Worker 側のジョブ**にしてあり、タブを閉じても結果は失われません
 
 - 入力画像は**端末から**（ファイル / カメラ / ドラッグ＆ドロップ）か**生成履歴から**選べます。長辺 2048px に収まるよう縮小してから送ります
 - LoRA を最大 3 つまで指定できます。fal / WaveSpeed は共通の LoRA ライブラリ（表示名・既定 scale・トリガーワードがそのまま使えます）から選び、**候補に出るのは Qwen 用の LoRA だけ**です。この画面からも「Civitai から取り込み」で追加できます。Runware は指定の仕方が違うので、下記の専用の欄になります
@@ -102,9 +111,9 @@ LoRA 欄の「Civitai から取り込み」で、Civitai のモデルページ U
 - 「この結果を編集」で、出力をそのまま次の入力にできます
 - 送信中にページを閉じても、開き直したときに結果を回収します
 
-#### ずれの補正（fal / WaveSpeed）
+#### ずれの補正（fal / WaveSpeed / Modal）
 
-Qwen Image Edit は画像全体を作り直すので、**返ってくる絵が数 px ずれることがあります**。そのままマスクで抜くと、差し替えた部分だけ位置がずれて見えます。そこで重ねる前に位置を合わせます（マスクを使うときだけ・チェックで無効化できます）。
+Qwen Image Edit も Wan2.2 + VACE も画像全体を作り直すので、**返ってくる絵が数 px ずれることがあります**。そのままマスクで抜くと、差し替えた部分だけ位置がずれて見えます。そこで重ねる前に位置を合わせます（マスクを使うときだけ・チェックで無効化できます）。
 
 - **マスクの外側**（＝変わらないはずの領域。境目は編集の影響を受けるので広めに除く）だけを見ます
 - 明るさやコントラストの違いに引きずられないよう、輝度そのものではなく**勾配**（輪郭の出方）を正規化相互相関で比べます
@@ -282,12 +291,20 @@ node test/import.test.mjs
 
 ## Modal 自前ホスト版 Krea 2
 
-モデル選択の「Krea 2 [turbo] 自前ホスト（Modal 実験版 / GPUスナップ版 / 本番 / チェックポイント指定版）」は、fal ではなく Modal 上の [modal_comfy](https://github.com/rabi0424/modal_comfy) API で生成します。実験版（CPU スナップショット）・GPU スナップショット版（`krea2-comfy-api-gpusnap`）・本番（安定版）・チェックポイント指定版（`krea2-comfy-api-ckpt`）はモデル選択で切り替えられ、標準は実験版です。エンドポイントの URL 自体を変えたい場合は、Worker の環境変数で上書きできます（未設定なら modal_comfy の既定 URL）:
+モデル選択の「Krea 2 [turbo] 自前ホスト（Modal 実験版 / GPUスナップ版 / 本番 / チェックポイント指定版 / 統合版）」は、fal ではなく Modal 上の [modal_comfy](https://github.com/rabi0424/modal_comfy) API で生成します。実験版（CPU スナップショット）・GPU スナップショット版（`krea2-comfy-api-gpusnap`）・本番（安定版）・チェックポイント指定版（`krea2-comfy-api-ckpt`）・統合版（`wan-vace-api`）はモデル選択で切り替えられ、標準は実験版です。エンドポイントの URL 自体を変えたい場合は、Worker の環境変数で上書きできます（未設定なら modal_comfy の既定 URL）:
 
 - `KREA2_ENDPOINT_EXP` = 実験版の URL
 - `KREA2_ENDPOINT_GPUSNAP` = GPU スナップショット版の URL
 - `KREA2_ENDPOINT` = 本番の URL
 - `KREA2_ENDPOINT_CKPT` = チェックポイント指定版の URL
+- `WAN_ENDPOINT_GENERATE` = 統合版（生成）の URL
+- `WAN_ENDPOINT_EDIT` = 統合版（Wan2.2 + VACE のマスク編集）の URL
+
+### 統合版（編集とコンテナを共有）
+
+統合版は、画像編集の「Modal 自前ホスト（Wan2.2 + VACE）」と**同じコンテナを共有**します。どちらかのリクエストでコンテナが立ち上がればもう一方もウォームになるので、生成と編集を行き来する使い方ではコールドスタートとアイドル維持のコストが 2 用途で割り勘になります（同時実行は 1 件なので、両方に同時に投げると後発は待たされます）。
+
+チェックポイント指定に加えて、詳細設定でサンプラー・スケジューラ・denoise も指定できます（空欄なら API の既定 `er_sde` / `simple` / `1.0`）。
 
 ### チェックポイント指定版
 
