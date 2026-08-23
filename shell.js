@@ -119,6 +119,8 @@
   const sidebar = document.getElementById('appSidebar');
   const body = document.querySelector('.shell-body');
   if (!sidebar || !body) return;
+  /* 引き出しを開いたときの移動先。タブ順には入れない */
+  sidebar.tabIndex = -1;
 
   function navItem(n) {
     const active = n.file === here;
@@ -227,7 +229,9 @@
     document.getElementById('drawerOpen').setAttribute('aria-expanded', 'true');
     /* 背後のページはスクロールさせない */
     document.body.style.overflow = 'hidden';
-    sidebar.querySelector('.nav-item.active, .nav-item')?.focus();
+    /* フォーカスは引き出し本体へ移す。項目に当てるとリングが出て、
+       現在地のハイライトと見分けがつかなくなる */
+    sidebar.focus({ preventScroll: true });
   }
 
   function closeDrawer() {
@@ -276,7 +280,7 @@
   document.addEventListener('focusin', (e) => {
     if (root.dataset.drawer !== 'open') return;
     if (sidebar.contains(e.target)) return;
-    sidebar.querySelector('.nav-item')?.focus();
+    sidebar.focus({ preventScroll: true });
   });
 
   /* 左端からの払いで開く / 開いているときは左向きの払いで閉じる。
