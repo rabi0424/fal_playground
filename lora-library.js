@@ -68,17 +68,19 @@ function triggerWords(path) {
   return (entry(path)?.trigger || '').split(',').map((w) => w.trim()).filter(Boolean);
 }
 
-// Civitai のベースモデル表記はゆれるので（"Qwen"／"Qwen-Image"／"Krea 2" など）、
-// 使う側が判定しやすい大まかな種類に寄せる
+// Civitai のベースモデル表記はゆれるので（"Qwen"／"Qwen-Image"／"Krea 2"／
+// "Wan Video 14B t2v" など）、使う側が判定しやすい大まかな種類に寄せる
 function baseKind(base) {
   const s = String(base ?? '').toLowerCase();
   if (s === '') return null;
+  // "qwen" に "wan" は含まれない（wen）ので、この順で取り違えは起きない
+  if (s.includes('wan')) return 'wan';
   if (s.includes('qwen')) return 'qwen';
   if (s.includes('krea')) return 'krea2';
   return 'other';
 }
 
-const BASE_LABELS = { qwen: 'Qwen', krea2: 'Krea 2', other: 'その他' };
+const BASE_LABELS = { qwen: 'Qwen', krea2: 'Krea 2', wan: 'Wan', other: 'その他' };
 
 // ★ を先頭に、あとは表示名順（数字は数値として比較する）
 function sorted(items = load()) {

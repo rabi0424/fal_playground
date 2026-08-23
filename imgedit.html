@@ -17,6 +17,7 @@
 })();
 </script>
 <script src="lora-library.js" defer></script>
+<script src="hf-import.js" defer></script>
 <script src="runware-lora.js" defer></script>
 <script src="civitai-import.js" defer></script>
 <script src="imgedit.js" defer></script>
@@ -134,15 +135,16 @@
       <p class="hint" id="rwLoraHint" hidden></p>
     </details>
 
-    <details class="field lora-accordion" data-only="fal wavespeed" open>
-      <summary class="label">LoRA</summary>
+    <details class="field lora-accordion" data-only="fal wavespeed modal" open>
+      <summary class="label" id="loraLabel">LoRA</summary>
       <div id="loraList" class="lora-list"></div>
       <div class="lora-actions">
         <button id="addLoraBtn" class="ghost-btn small" type="button">＋ LoRA を追加</button>
+        <button id="hfOpenBtn" class="ghost-btn small" type="button">Hugging Face から一括登録</button>
         <button id="civitaiBtn" class="ghost-btn small" type="button">Civitai から取り込み</button>
         <a href="library.html" class="ghost-btn small">ライブラリを管理</a>
       </div>
-      <p class="hint" id="loraHint" hidden>登録済みの LoRA がありません。生成画面の「Hugging Face から一括登録」「Civitai から取り込み」で追加できます。</p>
+      <p class="hint" id="loraHint" hidden></p>
     </details>
 
     <details class="field lora-accordion">

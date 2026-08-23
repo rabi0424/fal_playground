@@ -23,7 +23,7 @@
 
 /* ---------- constants ---------- */
 
-const MAX_LORAS = 3; // どちらのプロバイダも最大 3 個
+const MAX_LORAS = 3; // 既定。プロバイダ側で maxLoras を持てば上書きする
 const MAX_INPUT_PX = 2048; // リサイズしない設定のときの上限（長辺）
 const INPUT_QUALITY = 0.92; // 送信用 JPEG の品質
 // 合成の土台に使う元画像の上限。元解像度を保つのが目的なので大きめだが、
@@ -176,6 +176,8 @@ const els = {
   addLoraBtn: $('#addLoraBtn'),
   civitaiBtn: $('#civitaiBtn'),
   loraHint: $('#loraHint'),
+  loraLabel: $('#loraLabel'),
+  hfOpenBtn: $('#hfOpenBtn'),
   sizeSelect: $('#sizeSelect'),
   sizeHint: $('#sizeHint'),
   numImages: $('#numImages'),
@@ -252,10 +254,18 @@ const loraTriggerWords = (path) => loraLib.triggerWords(path);
 
 // LoRA を使えるのは Qwen Image Edit の 2 プロバイダだけなので、候補も Qwen 用に絞る
 // （Krea 2 用を混ぜても効かないか、出力が壊れる）。Runware では LoRA 欄ごと隠す
-const LORA_BASE = 'qwen';
+// 候補に出す LoRA のベースモデル。プロバイダごとに違う（Qwen 用の LoRA は
+// Wan では使えない、という関係なので混ぜない）
+function loraBase() {
+  return provider().loraBase ?? 'qwen';
+}
+
+function maxLoras() {
+  return provider().maxLoras ?? MAX_LORAS;
+}
 
 function sortedLoraLibrary() {
-  return loraLib.forBase(LORA_BASE);
+  return loraLib.forBase(loraBase());
 }
 
 /* ---------- LoRA 行 ---------- */
@@ -263,7 +273,7 @@ function sortedLoraLibrary() {
 function addLoraRow(path = '', scale) {
   const library = sortedLoraLibrary();
   if (library.length === 0) return;
-  if (els.loraList.querySelectorAll('.lora-row').length >= MAX_LORAS) return;
+  if (els.loraList.querySelectorAll('.lora-row').length >= maxLoras()) return;
 
   const row = document.createElement('div');
   row.className = 'lora-row';
@@ -375,15 +385,27 @@ function insertTriggerWords(words) {
 function syncAddLoraBtn() {
   const count = els.loraList.querySelectorAll('.lora-row').length;
   const usable = sortedLoraLibrary().length;
-  els.addLoraBtn.disabled = count >= MAX_LORAS || usable === 0;
-  els.addLoraBtn.title = count >= MAX_LORAS ? `LoRA はこのモデルでは最大 ${MAX_LORAS} 個までです` : '';
+  const max = maxLoras();
+  const base = loraLib.baseLabel(loraBase());
+  els.addLoraBtn.disabled = count >= max || usable === 0;
+  els.addLoraBtn.title = count >= max ? `LoRA はこのモデルでは最大 ${max} 個までです` : '';
 
   // 使える LoRA が無い / 別のベースモデル向けを隠したことを伝える
   const hidden = loraLib.load().length - usable;
   els.loraHint.hidden = usable > 0 && hidden === 0;
   els.loraHint.textContent = usable === 0
-    ? 'Qwen 用の LoRA が登録されていません。下の「Civitai から取り込み」で追加できます（Krea 2 用の LoRA はこのモデルでは使えません）。'
-    : `Qwen 以外の LoRA ${hidden} 件は候補から外しています（ベースモデルはライブラリ管理で直せます）。`;
+    ? `${base} 用の LoRA が登録されていません。下の「Hugging Face から一括登録」「Civitai から取り込み」で追加できます（別のベースモデル用の LoRA はこのモデルでは使えません）。`
+    : `${base} 以外の LoRA ${hidden} 件は候補から外しています（ベースモデルはライブラリ管理で直せます）。`;
+}
+
+// 候補に無くなった LoRA 行を落とす。ベースモデルはプロバイダで変わるので、
+// 切り替えたときに前のモデル用の LoRA が残っていると、そのまま送られてしまう
+function pruneLoraRows() {
+  const usable = new Set(sortedLoraLibrary().map((item) => item.path));
+  for (const row of els.loraList.querySelectorAll('.lora-row')) {
+    if (!usable.has(row.querySelector('.lora-select').value)) row.remove();
+  }
+  syncAddLoraBtn();
 }
 
 function collectLoras() {
@@ -1666,6 +1688,7 @@ const PROVIDERS = {
     note: '解像度・ステップ・ガイダンスまで指定できます。課金はメガピクセル単価（$0.035/MP）。',
     supports: { size: true, count: true, steps: true, guidance: true, acceleration: true, negative: true },
     sizeKind: 'qwen',
+    loraBase: 'qwen',
     // 画像全体を作り直すモデルなので、返ってくる絵が数 px ずれることがある
     alignOutput: true,
     pollMs: 1200,
@@ -1741,6 +1764,7 @@ const PROVIDERS = {
     note: '指定できるのは指示文・LoRA・seed・形式だけです（ステップ等は API に無く、出力は 1 枚）。出力サイズの指定も無いので、送信サイズがそのまま効きます。課金は 1 枚 $0.025 の固定制。LoRA は公開アクセスできる URL である必要があります。',
     supports: {},
     sizeKind: 'qwen',
+    loraBase: 'qwen',
     alignOutput: true,
     pollMs: 2000,
     endpoint: 'https://api.wavespeed.ai/api/v3/wavespeed-ai/qwen-image/edit-2511-lora',
@@ -1927,9 +1951,13 @@ const PROVIDERS = {
   modal: {
     label: 'Modal 自前ホスト（Wan2.2 + VACE マスク編集）',
     model: 'modal/wan-vace-edit',
-    note: 'マスクで塗った範囲を描き直します（マスク必須）。画面全体を作り直して返すモデルなので、塗った範囲だけを元画像に重ねます。蒸留 LoRA を常時適用するため CFG は 1・20 ステップが前提です。出力は 1 枚で、送信サイズは 32 の倍数に丸めます。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。初回はモデルの読み込みで数分かかります。',
+    note: 'マスクで塗った範囲を描き直します（マスク必須）。画面全体を作り直して返すモデルなので、塗った範囲だけを元画像に重ねます。蒸留 LoRA を常時適用するため CFG は 1・20 ステップが前提です。LoRA は Wan 用のものを追加で指定できます（名前指定なので、Modal Volume に無いものは初回リクエスト時に取り込まれます）。出力は 1 枚で、送信サイズは 32 の倍数に丸めます。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。初回はモデルの読み込みで数分かかります。',
     supports: { size: true, steps: true, guidance: true, negative: true },
     sizeKind: 'wan',
+    loraBase: 'wan',
+    // 蒸留 LoRA 2 本と合わせて、API のサニティ上限（10 本）に収まる数
+    maxLoras: 8,
+    fixedLoraNote: '標準の蒸留 2 本に追加',
     // 全画面を作り直すので、返る絵が数 px ずれることがある
     alignOutput: true,
     nativeMask: true,
@@ -1954,7 +1982,13 @@ const PROVIDERS = {
         mask: maskUri,
         width: size.width,
         height: size.height,
-        loras: WAN_EDIT_LORAS,
+        // 蒸留 LoRA が先。指定した順に数珠つなぎになるので、標準の土台の上に
+        // ユーザーの LoRA を重ねる形にする
+        loras: [...WAN_EDIT_LORAS, ...collectLoras().map((l) => ({
+          // この API の LoRA は URL ではなく名前（.safetensors 抜き）で指定する
+          name: loraLib.fileName(l.path),
+          strength: l.scale,
+        }))],
       };
       if (els.seedLock.checked && els.seed.value !== '') input.seed = Number(els.seed.value);
       // 空欄はキーごと落として API の既定に任せる
@@ -2081,6 +2115,9 @@ function syncProviderFields() {
   els.maskToggle.title = api.requiresMask
     ? 'このモデルはマスクした範囲を描き直すモデルなので、マスクは外せません' : '';
   if (api.requiresMask) els.maskToggle.checked = true;
+  // 標準の LoRA が別枠で常に入るモデルでは、この欄が「追加ぶん」だと分かるようにする
+  els.loraLabel.textContent = api.fixedLoraNote ? `LoRA（${api.fixedLoraNote}）` : 'LoRA';
+  pruneLoraRows();
   renderSizeOptions();
   renderRunwareParamHint();
   syncMaskUi();
@@ -2631,13 +2668,29 @@ loraLib.migrate();
 civitaiImport.init({
   defaultRepo: HF_DEFAULT_REPO,
   register(kind, hfUrl, meta) {
-    // この画面から入れたものは Qwen 用として扱う（Civitai 側の表記があればそちら優先）
-    loraLib.register(hfUrl, { ...(meta ?? {}), base: meta?.base || 'Qwen' });
+    // Civitai 側にベースモデルの表記があればそれを使い、無ければ今のプロバイダ用として扱う
+    const base = meta?.base || loraLib.baseLabel(loraBase());
+    loraLib.register(hfUrl, { ...(meta ?? {}), base });
     syncAddLoraBtn();
     for (const row of els.loraList.querySelectorAll('.lora-row')) renderRowTrigger(row);
     return `ライブラリに登録しました: ${loraLib.label(hfUrl)}`;
   },
 });
+
+// Hugging Face からの一括登録（共有コンポーネント）。生成画面と同じダイアログで、
+// ベースモデルの初期選択だけ今のプロバイダに合わせる
+hfImport.init({
+  defaultRepo: HF_DEFAULT_REPO,
+  currentBase: () => loraBase(),
+  registeredPaths: () => loraLib.load().map((item) => item.path),
+  register(kind, url, meta) {
+    loraLib.register(url, meta);
+  },
+  afterRegister() {
+    syncAddLoraBtn();
+  },
+});
+els.hfOpenBtn.addEventListener('click', () => hfImport.open('lora'));
 
 // Runware の LoRA（AIR）の控えと取り込みダイアログ。API は画像編集側の
 // プロキシ経由の呼び出しをそのまま使ってもらう

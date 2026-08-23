@@ -17,6 +17,7 @@
 })();
 </script>
 <script src="lora-library.js" defer></script>
+<script src="hf-import.js" defer></script>
 <script src="civitai-import.js" defer></script>
 <script src="app.js" defer></script>
 </head>
@@ -184,36 +185,6 @@
 
 </div><!-- /.shell-body -->
 </div><!-- /.shell -->
-
-<dialog id="hfDialog" class="key-dialog hf-dialog">
-  <form method="dialog" class="key-form">
-    <h2 id="hfTitle">Hugging Face から LoRA を一括登録</h2>
-    <p class="hint" id="hfHint">
-      公開リポジトリの ID（owner/repo）または URL を入力すると、含まれる .safetensors を一覧表示します。<br>
-      選択したものは LoRA ライブラリに登録されます（現在の LoRA 設定行には追加されません）。
-    </p>
-    <div class="hf-search">
-      <input id="hfRepoInput" type="text" placeholder="owner/repo" spellcheck="false" autocomplete="off">
-      <button id="hfLoadBtn" class="ghost-btn" type="button">読み込み</button>
-    </div>
-    <input id="hfFilterInput" class="hf-filter" type="search" placeholder="ファイル名で絞り込み…" spellcheck="false" autocomplete="off">
-    <label class="field" id="hfBaseField">
-      <span class="label">ベースモデル <em>（どのモデル用の LoRA か。候補の絞り込みに使います）</em></span>
-      <select id="hfBaseSelect">
-        <option value="Krea 2" selected>Krea 2</option>
-        <option value="Qwen">Qwen（画像編集）</option>
-        <option value="">指定しない</option>
-      </select>
-    </label>
-    <div id="hfStatus" class="status" hidden></div>
-    <div id="hfError" class="error" hidden></div>
-    <div id="hfList" class="hf-list"></div>
-    <div class="key-actions">
-      <button value="cancel" class="ghost-btn" formnovalidate>閉じる</button>
-      <button value="add" id="hfAddBtn" class="primary-btn" disabled>選択した 0 件を登録</button>
-    </div>
-  </form>
-</dialog>
 
 <dialog id="statsDialog" class="key-dialog stats-dialog">
   <form method="dialog" class="key-form">
