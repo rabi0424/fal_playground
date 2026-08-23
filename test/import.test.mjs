@@ -408,6 +408,45 @@ async function testWavespeedProxy() {
   console.log('✓ wavespeed proxy: キー付与・転送先の制限・未設定時のエラー');
 }
 
+// Runware プロキシ: 転送先の制限とキー付与。投入も結果取得も同じ URL への
+// POST なので、GET は受け付けない
+async function testRunwareProxy() {
+  const mod = await loadWorker();
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), method: init?.method, auth: init?.headers?.Authorization, body: init?.body });
+    return new Response(JSON.stringify({ data: [{ taskType: 'imageInference', taskUUID: 'task-1' }] }),
+      { headers: { 'Content-Type': 'application/json' } });
+  };
+  const env = { RUNWARE_API_KEY: 'rw_test', STATE: { idFromName: (n) => n, get: () => ({}) } };
+  const call = (target, init) => mod.default.fetch(
+    new Request(`https://app.example/api/runware/proxy?url=${encodeURIComponent(target)}`, init), env);
+  const post = (target, body) => call(target,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+
+  const body = '[{"taskType":"imageInference","taskUUID":"task-1"}]';
+  const ok = await post('https://api.runware.ai/v1', body);
+  assert.equal(ok.status, 200);
+  assert.equal(calls[0].auth, 'Bearer rw_test', 'API キーが付いていない');
+  assert.equal(calls[0].body, body, '本文がそのまま渡っていない');
+  assert.deepEqual((await ok.json()).data[0].taskUUID, 'task-1');
+
+  // 別ホストへの転送は拒否する（プロキシを踏み台にさせない）
+  assert.equal((await post('https://example.com/v1', body)).status, 403);
+  assert.equal((await post('http://api.runware.ai/v1', body)).status, 403);
+  // GET は使わない（結果取得も POST の getResponse タスク）
+  assert.equal((await call('https://api.runware.ai/v1')).status, 405);
+
+  // キー未設定なら理由の分かるエラー
+  const noKey = await mod.default.fetch(
+    new Request('https://app.example/api/runware/proxy?url=' + encodeURIComponent('https://api.runware.ai/v1'),
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }),
+    { STATE: env.STATE });
+  assert.equal(noKey.status, 500);
+  assert.match(await noKey.text(), /RUNWARE_API_KEY/);
+  console.log('✓ runware proxy: キー付与・転送先の制限・POST 限定・未設定時のエラー');
+}
+
 // 画像のアップロード。replace 付きは同じキーへ上書きする
 //（画像編集のマスクを塗り直すたびに合成画像が増えて残らないように）
 async function testUploadReplace() {
@@ -496,6 +535,7 @@ await testListAndCancel();
 await testStuckPastAlarm();
 await testLoraMetaEndpoint();
 await testWavespeedProxy();
+await testRunwareProxy();
 await testUploadReplace();
 await testCaptureEndpoint();
 rmSync(OUT, { force: true });

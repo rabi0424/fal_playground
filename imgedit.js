@@ -1,17 +1,19 @@
 'use strict';
 
 /* ==========================================================================
- * 画像編集（Qwen Image Edit 2511 + LoRA）
+ * 画像編集（Qwen Image Edit 2511 + LoRA / FLUX.1 Fill [dev] OneReward）
  *
- * 入力画像 1 枚 + 指示文 + LoRA で画像を編集する別画面。既存の「部分AI編集」
+ * 入力画像 1 枚 + 指示文で画像を編集する別画面。既存の「部分AI編集」
  * （Poe・範囲を切り抜いてはめ込む）とは別枠で、画像全体をモデルに渡す。
  *
- * - 同じモデルを fal と WaveSpeed の 2 プロバイダから選べる。API の形が違うので
- *   PROVIDERS のアダプタで吸収する（送信内容の組み立て・投入・ポーリング・結果の解釈）
- * - どちらも Worker のプロキシ経由（/api/fal/proxy・/api/wavespeed/proxy）で呼ぶ。
- *   API キーはブラウザに渡さない
- * - 入力画像は data URI として fal に渡す。このアプリは Cloudflare Access の
- *   内側に置く前提で、/api/image/... を fal から取りに行けるとは限らないため
+ * - プロバイダは 3 つ。Qwen Image Edit 2511 を fal / WaveSpeed から、
+ *   FLUX.1 Fill [dev] OneReward（塗った範囲を描き直す修復モデル）を Runware から
+ *   選べる。API の形がそれぞれ違うので PROVIDERS のアダプタで吸収する
+ *   （送信内容の組み立て・投入・ポーリング・結果の解釈・費用の目安）
+ * - いずれも Worker のプロキシ経由（/api/fal/proxy・/api/wavespeed/proxy・
+ *   /api/runware/proxy）で呼ぶ。API キーはブラウザに渡さない
+ * - 入力画像（とマスク）は data URI として渡す。このアプリは Cloudflare Access の
+ *   内側に置く前提で、/api/image/... をプロバイダ側から取りに行けるとは限らないため
  * - 同じ画像は R2 にも保存し（/api/upload）、履歴レコードと再開用に使う。
  *   data URI は localStorage に置くには大きすぎるので保存しない
  * - 結果は type: 'imgedit' の履歴レコードとして /api/history に保存するので、
@@ -34,23 +36,40 @@ const HF_DEFAULT_REPO = 'tottie2215/temp_str'; // 取り込み先の既定（app
 const LS_JOB = 'fal_imgedit_job';
 const LS_FORM = 'fal_imgedit_form';
 
-// 送信サイズ。Qwen-Image が学習時に使っている解像度（公式の aspect_ratios）で、
-// ここに合わせて送ると崩れにくい。送った画像と同じサイズで返させるので、
-// 出力サイズでもある
-// https://github.com/QwenLM/Qwen-Image/issues/7
-const SIZES = [
-  { value: 'auto', label: '自動（近いアスペクト比に合わせる）' },
-  { value: 'qwen_1_1', label: '1:1（1328×1328）', width: 1328, height: 1328 },
-  { value: 'qwen_16_9', label: '16:9（1664×928）', width: 1664, height: 928 },
-  { value: 'qwen_9_16', label: '9:16（928×1664）', width: 928, height: 1664 },
-  { value: 'qwen_4_3', label: '4:3（1472×1140）', width: 1472, height: 1140 },
-  { value: 'qwen_3_4', label: '3:4（1140×1472）', width: 1140, height: 1472 },
-  { value: 'qwen_3_2', label: '3:2（1584×1056）', width: 1584, height: 1056 },
-  { value: 'qwen_2_3', label: '2:3（1056×1584）', width: 1056, height: 1584 },
-  { value: 'none', label: `リサイズしない（長辺 ${MAX_INPUT_PX}px まで）` },
-];
+// 送信サイズ。モデルが学習時に使っている解像度に合わせて送ると崩れにくい。
+// 送った画像と同じサイズで返させるので、出力サイズでもある。
+// 値（ar_*）はモデル系統をまたいで共通なので、プロバイダを変えても同じ比が残る
+//
+// qwen: Qwen-Image 公式の aspect_ratios（https://github.com/QwenLM/Qwen-Image/issues/7）
+// flux: FLUX 系。Runware は width/height が 64 の倍数・128〜2048 でないと通らない
+const SIZE_PRESETS = {
+  qwen: [
+    { value: 'ar_1_1', label: '1:1（1328×1328）', width: 1328, height: 1328 },
+    { value: 'ar_16_9', label: '16:9（1664×928）', width: 1664, height: 928 },
+    { value: 'ar_9_16', label: '9:16（928×1664）', width: 928, height: 1664 },
+    { value: 'ar_4_3', label: '4:3（1472×1140）', width: 1472, height: 1140 },
+    { value: 'ar_3_4', label: '3:4（1140×1472）', width: 1140, height: 1472 },
+    { value: 'ar_3_2', label: '3:2（1584×1056）', width: 1584, height: 1056 },
+    { value: 'ar_2_3', label: '2:3（1056×1584）', width: 1056, height: 1584 },
+  ],
+  flux: [
+    { value: 'ar_1_1', label: '1:1（1024×1024）', width: 1024, height: 1024 },
+    { value: 'ar_16_9', label: '16:9（1344×768）', width: 1344, height: 768 },
+    { value: 'ar_9_16', label: '9:16（768×1344）', width: 768, height: 1344 },
+    { value: 'ar_4_3', label: '4:3（1152×896）', width: 1152, height: 896 },
+    { value: 'ar_3_4', label: '3:4（896×1152）', width: 896, height: 1152 },
+    { value: 'ar_3_2', label: '3:2（1216×832）', width: 1216, height: 832 },
+    { value: 'ar_2_3', label: '2:3（832×1216）', width: 832, height: 1216 },
+  ],
+};
 
-const QWEN_SIZES = SIZES.filter((s) => s.width);
+// 旧バージョンは Qwen の解像度しか無かったので qwen_* で保存されている
+const migrateSizeValue = (value) => String(value ?? '').replace(/^qwen_/, 'ar_');
+
+// Runware は投入も結果取得も同じ URL に「タスクの配列」を POST する
+const RUNWARE_API_URL = 'https://api.runware.ai/v1';
+// 出力形式の綴りだけが他と違う（大文字・JPEG ではなく JPG）
+const RUNWARE_FORMATS = { png: 'PNG', jpeg: 'JPG', webp: 'WEBP' };
 
 const ACCESS_EXPIRED_MSG = 'セッションが切れました。ページを再読み込みしてください。';
 
@@ -70,6 +89,7 @@ const els = {
   clearSourceBtn: $('#clearSourceBtn'),
   maskCanvas: $('#maskCanvas'),
   maskToggle: $('#maskToggle'),
+  maskModeHint: $('#maskModeHint'),
   maskTools: $('#maskTools'),
   maskUndoBtn: $('#maskUndoBtn'),
   maskAllBtn: $('#maskAllBtn'),
@@ -109,6 +129,9 @@ const els = {
   historyDialog: $('#historyDialog'),
   historyPicker: $('#historyPicker'),
   historyEmpty: $('#historyEmpty'),
+  rwSteps: $('#rwSteps'),
+  rwCfg: $('#rwCfg'),
+  rwMaskMargin: $('#rwMaskMargin'),
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -157,8 +180,8 @@ const loraLabel = (path) => loraLib.label(path);
 const loraDefaultScale = (path) => loraLib.defaultScale(path);
 const loraTriggerWords = (path) => loraLib.triggerWords(path);
 
-// このモデルは Qwen Image Edit なので、Qwen 用の LoRA だけを候補にする
-// （Krea 2 用を混ぜても効かないか、出力が壊れる）
+// LoRA を使えるのは Qwen Image Edit の 2 プロバイダだけなので、候補も Qwen 用に絞る
+// （Krea 2 用を混ぜても効かないか、出力が壊れる）。Runware では LoRA 欄ごと隠す
 const LORA_BASE = 'qwen';
 
 function sortedLoraLibrary() {
@@ -378,21 +401,48 @@ function fitWithin(img, max, maxArea = Infinity) {
 
 /* ---------- 送信サイズ ---------- */
 
-// 縦横比が一番近い Qwen の解像度。比の対数で比べる（横長・縦長を対称に扱う）
-function nearestQwenSize(width, height) {
+// 今のプロバイダのモデルが得意な解像度
+function sizePresets() {
+  return SIZE_PRESETS[provider().sizeKind] ?? SIZE_PRESETS.qwen;
+}
+
+// 縦横比が一番近いプリセット。比の対数で比べる（横長・縦長を対称に扱う）
+function nearestPresetSize(width, height, presets = sizePresets()) {
   const target = Math.log(width / height);
-  return QWEN_SIZES.reduce((best, size) => (
+  return presets.reduce((best, size) => (
     Math.abs(Math.log(size.width / size.height) - target)
       < Math.abs(Math.log(best.width / best.height) - target) ? size : best));
 }
 
-// 選択中の設定での送信サイズ。'none' はリサイズしない（長辺の上限のみ）
+// 選択中の設定での送信サイズ。'none' はリサイズしない（長辺の上限のみ）。
+// プロバイダ側に刻みの制約があれば最後に丸める（Runware は 64 の倍数）
 function sendSize(width = source?.width, height = source?.height) {
   if (!width || !height) return null;
+  const presets = sizePresets();
   const choice = els.sizeSelect.value;
-  if (choice === 'none') return fitWithin({ width, height }, MAX_INPUT_PX);
-  if (choice === 'auto') return nearestQwenSize(width, height);
-  return SIZES.find((s) => s.value === choice) ?? nearestQwenSize(width, height);
+  const size = choice === 'none' ? fitWithin({ width, height }, MAX_INPUT_PX)
+    : presets.find((s) => s.value === choice) ?? nearestPresetSize(width, height, presets);
+  const snap = provider().snapSize;
+  return snap ? snap(size) : { width: size.width, height: size.height };
+}
+
+// プルダウンの中身はプロバイダごとに変わる（同じ比でも解像度が違う）。
+// 選んでいた値は、同じ value があればそのまま残す
+function renderSizeOptions() {
+  const keep = els.sizeSelect.value;
+  const options = [
+    { value: 'auto', label: '自動（近いアスペクト比に合わせる）' },
+    ...sizePresets(),
+    { value: 'none', label: `リサイズしない（長辺 ${MAX_INPUT_PX}px まで）` },
+  ];
+  els.sizeSelect.innerHTML = '';
+  for (const size of options) {
+    const opt = document.createElement('option');
+    opt.value = size.value;
+    opt.textContent = size.label;
+    els.sizeSelect.appendChild(opt);
+  }
+  els.sizeSelect.value = options.some((o) => o.value === keep) ? keep : 'auto';
 }
 
 // 元画像と送信サイズで縦横比がどれだけ違うか（1.0 = 同じ）。
@@ -617,6 +667,18 @@ function rasterizeMask(w, h, strokes = mask.strokes, feather = mask.feather) {
     ctx.stroke();
   }
   return blurCanvas(c, feather * long);
+}
+
+// モデルへ渡すマスク画像。白 = 描き直す / 黒 = そのまま、という約束なので
+// 黒地に白で塗る（Runware の inputs.maskImage）。ぼかしはそのまま濃淡になる。
+// PNG なのは、JPEG のブロックノイズで縁がにじむのを避けるため
+function maskDataUri(size, maskData = mask) {
+  const canvas = makeCanvas(size.width, size.height);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(rasterizeMask(canvas.width, canvas.height, maskData.strokes, maskData.feather), 0, 0);
+  return canvas.toDataURL('image/png');
 }
 
 // 入力画像の上に重ねる表示。差し替わる側を明るいまま残し、外側を暗くする
@@ -894,14 +956,20 @@ async function saveHistoryRecord(record) {
 
 /* ---------- プロバイダ ---------- */
 
-// 同じ Qwen Image Edit 2511 でも API の形が違うので、ここで差を吸収する。
-// supports に無い項目は UI ごと隠す（送っても無視される項目を見せない）
+// API の形はプロバイダごとに違うので、ここで差を吸収する。
+// 画面の項目は data-only 属性で出し分ける（送っても無視される項目を見せない）
+//
+// sizeKind    … 送信サイズのプリセット（SIZE_PRESETS のキー）
+// snapSize    … プロバイダ側の刻み制約に丸める（省略可）
+// nativeMask  … マスクを API に渡せるか。渡せないものは合成だけで再現する
+// requiresMask… マスク前提のモデルか（マスク無しでは実行させない）
 const PROVIDERS = {
   fal: {
     label: 'fal（fal-ai/qwen-image-edit-2511/lora）',
     model: 'fal-ai/qwen-image-edit-2511/lora',
     note: '解像度・ステップ・ガイダンスまで指定できます。課金はメガピクセル単価（$0.035/MP）。',
     supports: { size: true, count: true, steps: true, guidance: true, acceleration: true, negative: true },
+    sizeKind: 'qwen',
     pollMs: 1200,
 
     buildInput(dataUri, size) {
@@ -974,6 +1042,7 @@ const PROVIDERS = {
     model: 'wavespeed-ai/qwen-image/edit-2511-lora',
     note: '指定できるのは指示文・LoRA・seed・形式だけです（ステップ等は API に無く、出力は 1 枚）。出力サイズの指定も無いので、送信サイズがそのまま効きます。課金は 1 枚 $0.025 の固定制。LoRA は公開アクセスできる URL である必要があります。',
     supports: {},
+    sizeKind: 'qwen',
     pollMs: 2000,
     endpoint: 'https://api.wavespeed.ai/api/v3/wavespeed-ai/qwen-image/edit-2511-lora',
 
@@ -1030,6 +1099,97 @@ const PROVIDERS = {
       return '出力 1 枚 ・ 目安 $0.025（枚数固定の課金）';
     },
   },
+
+  // FLUX.1 Fill [dev] OneReward（runware:121@1）。塗った範囲だけを描き直す
+  // 修復（inpainting）モデルで、マスクを API にそのまま渡せる唯一のプロバイダ。
+  // 1 リクエストにタスクの配列を投げる形で、投入も結果取得も同じ URL を叩く
+  runware: {
+    label: 'Runware（runware:121@1 / FLUX.1 Fill [dev] OneReward）',
+    model: 'runware:121@1',
+    note: 'マスクで塗った範囲だけをモデルが描き直す修復モデルです（マスク必須）。ステップ・CFG・マスクの余白は空欄ならモデル既定に任せます。送信サイズは 64 の倍数に丸めます。LoRA は Runware の AIR 形式でしか指定できないため、この画面のライブラリは使えません。費用は結果に実額を表示します。',
+    supports: { size: true, count: true, steps: true, guidance: true, negative: true },
+    sizeKind: 'flux',
+    nativeMask: true,
+    requiresMask: true,
+    pollMs: 1500,
+
+    // 128〜2048 の 64 の倍数でないと 422 で弾かれる
+    snapSize(size) {
+      const clamp = (v) => Math.min(2048, Math.max(128, Math.round(v / 64) * 64));
+      return { width: clamp(size.width), height: clamp(size.height) };
+    },
+
+    buildInput(dataUri, size, maskUri) {
+      const task = {
+        taskType: 'imageInference',
+        taskUUID: crypto.randomUUID(),
+        model: this.model,
+        positivePrompt: els.prompt.value.trim(),
+        width: size.width,
+        height: size.height,
+        numberResults: Number(els.numImages.value) || 1,
+        outputType: 'URL',
+        outputFormat: RUNWARE_FORMATS[els.outputFormat.value] ?? 'PNG',
+        includeCost: true, // 事前の目安を出せないので、実額を結果に添える
+        // 同期で受け取ると生成のあいだ接続を掴んだままになる。他のプロバイダと
+        // 同じく投入 → ポーリングにそろえる（タブを閉じても再開できる）
+        deliveryMethod: 'async',
+        inputs: { seedImage: dataUri, ...(maskUri ? { maskImage: maskUri } : {}) },
+      };
+      if (els.seedLock.checked && els.seed.value !== '') task.seed = Number(els.seed.value);
+      // 空欄はキーごと落としてモデル既定に任せる（0 も有効な値なので長さで見る）
+      if (els.rwSteps.value !== '') task.steps = Number(els.rwSteps.value);
+      if (els.rwCfg.value !== '') task.CFGScale = Number(els.rwCfg.value);
+      if (els.rwMaskMargin.value !== '') task.maskMargin = Number(els.rwMaskMargin.value);
+      // negativePrompt は 2 文字未満だと弾かれる
+      const negative = els.negativePrompt.value.trim();
+      if (negative.length >= 2) task.negativePrompt = negative;
+      return task;
+    },
+
+    strip(input) {
+      return { ...input, inputs: undefined };
+    },
+
+    async submit(input) {
+      await runwareTasks(input);
+      return { taskUUID: input.taskUUID, count: input.numberResults, items: [] };
+    },
+
+    async poll(handle) {
+      const data = await runwareTasks({ taskType: 'getResponse', taskUUID: handle.taskUUID });
+      // 同じ結果が二度返っても増えないよう、画像単位で覚えておく
+      const found = new Map((handle.items ?? []).map((i) => [i.imageUUID ?? i.imageURL, i]));
+      for (const item of data) {
+        if (item.imageURL) found.set(item.imageUUID ?? item.imageURL, item);
+      }
+      handle.items = [...found.values()];
+      if (handle.items.length >= handle.count) return { done: true, result: handle.items };
+      const progress = data.map((d) => d.progress).find((v) => Number.isFinite(v));
+      return {
+        done: false,
+        text: Number.isFinite(progress) ? `編集中… ${progress}%`
+          : handle.items.length > 0 ? `編集中…（${handle.items.length}/${handle.count} 枚）` : '編集中…',
+      };
+    },
+
+    parse(items) {
+      return {
+        images: items.map((i) => ({ url: i.imageURL })).filter((i) => i.url),
+        seed: items.find((i) => Number.isFinite(i.seed))?.seed ?? null,
+        // safety.checkContent を送っていないので基本は付かないが、来たら数える
+        flagged: items.filter((i) => i.NSFWContent === true).length,
+        cost: items.reduce((sum, i) => sum + (Number(i.cost) || 0), 0) || null,
+      };
+    },
+
+    costHint() {
+      const size = sendSize();
+      if (!size) return '';
+      return `出力 ${size.width}×${size.height} × ${els.numImages.value} 枚`
+        + ' ・ 費用は生成後に実額を表示します';
+    },
+  },
 };
 
 let providerId = 'fal';
@@ -1038,7 +1198,7 @@ function provider() {
   return PROVIDERS[providerId] ?? PROVIDERS.fal;
 }
 
-// どちらのプロバイダも Worker のプロキシ経由で呼ぶ（API キーをブラウザに置かない）
+// どのプロバイダも Worker のプロキシ経由で呼ぶ（API キーをブラウザに置かない）
 async function proxyFetch(name, url, options = {}) {
   const res = await fetch(`/api/${name}/proxy?url=${encodeURIComponent(url)}`, {
     ...options,
@@ -1050,8 +1210,10 @@ async function proxyFetch(name, url, options = {}) {
     let detail = text.slice(0, 300) || `HTTP ${res.status}`;
     try {
       const body = JSON.parse(text);
-      // fal は detail、WaveSpeed は message にエラー内容を入れる
-      const raw = body.detail ?? body.message ?? body;
+      // fal は detail、WaveSpeed は message、Runware は errors[].message
+      const raw = body.detail ?? body.message
+        ?? body.errors?.map((e) => e.message || e.code).filter(Boolean).join(' / ')
+        ?? body;
       detail = typeof raw === 'string' ? raw : JSON.stringify(raw);
     } catch { /* JSON でなければそのまま出す */ }
     throw new Error(detail);
@@ -1059,13 +1221,43 @@ async function proxyFetch(name, url, options = {}) {
   return res.json();
 }
 
-// プロバイダが対応していない項目は隠す
+// Runware にタスクを 1 つ投げて data 配列を返す。HTTP 200 でも errors に
+// 失敗が入ることがあるので、ここで例外に変える
+async function runwareTasks(task) {
+  const res = await proxyFetch('runware', RUNWARE_API_URL, {
+    method: 'POST',
+    body: JSON.stringify([task]),
+  });
+  const errors = res.errors ?? [];
+  if (errors.length > 0) {
+    throw new Error(errors.map((e) => e.message || e.code).filter(Boolean).join(' / ') || 'Runware がエラーを返しました');
+  }
+  return res.data ?? [];
+}
+
+// マスクの扱いはプロバイダで意味が変わる。塗る前に違いが分かるようにしておく
+const MASK_MODE_HINTS = {
+  composite: 'モデルには画像全体を渡し、返ってきた画像の塗った範囲だけを元画像に重ねます。塗り直しは編集し直さなくても反映されます。',
+  native: 'このモデルは塗った範囲そのものを描き直します。マスクは送信内容の一部なので、範囲を変えたら編集し直してください（重ね合わせだけは後からでも変わります）。',
+};
+
+// プロバイダが対応していない項目は隠す。data-only は空白区切りで複数書ける
 function syncProviderFields() {
   for (const el of document.querySelectorAll('[data-only]')) {
-    el.hidden = el.dataset.only !== providerId;
+    el.hidden = !el.dataset.only.split(/\s+/).includes(providerId);
   }
-  els.providerHint.textContent = provider().note;
-  renderCostHint();
+  const api = provider();
+  els.providerHint.textContent = api.note;
+  els.maskModeHint.textContent = MASK_MODE_HINTS[api.nativeMask ? 'native' : 'composite'];
+  // マスク前提のモデルでは切れないようにする（切ると送るものが無くなる）
+  els.maskToggle.disabled = !!api.requiresMask;
+  els.maskToggle.title = api.requiresMask
+    ? 'このモデルはマスクした範囲を描き直すモデルなので、マスクは外せません' : '';
+  if (api.requiresMask) els.maskToggle.checked = true;
+  renderSizeOptions();
+  syncMaskUi();
+  renderSizeHint();
+  syncRunBtn(); // 費用の目安もここで出し直す
 }
 
 /* ---------- 実行 ---------- */
@@ -1110,7 +1302,11 @@ async function run() {
   }
 
   const api = provider();
-  const input = api.buildInput(dataUri, size);
+  // 塗った範囲は「モデルへ渡すマスク」と「返ってきた画像の合成」の両方に使う。
+  // 渡せないプロバイダでは合成だけで同じ見た目に寄せる
+  const useMask = maskOn() && mask.strokes.length > 0;
+  const maskUri = useMask && api.nativeMask ? maskDataUri(size) : null;
+  const input = api.buildInput(dataUri, size, maskUri);
   const job = {
     id: makeId(),
     provider: providerId,
@@ -1125,7 +1321,9 @@ async function run() {
     params: api.strip(input),
     loras: input.loras ?? [],
     // 合成はモデルの応答が返ったあとに行うので、そのときのマスクを控えておく
-    mask: maskOn() && mask.strokes.length > 0 ? structuredClone(mask) : null,
+    mask: useMask ? structuredClone(mask) : null,
+    // マスクを API にも渡したか（後から塗り直しても描き直しはやり直せない）
+    maskNative: !!maskUri,
   };
 
   try {
@@ -1152,7 +1350,7 @@ async function waitAndFinish(job) {
     if (!poll.done) setStatus(poll.text);
   } while (!poll.done);
 
-  const { images, seed, flagged } = api.parse(poll.result);
+  const { images, seed, flagged, cost } = api.parse(poll.result);
   if (images.length === 0) throw new Error('画像が返されませんでした');
 
   // seed 未指定を表す -1 は「ランダム」なので記録しない
@@ -1168,6 +1366,9 @@ async function waitAndFinish(job) {
     seed: usedSeed,
     elapsed: ((Date.now() - job.startedAt) / 1000).toFixed(1),
     outputCount: images.length,
+    // プロバイダが実額を返すときだけ入る（fal / WaveSpeed は返らない）
+    ...(cost ? { cost } : {}),
+    ...(job.maskNative ? { maskNative: true } : {}),
     sourceSize: job.sourceSize ?? null,
     sentSize: job.sentSize ?? null,
     // 出力に続けて入力画像も残す（削除時に一括で消える）
@@ -1249,8 +1450,13 @@ function renderResult(record) {
     + (record.seed !== null && record.seed !== undefined ? ` ・ seed ${record.seed}` : '')
     + (record.sentSize ? ` ・ 送信 ${record.sentSize.width}×${record.sentSize.height}` : '')
     + (record.masked && record.sourceSize
-      ? ` ・ 合成 ${record.sourceSize.width}×${record.sourceSize.height}` : '');
+      ? ` ・ 合成 ${record.sourceSize.width}×${record.sourceSize.height}` : '')
+    + (record.cost ? ` ・ $${Number(record.cost).toFixed(4)}` : '');
   els.resultMaskHint.hidden = !record.masked;
+  // マスクをモデルにも渡した場合、塗り直しで変わるのは重ね合わせだけ
+  els.resultMaskHint.textContent = record.maskNative
+    ? 'このモデルにはマスクも渡しています。ここで塗り直すと重ね合わせ方だけが変わります（描き直す範囲を変えるには編集し直してください）。'
+    : 'マスクは後からでも変えられます。上の「入力画像」で塗り直すと、この結果に即座に反映されます（作り直しは不要です）。';
   els.resultImages.innerHTML = '';
 
   for (const { img, role, index } of resultRoles(record)) {
@@ -1387,6 +1593,9 @@ function saveForm() {
     steps: els.steps.value,
     guidance: els.guidance.value,
     acceleration: els.acceleration.value,
+    rwSteps: els.rwSteps.value,
+    rwCfg: els.rwCfg.value,
+    rwMaskMargin: els.rwMaskMargin.value,
     outputFormat: els.outputFormat.value,
     seed: els.seed.value,
     seedLock: els.seedLock.checked,
@@ -1416,11 +1625,16 @@ async function restoreForm() {
     providerId = s.provider;
     els.provider.value = providerId;
   }
-  if (s.size) els.sizeSelect.value = s.size;
+  // サイズの選択肢はプロバイダで変わるので、先に並べ直してから値を戻す
+  renderSizeOptions();
+  if (s.size) els.sizeSelect.value = migrateSizeValue(s.size);
   if (s.numImages) els.numImages.value = s.numImages;
   if (s.steps) els.steps.value = s.steps;
   if (s.guidance) els.guidance.value = s.guidance;
   if (s.acceleration) els.acceleration.value = s.acceleration;
+  els.rwSteps.value = s.rwSteps ?? '';
+  els.rwCfg.value = s.rwCfg ?? '';
+  els.rwMaskMargin.value = s.rwMaskMargin ?? '';
   if (s.outputFormat) els.outputFormat.value = s.outputFormat;
   els.seed.value = s.seed || '';
   els.seedLock.checked = !!s.seedLock;
@@ -1468,13 +1682,6 @@ els.provider.addEventListener('change', () => {
   saveForm();
 });
 
-for (const size of SIZES) {
-  const opt = document.createElement('option');
-  opt.value = size.value;
-  opt.textContent = size.label;
-  els.sizeSelect.appendChild(opt);
-}
-
 els.pickFileBtn.addEventListener('click', () => els.fileInput.click());
 els.uploadArea.addEventListener('click', () => els.fileInput.click());
 els.fileInput.addEventListener('change', () => loadFile(els.fileInput.files?.[0]));
@@ -1499,7 +1706,8 @@ els.addLoraBtn.addEventListener('click', () => addLoraRow());
 els.civitaiBtn.addEventListener('click', () => civitaiImport.open('lora'));
 els.prompt.addEventListener('input', () => { syncRunBtn(); saveForm(); });
 for (const el of [els.sizeSelect, els.numImages, els.steps, els.guidance,
-  els.acceleration, els.outputFormat, els.seed, els.seedLock, els.negativePrompt]) {
+  els.acceleration, els.outputFormat, els.seed, els.seedLock, els.negativePrompt,
+  els.rwSteps, els.rwCfg, els.rwMaskMargin]) {
   el.addEventListener('change', saveForm);
 }
 // 送信サイズと枚数は費用の目安に効く。送信サイズは何をどう送るかの説明も更新する

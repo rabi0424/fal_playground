@@ -49,6 +49,7 @@
         <label class="mask-toggle" title="マスクで塗った範囲だけを編集後の画像に差し替えます。範囲は後からでも変えられます">
           <input type="checkbox" id="maskToggle"> マスクした部分だけを差し替える
         </label>
+        <p class="hint" id="maskModeHint"></p>
 
         <div id="maskTools" class="ie-mask-tools" hidden>
           <div class="ie-mask-row">
@@ -90,13 +91,13 @@
       <span class="hint" id="providerHint"></span>
     </label>
 
-    <label class="field" title="Qwen が学習に使っている解像度に合わせて送ります。合成に使うのは元解像度のままの画像です">
+    <label class="field" title="モデルが学習に使っている解像度に合わせて送ります。合成に使うのは元解像度のままの画像です">
       <span class="label">送信サイズ</span>
       <select id="sizeSelect"></select>
       <span class="hint" id="sizeHint" hidden></span>
     </label>
 
-    <details class="field lora-accordion" open>
+    <details class="field lora-accordion" data-only="fal wavespeed" open>
       <summary class="label">LoRA</summary>
       <div id="loraList" class="lora-list"></div>
       <div class="lora-actions">
@@ -110,7 +111,7 @@
     <details class="field lora-accordion">
       <summary class="label">詳細設定</summary>
 
-      <label class="field num-field" data-only="fal">
+      <label class="field num-field" data-only="fal runware">
         <span class="label">枚数</span>
         <select id="numImages">
           <option value="1">1</option>
@@ -139,6 +140,24 @@
         </label>
       </div>
 
+      <div class="field" data-only="runware">
+        <div class="row">
+          <label class="field num-field" title="空欄ならモデルの既定に任せます">
+            <span class="label">ステップ</span>
+            <input id="rwSteps" type="number" min="1" max="50" step="1" placeholder="既定">
+          </label>
+          <label class="field num-field" title="空欄ならモデルの既定に任せます">
+            <span class="label">CFG</span>
+            <input id="rwCfg" type="number" min="0" max="20" step="0.1" placeholder="既定">
+          </label>
+          <label class="field num-field" title="マスクの周囲を何 px ぶん一緒にモデルへ見せるか（32〜128）">
+            <span class="label">余白 px</span>
+            <input id="rwMaskMargin" type="number" min="32" max="128" step="1" placeholder="既定">
+          </label>
+        </div>
+        <p class="hint">空欄のままにするとモデルの既定値を使います。「余白」はマスクの周囲を何 px 一緒に見せるかで、広いほど周りとなじみますが塗った範囲の解像感は落ちます。</p>
+      </div>
+
       <label class="field">
         <span class="label">形式</span>
         <select id="outputFormat">
@@ -158,7 +177,7 @@
         </div>
       </div>
 
-      <label class="field" data-only="fal">
+      <label class="field" data-only="fal runware">
         <span class="label">除外したい要素（negative prompt）</span>
         <input id="negativePrompt" type="text" placeholder="空欄で未指定">
       </label>

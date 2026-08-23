@@ -23,10 +23,10 @@ const JOB_POLL_DELAY_MS = 2000;
 const ALARM_OVERDUE_MS = 60 * 1000;
 const JOB_MAX_SUBMIT_ATTEMPTS = 2; // 送信自体の再試行上限（多重生成・多重課金の防止）
 
-// 履歴追加時に取り込む外部画像のホスト（fal / WaveSpeed の CDN）。
+// 履歴追加時に取り込む外部画像のホスト（fal / WaveSpeed / Runware の CDN）。
 // それ以外は取り込まず URL のまま残す。プロバイダ側の URL は失効しうるので、
 // 履歴に残すものは自分の R2 に持ってくる
-const CAPTURE_HOSTS = /(^|\.)(fal\.(media|ai|run)|wavespeed\.ai)$/;
+const CAPTURE_HOSTS = /(^|\.)(fal\.(media|ai|run)|wavespeed\.ai|runware\.ai)$/;
 
 // Poe の OpenAI 互換 API（部分AI編集で使用）。キーは Worker の Secret（POE_API_KEY）
 const POE_API_URL = 'https://api.poe.com/v1/chat/completions';
@@ -1889,6 +1889,38 @@ export default {
           ...(request.method !== 'GET' ? { 'Content-Type': 'application/json' } : {}),
         },
         body: request.method === 'GET' ? undefined : await request.text(),
+      });
+      return new Response(upstream.body, {
+        status: upstream.status,
+        headers: { 'Content-Type': upstream.headers.get('Content-Type') ?? 'application/json' },
+      });
+    }
+
+    // Runware API のプロキシ。投入も結果取得（getResponse）も同じ URL に
+    // タスクの配列を POST する形なので、転送先は api.runware.ai の 1 つだけ。
+    // API キー（Secret の RUNWARE_API_KEY）はここで付与する
+    if (url.pathname === '/api/runware/proxy') {
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+      if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });
+      let target;
+      try {
+        target = new URL(url.searchParams.get('url') || '');
+      } catch {
+        return new Response('Invalid target url', { status: 400 });
+      }
+      if (target.protocol !== 'https:' || target.hostname !== 'api.runware.ai') {
+        return new Response('Target not allowed', { status: 403 });
+      }
+      if (!env.RUNWARE_API_KEY) {
+        return new Response('RUNWARE_API_KEY is not configured（Worker の Secret に Runware の API キーを設定してください）', { status: 500 });
+      }
+      const upstream = await fetch(target, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.RUNWARE_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: await request.text(),
       });
       return new Response(upstream.body, {
         status: upstream.status,
