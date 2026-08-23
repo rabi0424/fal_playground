@@ -35,6 +35,9 @@ const LS_THEME = 'fal_theme';
 const HF_DEFAULT_REPO = 'tottie2215/temp_str'; // 取り込み先の既定（app.js と同じ）
 const LS_JOB = 'fal_imgedit_job';
 const LS_FORM = 'fal_imgedit_form';
+// 下書きに入っている Runware の既定値の版。上げると、古い下書きの値を
+// 一度だけ推奨値へ入れ替える（空欄＝モデル既定任せのままだと質が出ない）
+const RW_DEFAULTS_VERSION = 1;
 
 // 送信サイズ。モデルが学習時に使っている解像度に合わせて送ると崩れにくい。
 // 送った画像と同じサイズで返させるので、出力サイズでもある。
@@ -70,6 +73,29 @@ const migrateSizeValue = (value) => String(value ?? '').replace(/^qwen_/, 'ar_')
 const RUNWARE_API_URL = 'https://api.runware.ai/v1';
 // 出力形式の綴りだけが他と違う（大文字・JPEG ではなく JPG）
 const RUNWARE_FORMATS = { png: 'PNG', jpeg: 'JPG', webp: 'WEBP' };
+
+// FLUX.1 Fill [dev] OneReward の推奨値。素の FLUX.1 Fill とはまるで違い、
+// 内蔵ガイダンス（CFG）を 1 まで下げて本来の CFG（True CFG）を効かせる。
+// ByteDance の公式作例が guidance_scale=1.0 / true_cfg=4.0 / steps=50 /
+// negative_prompt="nsfw" なので、それに合わせている
+// https://huggingface.co/bytedance-research/OneReward
+const RUNWARE_RECOMMENDED = {
+  steps: 50,
+  cfg: 1,
+  trueCfg: 4,
+  // マスクの周りを一緒に切り出して拡大してから描くので、狭い範囲ほど効く。
+  // Runware の目安は 32〜64
+  maskMargin: 48,
+  negativePrompt: 'nsfw',
+};
+
+// スケジューラ。既定（自動）のままが基本なので、選択肢として出すだけ
+const RUNWARE_SCHEDULERS = ['Default', 'FlowMatchEulerDiscreteScheduler', 'Euler', 'Euler a',
+  'Euler Beta', 'Euler Karras', 'Euler Exponential', 'DDIM', 'DEISMultistepScheduler',
+  'DPM++', 'DPM++ 2M', 'DPM++ 2M Karras', 'DPM++ 2M SDE', 'DPM++ 2M SDE Karras',
+  'DPM++ 3M', 'DPM++ 3M Karras', 'DPM++ SDE', 'DPM++ SDE Karras',
+  'Heun', 'Heun Karras', 'LMS', 'LMS Karras', 'UniPC', 'UniPC 2M', 'UniPC 2M Karras',
+  'UniPC 3M', 'UniPC 3M Karras', 'UniPC Karras', 'LCM', 'TCDScheduler'];
 
 const ACCESS_EXPIRED_MSG = 'セッションが切れました。ページを再読み込みしてください。';
 
@@ -135,7 +161,13 @@ const els = {
   rwLoraHint: $('#rwLoraHint'),
   rwSteps: $('#rwSteps'),
   rwCfg: $('#rwCfg'),
+  rwTrueCfg: $('#rwTrueCfg'),
   rwMaskMargin: $('#rwMaskMargin'),
+  rwScheduler: $('#rwScheduler'),
+  rwOutputQuality: $('#rwOutputQuality'),
+  rwPromptWeighting: $('#rwPromptWeighting'),
+  rwPresetBtn: $('#rwPresetBtn'),
+  rwParamHint: $('#rwParamHint'),
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1352,12 +1384,13 @@ const PROVIDERS = {
   runware: {
     label: 'Runware（runware:121@1 / FLUX.1 Fill [dev] OneReward）',
     model: 'runware:121@1',
-    note: 'マスクで塗った範囲だけをモデルが描き直す修復モデルです（マスク必須）。ステップ・CFG・マスクの余白は空欄ならモデル既定に任せます。送信サイズは 64 の倍数に丸めます。LoRA は Runware に登録済みのもの（AIR 指定）から選びます。費用は結果に実額を表示します。',
+    note: 'マスクで塗った範囲だけをモデルが描き直す修復モデルです（マスク必須）。素の FLUX.1 Fill とは推奨値がまるで違い、内蔵ガイダンス（CFG）を 1 まで下げて True CFG を 4 前後で効かせます。物体を消すときは指示文を remove の 1 語にします。送信サイズは 64 の倍数に丸めます。LoRA は Runware に登録済みのもの（AIR 指定）から選びます。費用は結果に実額を表示します。',
     supports: { size: true, count: true, steps: true, guidance: true, negative: true },
     sizeKind: 'flux',
     // LoRA の絞り込みに使う。FLUX.1 Fill [dev] は flux-1-dev 系
     loraArchitecture: 'flux1d',
     loraArchitectureLabel: 'FLUX.1 dev',
+    defaultNegative: RUNWARE_RECOMMENDED.negativePrompt,
     nativeMask: true,
     requiresMask: true,
     pollMs: 1500,
@@ -1392,10 +1425,21 @@ const PROVIDERS = {
       // 空欄はキーごと落としてモデル既定に任せる（0 も有効な値なので長さで見る）
       if (els.rwSteps.value !== '') task.steps = Number(els.rwSteps.value);
       if (els.rwCfg.value !== '') task.CFGScale = Number(els.rwCfg.value);
+      // True CFG は 1 以下だと働かない（＝内蔵ガイダンスのまま）ので、その場合は送らない
+      if (els.rwTrueCfg.value !== '' && Number(els.rwTrueCfg.value) > 1) {
+        task.trueCFGScale = Number(els.rwTrueCfg.value);
+      }
       if (els.rwMaskMargin.value !== '') task.maskMargin = Number(els.rwMaskMargin.value);
-      // negativePrompt は 2 文字未満だと弾かれる
+      if (els.rwScheduler.value) task.scheduler = els.rwScheduler.value;
+      if (els.rwPromptWeighting.checked) task.promptWeighting = 'sdEmbeds';
+      // 出力品質は非可逆な形式のときだけ意味がある
+      if (els.rwOutputQuality.value !== '' && task.outputFormat !== 'PNG') {
+        task.outputQuality = Number(els.rwOutputQuality.value);
+      }
+      // negativePrompt は 2 文字未満だと弾かれる。空欄でも公式作例と同じ既定を
+      //（True CFG は対になる negative prompt があって初めて効く）
       const negative = els.negativePrompt.value.trim();
-      if (negative.length >= 2) task.negativePrompt = negative;
+      task.negativePrompt = negative.length >= 2 ? negative : RUNWARE_RECOMMENDED.negativePrompt;
       const loras = collectRwLoras();
       if (loras.length > 0) task.lora = loras;
       return task;
@@ -1502,6 +1546,9 @@ function syncProviderFields() {
   }
   const api = provider();
   els.providerHint.textContent = api.note;
+  // 共用の欄なので、値は書き換えず「空欄のときに何が送られるか」だけ見せる
+  els.negativePrompt.placeholder = api.defaultNegative
+    ? `空欄なら ${api.defaultNegative}（このモデルの既定）` : '空欄で未指定';
   els.maskModeHint.textContent = MASK_MODE_HINTS[api.nativeMask ? 'native' : 'composite'];
   // マスク前提のモデルでは切れないようにする（切ると送るものが無くなる）
   els.maskToggle.disabled = !!api.requiresMask;
@@ -1509,9 +1556,46 @@ function syncProviderFields() {
     ? 'このモデルはマスクした範囲を描き直すモデルなので、マスクは外せません' : '';
   if (api.requiresMask) els.maskToggle.checked = true;
   renderSizeOptions();
+  renderRunwareParamHint();
   syncMaskUi();
   renderSizeHint();
   syncRunBtn(); // 費用の目安もここで出し直す
+}
+
+// 公式作例と同じ設定に戻す
+function applyRunwareRecommended() {
+  els.rwSteps.value = String(RUNWARE_RECOMMENDED.steps);
+  els.rwCfg.value = String(RUNWARE_RECOMMENDED.cfg);
+  els.rwTrueCfg.value = String(RUNWARE_RECOMMENDED.trueCfg);
+  els.rwMaskMargin.value = String(RUNWARE_RECOMMENDED.maskMargin);
+  els.rwScheduler.value = '';
+  els.rwPromptWeighting.checked = false;
+}
+
+// 今の値が推奨から外れていたら、その場で理由を出す
+function renderRunwareParamHint() {
+  if (providerId !== 'runware') return;
+  const notes = [];
+  const cfg = els.rwCfg.value === '' ? null : Number(els.rwCfg.value);
+  const trueCfg = els.rwTrueCfg.value === '' ? null : Number(els.rwTrueCfg.value);
+  if (cfg === null || cfg > 1.5) {
+    notes.push('CFG はこのモデルでは 1 が前提です（素の FLUX.1 Fill とは違います）');
+  }
+  if (trueCfg === null || trueCfg <= 1) {
+    notes.push('True CFG を 4 前後にしないと、指示文がほとんど効きません');
+  } else if (trueCfg > 6) {
+    notes.push('True CFG が 6 を超えると画質が落ちやすくなります');
+  }
+  if (els.rwMaskMargin.value === '') {
+    notes.push('余白を 32〜64 にすると、狭い範囲を塗ったときの精細さが上がります');
+  }
+  const base = trueCfg > 1
+    ? 'True CFG は 1 ステップに 2 回推論するので、生成時間は倍近くになります（費用も上がることがあります）。'
+    : '';
+  els.rwParamHint.textContent = notes.length > 0
+    ? `${notes.join('。')}。「推奨値に戻す」で公式の作例どおりになります。`
+    : `公式の作例と同じ設定です。${base}`;
+  els.rwParamHint.classList.toggle('warn', notes.length > 0);
 }
 
 /* ---------- 実行 ---------- */
@@ -1851,7 +1935,12 @@ function saveForm() {
     acceleration: els.acceleration.value,
     rwSteps: els.rwSteps.value,
     rwCfg: els.rwCfg.value,
+    rwTrueCfg: els.rwTrueCfg.value,
     rwMaskMargin: els.rwMaskMargin.value,
+    rwScheduler: els.rwScheduler.value,
+    rwOutputQuality: els.rwOutputQuality.value,
+    rwPromptWeighting: els.rwPromptWeighting.checked,
+    rwDefaults: RW_DEFAULTS_VERSION,
     outputFormat: els.outputFormat.value,
     seed: els.seed.value,
     seedLock: els.seedLock.checked,
@@ -1891,7 +1980,14 @@ async function restoreForm() {
   if (s.acceleration) els.acceleration.value = s.acceleration;
   els.rwSteps.value = s.rwSteps ?? '';
   els.rwCfg.value = s.rwCfg ?? '';
+  els.rwTrueCfg.value = s.rwTrueCfg ?? '';
   els.rwMaskMargin.value = s.rwMaskMargin ?? '';
+  els.rwScheduler.value = s.rwScheduler ?? '';
+  els.rwOutputQuality.value = s.rwOutputQuality ?? '';
+  els.rwPromptWeighting.checked = !!s.rwPromptWeighting;
+  // 推奨値を入れる前の下書きは、モデル既定任せ（空欄）のままになっている。
+  // それだと指示文がほとんど効かないので、一度だけ推奨値に入れ替える
+  if ((s.rwDefaults ?? 0) < RW_DEFAULTS_VERSION) applyRunwareRecommended();
   if (s.outputFormat) els.outputFormat.value = s.outputFormat;
   els.seed.value = s.seed || '';
   els.seedLock.checked = !!s.seedLock;
@@ -1988,8 +2084,26 @@ els.rwPickLoraBtn.addEventListener('click', () => runwareLora.open());
 els.prompt.addEventListener('input', () => { syncRunBtn(); saveForm(); });
 for (const el of [els.sizeSelect, els.numImages, els.steps, els.guidance,
   els.acceleration, els.outputFormat, els.seed, els.seedLock, els.negativePrompt,
-  els.rwSteps, els.rwCfg, els.rwMaskMargin]) {
+  els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwMaskMargin, els.rwScheduler,
+  els.rwOutputQuality, els.rwPromptWeighting]) {
   el.addEventListener('change', saveForm);
+}
+// 推奨から外れたらその場で理由を出す
+for (const el of [els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwMaskMargin]) {
+  el.addEventListener('input', renderRunwareParamHint);
+}
+els.rwPresetBtn.addEventListener('click', () => {
+  applyRunwareRecommended();
+  renderRunwareParamHint();
+  saveForm();
+});
+// 用途ごとの定型文。指示文の内容ごと置き換える（このモデルは定型が前提）
+for (const btn of document.querySelectorAll('[data-rwprompt]')) {
+  btn.addEventListener('click', () => {
+    els.prompt.value = btn.dataset.rwprompt;
+    syncRunBtn();
+    saveForm();
+  });
 }
 // 送信サイズと枚数は費用の目安に効く。送信サイズは何をどう送るかの説明も更新する
 els.numImages.addEventListener('change', renderCostHint);
@@ -2043,8 +2157,17 @@ els.cancelBtn.addEventListener('click', () => {
   setStatus('キャンセルしています…');
 });
 
+for (const name of RUNWARE_SCHEDULERS) {
+  const opt = document.createElement('option');
+  opt.value = name === 'Default' ? '' : name;
+  opt.textContent = name === 'Default' ? '自動（モデル既定）' : name;
+  els.rwScheduler.appendChild(opt);
+}
+
 syncAddLoraBtn();
 syncRwAddLoraBtn();
+// 下書きが無い（初回）ときも推奨値から始める
+applyRunwareRecommended();
 syncProviderFields();
 restoreForm();
 fetchHistory().then(resumeJob);

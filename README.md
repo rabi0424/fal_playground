@@ -82,7 +82,7 @@ LoRA 欄の「Civitai から取り込み」で、Civitai のモデルページ U
 |---|---|---|---|
 | モデル | Qwen Image Edit 2511 | Qwen Image Edit 2511 | FLUX.1 Fill [dev] OneReward |
 | 得意なこと | 画像全体への指示 | 画像全体への指示 | 塗った範囲だけの描き直し・物体の除去 |
-| 指定できるもの | 解像度・枚数・ステップ・ガイダンス・速度・negative prompt・seed・形式 | 指示文・LoRA・seed・形式のみ | 解像度・枚数・ステップ・CFG・マスクの余白・negative prompt・seed・形式 |
+| 指定できるもの | 解像度・枚数・ステップ・ガイダンス・速度・negative prompt・seed・形式 | 指示文・LoRA・seed・形式のみ | 解像度・枚数・ステップ・CFG・True CFG・マスクの余白・スケジューラ・出力品質・negative prompt・seed・形式 |
 | 出力枚数 | 1〜4 | 1 枚固定 | 1〜4 |
 | マスク | ブラウザ側の合成のみ | ブラウザ側の合成のみ | **API に渡す（必須）** + 合成 |
 | LoRA | 使える（ライブラリ） | 使える（ライブラリ・公開 URL のみ） | 使える（Runware 登録済みの AIR） |
@@ -94,12 +94,43 @@ LoRA 欄の「Civitai から取り込み」で、Civitai のモデルページ U
 - 入力画像は**端末から**（ファイル / カメラ / ドラッグ＆ドロップ）か**生成履歴から**選べます。長辺 2048px に収まるよう縮小してから送ります
 - LoRA を最大 3 つまで指定できます。fal / WaveSpeed は共通の LoRA ライブラリ（表示名・既定 scale・トリガーワードがそのまま使えます）から選び、**候補に出るのは Qwen 用の LoRA だけ**です。この画面からも「Civitai から取り込み」で追加できます。Runware は指定の仕方が違うので、下記の専用の欄になります
 - fal では出力サイズを既定で入力画像に合わせます。ステップ（28）・ガイダンス（4.5）・速度（acceleration）・seed・negative prompt も指定できます。出力形式（PNG / JPEG / WebP）はどのプロバイダでも指定できます（WaveSpeed と Runware の既定は JPEG なので、劣化させないよう常に明示して送ります）
-- Runware ではステップ・CFG Scale・マスクの余白（maskMargin）を**空欄にするとモデルの既定**に任せます。送信サイズは 64 の倍数（128〜2048）に丸めて送ります
+- Runware の生成パラメータは下記の「Runware の推奨設定」を既定にしています。送信サイズは 64 の倍数（128〜2048）に丸めて送ります
 - 実行ボタンの下に**費用の目安**を出します。fal は解像度から、WaveSpeed は枚数から計算します。Runware は単価を事前に出せないので、代わりに `includeCost` で返る**実額を結果に表示**します
 - fal で安全性チェックに引っかかった画像は塗り潰されて返るため、その旨を表示します（WaveSpeed の API にはこのフラグがありません）
 - 結果は生成履歴（`type: 'imgedit'`）に保存され、生成画面のギャラリーにも並びます。入力画像も一緒に残るので、後から何を編集したか分かります
 - 「この結果を編集」で、出力をそのまま次の入力にできます
 - 送信中にページを閉じても、開き直したときに結果を回収します
+
+### Runware の推奨設定（FLUX.1 Fill [dev] OneReward）
+
+**このモデルは素の FLUX.1 Fill [dev] とは推奨値がまるで違います。** 素の FLUX.1 Fill は内蔵ガイダンス（`CFGScale`）を 30 前後で使いますが、OneReward は**内蔵ガイダンスを 1 まで下げて、本来の CFG（`trueCFGScale`）を効かせる**前提で学習されています。公式の作例（[bytedance-research/OneReward](https://huggingface.co/bytedance-research/OneReward)）は `guidance_scale=1.0` / `true_cfg=4.0` / `num_inference_steps=50` / `negative_prompt="nsfw"` です。
+
+| 項目 | 既定値 | 根拠 |
+|---|---|---|
+| ステップ | 50 | 公式作例と同じ |
+| CFG（`CFGScale`） | 1 | 公式作例の `guidance_scale=1.0`。FLUX の内蔵ガイダンスなので、上げても効きません |
+| True CFG（`trueCFGScale`） | 4 | 公式作例の `true_cfg=4.0`。**これを入れないと指示文がほとんど効きません**。1 ステップに 2 回推論するので生成時間は倍近くになります |
+| マスクの余白（`maskMargin`） | 48 | Runware の目安は 32〜64。マスクの周りごと切り出して拡大してから描くので、狭い範囲を塗ったときの精細さが上がります |
+| negative prompt | `nsfw`（空欄時） | 公式作例と同じ。True CFG は対になる negative prompt があって初めて効きます |
+
+- 値を推奨から外すと、実行ボタンの上に**なぜまずいかを表示**します。「**推奨値に戻す**」でいつでも戻せます
+- スケジューラ・出力品質（JPG / WebP のときのみ）・プロンプトの強調記法（`sdEmbeds`）は「さらに細かい設定」から指定できます。スケジューラは「自動」のままで構いません（FLUX 系はフローマッチング前提です）
+- `strength` は送りません。**FLUX Fill 系は `strength` を使わず、マスクと文脈から自動で判断します**（Runware のドキュメント）
+- 以前のバージョンで作った下書きは、空欄（モデル既定任せ）のまま保存されています。開いたときに一度だけ推奨値へ入れ替えます
+
+#### 指示文の書き方
+
+このモデルは用途ごとに書き方が決まっていて、そこを外すと結果が大きく変わります。プロンプト欄の下にボタンを置いてあります。
+
+| 用途 | 指示文 |
+|---|---|
+| 描き替え（inpainting） | やりたいことをそのまま書く |
+| **物体を消す** | 説明文ではなく **`remove` の 1 語**（説明文だと「消す」より「描く」方向に寄ります） |
+| まわりを描き足す（指示なし） | `high-definition, perfect composition` |
+
+#### 出していないパラメータ
+
+`outpaint`（キャンバス拡張）・`hiresFix`・`layerDiffuse`・`pulid`・`ultralytics`・`controlNet`・`ipAdapters`・`acceleratorOptions`（TeaCache 等のキャッシュ高速化）・ウォーターマークは、この画面の用途から外れるか品質を落とすものなので出していません（送らなければ無効のままです）。
 
 ### Runware の LoRA（AIR）
 

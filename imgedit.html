@@ -85,6 +85,15 @@
       <textarea id="prompt" rows="3" placeholder="例: 背景を夜の街に変える / 服を白いシャツにする"></textarea>
     </label>
 
+    <div class="field" data-only="runware">
+      <span class="label">よく使う指示（このモデルの定型）</span>
+      <div class="rw-prompt-presets">
+        <button type="button" class="ghost-btn small" data-rwprompt="remove">物体を消す</button>
+        <button type="button" class="ghost-btn small" data-rwprompt="high-definition, perfect composition">まわりを描き足す</button>
+      </div>
+      <p class="hint">このモデルは用途ごとに書き方が決まっています。<strong>物体を消すときは説明文ではなく <code>remove</code> の 1 語</strong>、まわりを描き足すだけのときは定型文を使うと、公式の作例と同じ挙動になります。</p>
+    </div>
+
     <label class="field">
       <span class="label">プロバイダ</span>
       <select id="provider"></select>
@@ -151,21 +160,47 @@
       </div>
 
       <div class="field" data-only="runware">
+        <div class="rw-preset-row">
+          <span class="label">生成パラメータ</span>
+          <button id="rwPresetBtn" class="ghost-btn small" type="button" title="このモデルの公式作例と同じ設定に戻します">推奨値に戻す</button>
+        </div>
         <div class="row">
-          <label class="field num-field" title="空欄ならモデルの既定に任せます">
+          <label class="field num-field" title="公式の作例は 50。空欄ならモデルの既定に任せます">
             <span class="label">ステップ</span>
             <input id="rwSteps" type="number" min="1" max="50" step="1" placeholder="既定">
           </label>
-          <label class="field num-field" title="空欄ならモデルの既定に任せます">
+          <label class="field num-field" title="FLUX の内蔵ガイダンス。このモデルは 1 が前提です">
             <span class="label">CFG</span>
             <input id="rwCfg" type="number" min="0" max="20" step="0.1" placeholder="既定">
           </label>
-          <label class="field num-field" title="マスクの周囲を何 px ぶん一緒にモデルへ見せるか（32〜128）">
+        </div>
+        <div class="row">
+          <label class="field num-field" title="本来の CFG。1 ステップに 2 回推論するので生成時間が倍近くになります。公式の作例は 4">
+            <span class="label">True CFG</span>
+            <input id="rwTrueCfg" type="number" min="0" max="10" step="0.1" placeholder="なし">
+          </label>
+          <label class="field num-field" title="マスクの周囲を何 px ぶん一緒に切り出してモデルへ見せるか（32〜128）">
             <span class="label">余白 px</span>
             <input id="rwMaskMargin" type="number" min="32" max="128" step="1" placeholder="既定">
           </label>
         </div>
-        <p class="hint">空欄のままにするとモデルの既定値を使います。「余白」はマスクの周囲を何 px 一緒に切り出してモデルへ見せるかで、広いほど周りとなじみますが塗った範囲の解像感は落ちます（32〜64 が目安）。</p>
+        <p class="hint" id="rwParamHint"></p>
+
+        <details class="field">
+          <summary class="label">さらに細かい設定</summary>
+          <label class="field">
+            <span class="label">スケジューラ</span>
+            <select id="rwScheduler"></select>
+          </label>
+          <label class="field num-field" title="JPG / WebP のときだけ効きます">
+            <span class="label">出力品質</span>
+            <input id="rwOutputQuality" type="number" min="20" max="99" step="1" placeholder="95">
+          </label>
+          <label class="mask-toggle" title="(word:1.3) のような強調記法をプロンプトで使えるようにします">
+            <input type="checkbox" id="rwPromptWeighting"> プロンプトの強調記法（sdEmbeds）を使う
+          </label>
+          <p class="hint">スケジューラは「自動」のままで構いません（FLUX 系はフローマッチング前提なので、合わないものを選ぶと崩れます）。</p>
+        </details>
       </div>
 
       <label class="field">

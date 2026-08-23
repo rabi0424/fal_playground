@@ -2362,6 +2362,26 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 
 /* 送信サイズの説明。引き伸ばしが大きいときだけ色を変える */
 #sizeHint.warn { color: var(--danger); }
+
+/* Runware の生成パラメータ */
+
+.rw-preset-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.rw-preset-row .label { margin: 0; }
+
+.rw-prompt-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+#rwParamHint.warn { color: var(--danger); }
 .ie-source-meta .hint { margin: 0; }
 
 .ie-run {
