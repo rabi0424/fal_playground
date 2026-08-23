@@ -293,15 +293,18 @@
       </label>
     </details>
 
-    <div class="ie-run">
-      <button id="runBtn" class="primary-btn" type="button" disabled>編集する</button>
-      <button id="cancelBtn" class="ghost-btn" type="button" hidden>キャンセル</button>
-    </div>
-    <p id="costHint" class="hint" hidden></p>
-
-    <div id="status" class="status" hidden></div>
-    <div id="error" class="error" role="alert" hidden></div>
   </section>
+
+  <!-- 実行バー。生成画面と同じく下端に常駐させ、順番待ちもここにまとめる -->
+  <div class="ie-run">
+    <div class="ie-run-inner">
+      <div id="jobList" class="job-list"></div>
+      <p id="costHint" class="hint" hidden></p>
+      <div id="status" class="status" hidden></div>
+      <div id="error" class="error" role="alert" hidden></div>
+      <button id="runBtn" class="primary-btn" type="button" disabled>編集する</button>
+    </div>
+  </div>
 
   <!-- 結果 -->
   <section id="resultPanel" class="panel ie-panel" hidden>

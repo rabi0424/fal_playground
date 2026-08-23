@@ -2480,7 +2480,9 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 .ie-main {
   max-width: 860px;
   margin: 0 auto;
-  padding: 20px 16px 64px;
+  /* 下端に常駐する実行バーに隠れないぶんの余白。バーの実高さは順番待ちの
+     件数で変わるので、imgedit.js が --ie-run-h に実測値を入れる */
+  padding: 20px 16px calc(var(--ie-run-h, 88px) + 24px);
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -2645,12 +2647,40 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 #rwParamHint.warn { color: var(--danger); }
 .ie-source-meta .hint { margin: 0; }
 
+/* 実行バー。生成画面の下部固定バーと同じ扱いで、画面のどこを見ていても
+   次を流せるようにする。順番待ち・注記・エラーはボタンの上に積む */
 .ie-run {
-  display: flex;
-  gap: 8px;
-  align-items: center;
+  position: fixed;
+  left: var(--sidebar-w);
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  padding: 10px calc(16px + env(safe-area-inset-right))
+           calc(10px + env(safe-area-inset-bottom))
+           calc(16px + env(safe-area-inset-left));
+  background: var(--material);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  border-top: 1px solid var(--hairline);
+  /* サイドバーを畳むと左端が動くので、本文と同じ速さで追従させる */
+  transition: left var(--dur-move) var(--spring);
 }
-.ie-run .primary-btn { flex: 1; }
+
+.ie-run-inner {
+  max-width: 860px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ie-run .primary-btn { width: 100%; }
+.ie-run .hint { margin: 0; }
+
+/* サイドバーが引き出しになる幅では、バーは画面いっぱいに広げる */
+@media (max-width: 900px) {
+  .ie-run { left: 0; }
+}
 
 /* 結果 */
 .ie-results {

@@ -198,7 +198,7 @@ const els = {
   negativePrompt: $('#negativePrompt'),
   runBtn: $('#runBtn'),
   costHint: $('#costHint'),
-  cancelBtn: $('#cancelBtn'),
+  jobList: $('#jobList'),
   status: $('#status'),
   error: $('#error'),
   resultPanel: $('#resultPanel'),
@@ -897,8 +897,11 @@ function clearSource() {
 }
 
 function syncRunBtn() {
-  els.runBtn.disabled = !source || els.prompt.value.trim() === '' || running
+  const full = queuedCount() >= MAX_QUEUE;
+  els.runBtn.disabled = !source || els.prompt.value.trim() === '' || full
     || (maskOn() && mask.strokes.length === 0);
+  els.runBtn.textContent = queuedCount() > 0 ? '続けて編集する' : '編集する';
+  els.runBtn.title = full ? `同時に流せるのは ${MAX_QUEUE} 件までです` : '';
   renderCostHint();
 }
 
@@ -2379,34 +2382,122 @@ function renderRunwareParamHint() {
   els.rwParamHint.classList.toggle('warn', notes.length > 0);
 }
 
-/* ---------- 実行 ---------- */
+/* ---------- 実行（順番待ちつき） ---------- */
+//
+// 1 件ずつしか流せないと、結果を待っているあいだ手が止まる。投入は即座に返る
+// （どのプロバイダも「投入 → ポーリング」の形）ので、送ったジョブは行として
+// 積んでおき、完了は各々で待つ。生成画面と同じ考え方・同じ見た目の行を使う。
+//
+// 走っている本数には上限を置く。上限が無いと、押した回数だけ課金が走る
 
-let running = false;
-let cancelled = false;
+const MAX_QUEUE = 5;
 
-function setRunning(on) {
-  running = on;
-  cancelled = false;
-  els.cancelBtn.hidden = !on;
+/** 進行中のジョブ。並び順は投入順 */
+let activeJobs = [];
+/** ジョブ id → { row, status }。行は DOM 側の都合なので保存対象に含めない */
+const jobUI = new Map();
+/** 受け取りをやめたジョブの id */
+const cancelledJobs = new Set();
+/** 投入中（まだ handle が返っていない）件数。連打で上限を超えないように数える */
+let submitting = 0;
+
+function queuedCount() {
+  return activeJobs.length + submitting;
+}
+
+function saveJobs() {
+  // 行の DOM は持たない。handle と組み立て済みの情報だけを残す
+  localStorage.setItem(LS_JOB, JSON.stringify(activeJobs));
+}
+
+function loadJobs() {
+  let saved;
+  try {
+    saved = JSON.parse(localStorage.getItem(LS_JOB));
+  } catch {
+    return [];
+  }
+  // 以前は 1 件だけを直に入れていたので、その形も読めるようにしておく
+  if (!saved) return [];
+  return Array.isArray(saved) ? saved : [saved];
+}
+
+function dropJob(job) {
+  activeJobs = activeJobs.filter((j) => j.id !== job.id);
+  cancelledJobs.delete(job.id);
+  saveJobs();
   syncRunBtn();
 }
 
-function saveJob(job) {
-  localStorage.setItem(LS_JOB, JSON.stringify(job));
+/* ---------- 順番待ちの行 ---------- */
+
+function startJobRow(job) {
+  const row = document.createElement('div');
+  row.className = 'job-row';
+
+  const status = document.createElement('div');
+  status.className = 'status';
+  status.textContent = 'リクエストを送信中…';
+  row.appendChild(status);
+
+  const prompt = document.createElement('div');
+  prompt.className = 'job-prompt';
+  prompt.textContent = job.prompt || '';
+  prompt.title = job.prompt || '';
+  row.appendChild(prompt);
+
+  const x = document.createElement('button');
+  x.type = 'button';
+  x.className = 'job-x ghost-btn small';
+  x.textContent = '✕';
+  x.title = 'この編集の結果を受け取るのをやめます（モデル側の処理は止まりません）';
+  x.addEventListener('click', () => {
+    cancelledJobs.add(job.id);
+    setJobStatus(job, 'キャンセルしています…');
+  });
+  row.appendChild(x);
+
+  els.jobList.appendChild(row);
+  row.scrollIntoView({ block: 'nearest' });
+  jobUI.set(job.id, { row, status });
+  syncRunBtn();
 }
 
-function clearJob() {
-  localStorage.removeItem(LS_JOB);
+function setJobStatus(job, text) {
+  const ui = jobUI.get(job.id);
+  if (ui) ui.status.textContent = text;
+}
+
+function endJobRow(job) {
+  jobUI.get(job.id)?.row.remove();
+  jobUI.delete(job.id);
+}
+
+// 失敗した行はエラー表示に切り替えて、閉じるまで残す
+function failJobRow(job, message) {
+  const ui = jobUI.get(job.id);
+  if (!ui) return;
+  ui.row.innerHTML = '';
+  const err = document.createElement('div');
+  err.className = 'error';
+  err.textContent = message;
+  ui.row.appendChild(err);
+  const x = document.createElement('button');
+  x.type = 'button';
+  x.className = 'job-x ghost-btn small';
+  x.textContent = '✕';
+  x.addEventListener('click', () => endJobRow(job));
+  ui.row.appendChild(x);
+  jobUI.delete(job.id);
 }
 
 async function run() {
-  if (!source || running) return;
+  if (!source || queuedCount() >= MAX_QUEUE) return;
   const prompt = els.prompt.value.trim();
   if (prompt === '') return;
 
   setError('');
-  setRunning(true);
-  setStatus('リクエストを送信中…');
+  setStatus('');
 
   // 送るのはここで作る縮小版。元画像は合成の土台として R2 に残っている
   const size = sendSize();
@@ -2428,8 +2519,6 @@ async function run() {
     const img = await sourceImageEl();
     dataUri = frame ? framedDataUri(img, outer, inner) : toDataUri(img, size).dataUri;
   } catch (err) {
-    setRunning(false);
-    setStatus('');
     setError(`入力画像を用意できませんでした: ${err.message}`);
     return;
   }
@@ -2469,15 +2558,35 @@ async function run() {
     colorEnabled: useMask && els.colorToggle.checked,
   };
 
+  // 行を先に出しておく（送信のあいだも「受け付けた」ことが分かる）
+  submitting += 1;
+  startJobRow(job);
   try {
     job.handle = await api.submit(input);
-    saveJob(job);
-    await waitAndFinish(job);
   } catch (err) {
-    setRunning(false);
-    setStatus('');
-    setError(cancelled ? 'キャンセルしました' : `編集に失敗しました: ${err.message}`);
-    clearJob();
+    failJobRow(job, `編集に失敗しました: ${err.message}`);
+    return;
+  } finally {
+    submitting -= 1;
+  }
+  activeJobs.push(job);
+  setJobStatus(job, '編集中…');
+  saveJobs();
+  syncRunBtn();
+  // 完了はここで待たない。待っているあいだも次を送れるようにする
+  track(job);
+}
+
+// 1 件ぶんの完了待ち。結果の保存・合成までやって、行を片付ける
+async function track(job) {
+  try {
+    await waitAndFinish(job);
+    endJobRow(job);
+  } catch (err) {
+    failJobRow(job, cancelledJobs.has(job.id)
+      ? 'キャンセルしました' : `編集に失敗しました: ${err.message}`);
+  } finally {
+    dropJob(job);
   }
 }
 
@@ -2494,13 +2603,12 @@ function normalizeJobLoras(input) {
 // 送信済みジョブの完了待ち。ページを開き直したときもここから再開する
 async function waitAndFinish(job) {
   const api = PROVIDERS[job.provider] ?? PROVIDERS.fal;
-  setRunning(true);
   let poll;
   do {
     await sleep(api.pollMs);
-    if (cancelled) throw new Error('キャンセルしました');
+    if (cancelledJobs.has(job.id)) throw new Error('キャンセルしました');
     poll = await api.poll(job.handle);
-    if (!poll.done) setStatus(poll.text);
+    if (!poll.done) setJobStatus(job, poll.text);
   } while (!poll.done);
 
   const { images, seed, flagged, cost } = api.parse(poll.result);
@@ -2530,15 +2638,14 @@ async function waitAndFinish(job) {
     // 出力に続けて入力画像も残す（削除時に一括で消える）
     images: [...images, { url: job.sourceUrl }],
   };
-  clearJob();
   // 先に保存する。fal / WaveSpeed の CDN 画像はここで R2 に取り込まれて同一
   // オリジンになり、canvas で合成できるようになる（別ドメインのままだと読めない）
   let saved = await saveHistoryRecord(record);
 
   if (job.mask) {
-    setStatus('マスクの内側だけを合成中…');
+    setJobStatus(job, 'マスクの内側だけを合成中…');
     try {
-      saved = await buildMaskedRecord(saved, job.mask);
+      saved = await buildMaskedRecord(saved, job.mask, (text) => setJobStatus(job, text));
       saved = await saveHistoryRecord(saved);
     } catch (err) {
       // 合成できなくても、生成そのものは成功している。マスクなしの結果を出す
@@ -2546,16 +2653,13 @@ async function waitAndFinish(job) {
     }
   }
 
-  setRunning(false);
-  setStatus(flagged > 0
-    ? `安全性チェックにより ${flagged} 枚が塗り潰されて返りました`
-    : '');
+  if (flagged > 0) setStatus(`安全性チェックにより ${flagged} 枚が塗り潰されて返りました`);
   renderResult(saved);
 }
 
 // 保存済みレコードの各出力をマスク合成し、結果を先頭に足したレコードを返す。
 // images は [合成 …, 生成結果そのまま …, 入力画像] の順になる
-async function buildMaskedRecord(record, maskData) {
+async function buildMaskedRecord(record, maskData, onStatus = () => {}) {
   const n = record.outputCount ?? record.images.length - 1;
   // 既に合成済みなら先頭 n 枚が前回の合成、その後ろが生成結果そのまま
   const previous = record.masked ? record.images.slice(0, n) : []; // 差し替え先
@@ -2574,7 +2678,7 @@ async function buildMaskedRecord(record, maskData) {
   const offsets = [...(record.align ?? [])];
   for (const [i, raw] of raws.entries()) {
     const want = offsets[i] === undefined && record.alignEnabled ? 'auto' : (offsets[i] ?? null);
-    if (want === 'auto') setStatus('ずれを測っています…');
+    if (want === 'auto') onStatus('ずれを測っています…');
     const { dataUri, width, height, offset } = await compositeFromUrls(
       inputUrl, raw.url, maskData, record.crop ?? null, want,
       { colorMatch: !!record.colorEnabled },
@@ -2747,23 +2851,16 @@ async function saveMaskedResult(record) {
   }
 }
 
-// 送信済みのまま閉じられたジョブを拾って続きから待つ
-async function resumeJob() {
-  let job;
-  try {
-    job = JSON.parse(localStorage.getItem(LS_JOB));
-  } catch {
-    job = null;
-  }
-  if (!job?.handle) return;
-  setStatus('前回の編集の結果を確認中…');
-  try {
-    await waitAndFinish(job);
-  } catch (err) {
-    setRunning(false);
-    setStatus('');
-    setError(`前回の編集を再開できませんでした: ${err.message}`);
-    clearJob();
+// 送信済みのまま閉じられたジョブを拾って続きから待つ（順番待ちのぶんも全部）
+function resumeJobs() {
+  const saved = loadJobs().filter((job) => job?.handle);
+  if (saved.length === 0) return;
+  activeJobs = saved;
+  saveJobs();
+  for (const job of saved) {
+    startJobRow(job);
+    setJobStatus(job, '前回の編集の結果を確認中…');
+    track(job);
   }
 }
 
@@ -3055,10 +3152,6 @@ window.addEventListener('resize', () => { if (maskOn()) drawMaskOverlay(); });
 els.sourceImg.addEventListener('load', () => { if (maskOn()) drawMaskOverlay(); });
 
 els.runBtn.addEventListener('click', run);
-els.cancelBtn.addEventListener('click', () => {
-  cancelled = true;
-  setStatus('キャンセルしています…');
-});
 
 for (const name of RUNWARE_SCHEDULERS) {
   const opt = document.createElement('option');
@@ -3073,7 +3166,16 @@ syncRwAddLoraBtn();
 applyRunwareRecommended();
 syncProviderFields();
 restoreForm();
-fetchHistory().then(resumeJob);
+fetchHistory().then(resumeJobs);
+
+// 実行バーは順番待ちの件数で高さが変わる。本文の下余白をその実測値に合わせて、
+// 一番下の内容がバーに隠れないようにする
+const runBar = document.querySelector('.ie-run');
+const syncRunBarHeight = () => {
+  document.documentElement.style.setProperty('--ie-run-h', `${runBar.offsetHeight}px`);
+};
+new ResizeObserver(syncRunBarHeight).observe(runBar);
+syncRunBarHeight();
 
 window.addEventListener('pagehide', () => {
   deviceSync.flush(); // 送信待ちの同期があれば離脱前に送っておく
