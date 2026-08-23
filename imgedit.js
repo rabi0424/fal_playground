@@ -2763,9 +2763,18 @@ hfImport.init({
   },
 });
 
-// 登録・登録解除のたびに、既にある行の候補も入れ替える
+// 端末間同期（共有モジュール）。この画面からも LoRA を登録できるので、
+// 生成画面などと同じようにサーバーへ送って全端末へ渡す
+deviceSync.init({ onRemote: refreshLoraRows });
+
+// 登録・登録解除のたびに、既にある行の候補を入れ替えたうえで同期へ知らせる
 // （loraLib は保存のたびにこれを呼ぶので、取り込み経路が増えても取りこぼさない）
-loraLib.onChange = refreshLoraRows;
+loraLib.onChange = () => {
+  refreshLoraRows();
+  deviceSync.markDirty('loras');
+};
+loraLib.migrate(); // 同期で届いた古い形式のデータもここで揃える
+deviceSync.pull();
 els.hfOpenBtn.addEventListener('click', () => hfImport.open('lora'));
 
 // Runware の LoRA（AIR）の控えと取り込みダイアログ。API は画像編集側の
@@ -2925,3 +2934,10 @@ applyRunwareRecommended();
 syncProviderFields();
 restoreForm();
 fetchHistory().then(resumeJob);
+
+window.addEventListener('pagehide', () => {
+  deviceSync.flush(); // 送信待ちの同期があれば離脱前に送っておく
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') deviceSync.pull();
+});

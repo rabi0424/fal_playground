@@ -34,7 +34,6 @@ const SIZES = [
 const LS_LORAS = 'fal_lora_library';
 const LS_CKPTS = 'fal_ckpt_library'; // 本体のチェックポイントライブラリ（同期のためここでも扱う）
 const LS_ARENA = 'fal_arena';
-const LS_SYNC_TS = 'fal_sync_ts';
 
 // 20〜30 件を並行ポーリングするため、本体（900ms）より間隔を空ける
 const POLL_INTERVAL_MS = 2000;
@@ -171,7 +170,7 @@ function loadArena() {
 
 function saveArena() {
   localStorage.setItem(LS_ARENA, JSON.stringify(arena));
-  syncMarkDirty('arena');
+  deviceSync.markDirty('arena');
 }
 
 let idSeq = 0;
@@ -211,94 +210,6 @@ function participantShortNames(session) {
     map[p.id] = cut > 0 && names[i].length > cut ? `…${names[i].slice(cut)}` : names[i];
   });
   return map;
-}
-
-/* ---------- device sync（app.js と同じ仕組み） ---------- */
-// 注意: /api/state はドキュメント全体を置き換えるため、本体（app.js）側の
-// SYNC_SECTIONS と同じセクション一覧をここでも送る（欠けると本体のデータが消える）
-
-const SYNC_SECTIONS = { loras: LS_LORAS, arena: LS_ARENA, ckpts: LS_CKPTS };
-const SYNC_PUSH_DELAY_MS = 2000;
-
-let syncPushTimer = null;
-
-function loadSyncTs() {
-  try {
-    return JSON.parse(localStorage.getItem(LS_SYNC_TS)) || {};
-  } catch {
-    return {};
-  }
-}
-
-function saveSyncTs(ts) {
-  localStorage.setItem(LS_SYNC_TS, JSON.stringify(ts));
-}
-
-function syncMarkDirty(section) {
-  const ts = loadSyncTs();
-  ts[section] = Date.now();
-  saveSyncTs(ts);
-  clearTimeout(syncPushTimer);
-  syncPushTimer = setTimeout(() => {
-    syncPushTimer = null;
-    syncPull();
-  }, SYNC_PUSH_DELAY_MS);
-}
-
-function syncFetch(method, body) {
-  return fetch('/api/state', {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
-    body,
-    keepalive: method === 'PUT',
-  });
-}
-
-async function syncPull() {
-  let doc;
-  try {
-    const res = await syncFetch('GET');
-    if (!res.ok || isHtmlResponse(res)) return;
-    doc = await res.json();
-  } catch {
-    return;
-  }
-
-  const ts = loadSyncTs();
-  let changed = false;
-  let needPush = !doc;
-  for (const [section, lsKey] of Object.entries(SYNC_SECTIONS)) {
-    const remote = doc?.[section];
-    const localTs = ts[section] || 0;
-    if (remote && remote.ts > localTs) {
-      if (remote.value) localStorage.setItem(lsKey, remote.value);
-      else localStorage.removeItem(lsKey);
-      ts[section] = remote.ts;
-      changed = true;
-    } else if (localTs > (remote?.ts ?? 0)) {
-      needPush = true;
-    }
-  }
-  saveSyncTs(ts);
-
-  if (changed) {
-    arena = loadArena();
-    renderAll();
-  }
-  if (needPush) syncPush();
-}
-
-async function syncPush() {
-  const ts = loadSyncTs();
-  const doc = {};
-  for (const [section, lsKey] of Object.entries(SYNC_SECTIONS)) {
-    doc[section] = { value: localStorage.getItem(lsKey) ?? '', ts: ts[section] || 0 };
-  }
-  try {
-    await syncFetch('PUT', JSON.stringify(doc));
-  } catch {
-    // 失敗しても次の変更・次回起動時に再送される
-  }
 }
 
 /* ---------- Elo ---------- */
@@ -1199,8 +1110,16 @@ function deleteCurrentSession() {
 
 /* ---------- init ---------- */
 
+// 端末間同期（共有モジュール）。他端末の変更が届いたら描き直す
+deviceSync.init({
+  onRemote() {
+    arena = loadArena();
+    renderAll();
+  },
+});
+
 // LoRA ライブラリ（共有モジュール）。保存のたびに端末間同期へ知らせる
-loraLib.onChange = () => syncMarkDirty('loras');
+loraLib.onChange = () => deviceSync.markDirty('loras');
 loraLib.migrate();
 
 initSessionDialog();
@@ -1253,16 +1172,12 @@ document.addEventListener('keydown', (e) => {
 });
 
 window.addEventListener('pagehide', () => {
-  if (syncPushTimer) {
-    clearTimeout(syncPushTimer);
-    syncPushTimer = null;
-    syncPush();
-  }
+  deviceSync.flush(); // 送信待ちの同期があれば離脱前に送っておく
 });
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') syncPull();
+  if (document.visibilityState === 'visible') deviceSync.pull();
 });
 
 renderAll();
-syncPull();
+deviceSync.pull();
 resumeRounds();

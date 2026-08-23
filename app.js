@@ -622,7 +622,7 @@ function loadCkptLibrary() {
 
 function saveCkptLibrary(items) {
   localStorage.setItem(LS_CKPTS, JSON.stringify(items));
-  syncMarkDirty('ckpts');
+  deviceSync.markDirty('ckpts');
 }
 
 // チェックポイントは .gguf / .safetensors の区別が重要なので拡張子ごと表示する
@@ -2075,103 +2075,6 @@ function reuseRecord(record) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
-/* ---------- device sync ---------- */
-// LoRA ライブラリを Worker の /api/state（Durable Object）に保存して端末間で
-// 同期する。セクションごとに更新時刻を持ち、新しい方を採用する。
-// 認証は Cloudflare Access が担うため、アプリ内のトークンはない。
-//（生成履歴は /api/history でサーバー保存、fal キーは Worker の Secret なので同期対象外）
-
-// /api/state はドキュメント全体を置き換えるため、比較アリーナ（arena.html）の
-// セクションもここに含めて送る（含めないと本体の送信でアリーナのデータが消える）
-const LS_SYNC_TS = 'fal_sync_ts';
-const SYNC_SECTIONS = { loras: LS_LORAS, arena: LS_ARENA, ckpts: LS_CKPTS };
-const SYNC_PUSH_DELAY_MS = 2000;
-
-let syncPushTimer = null;
-
-function loadSyncTs() {
-  try {
-    return JSON.parse(localStorage.getItem(LS_SYNC_TS)) || {};
-  } catch {
-    return {};
-  }
-}
-
-function saveSyncTs(ts) {
-  localStorage.setItem(LS_SYNC_TS, JSON.stringify(ts));
-}
-
-// 同期対象の localStorage を書き換えたら呼ぶ。連続変更をまとめて少し後に送信する
-function syncMarkDirty(section) {
-  const ts = loadSyncTs();
-  ts[section] = Date.now();
-  saveSyncTs(ts);
-  clearTimeout(syncPushTimer);
-  syncPushTimer = setTimeout(() => {
-    syncPushTimer = null;
-    syncPull(); // 先にリモートの新しい変更を取り込んでから needPush 経由で送信される
-  }, SYNC_PUSH_DELAY_MS);
-}
-
-function syncFetch(method, body) {
-  return fetch('/api/state', {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
-    body,
-    // 離脱間際の送信でも完了できるようにする
-    keepalive: method === 'PUT',
-  });
-}
-
-// リモートの方が新しいセクションを取り込み、ローカルの方が新しければ送信する
-async function syncPull() {
-  let doc;
-  try {
-    const res = await syncFetch('GET');
-    if (!res.ok || isHtmlResponse(res)) return;
-    doc = await res.json();
-  } catch {
-    return; // オフライン・ローカル静的サーバーなどは黙って諦める
-  }
-
-  const ts = loadSyncTs();
-  let changed = false;
-  let needPush = !doc; // サーバーが空（初回）ならローカルをそのまま上げる
-  for (const [section, lsKey] of Object.entries(SYNC_SECTIONS)) {
-    const remote = doc?.[section];
-    const localTs = ts[section] || 0;
-    if (remote && remote.ts > localTs) {
-      if (remote.value) localStorage.setItem(lsKey, remote.value);
-      else localStorage.removeItem(lsKey);
-      ts[section] = remote.ts;
-      changed = true;
-    } else if (localTs > (remote?.ts ?? 0)) {
-      needPush = true;
-    }
-  }
-  saveSyncTs(ts);
-
-  if (changed) {
-    loraLib.migrate(); // 同期で届いた古い形式のデータもここで揃える
-    refreshLoraSelects();
-    populateCkptSelect(els.ckptSelect.value);
-  }
-  if (needPush) syncPush();
-}
-
-async function syncPush() {
-  const ts = loadSyncTs();
-  const doc = {};
-  for (const [section, lsKey] of Object.entries(SYNC_SECTIONS)) {
-    doc[section] = { value: localStorage.getItem(lsKey) ?? '', ts: ts[section] || 0 };
-  }
-  try {
-    await syncFetch('PUT', JSON.stringify(doc));
-  } catch {
-    // 失敗しても次の変更・次回起動時に再送される
-  }
-}
-
 /* ---------- form persistence ---------- */
 
 // LoRA リストの全行を（scale 0 や未登録も含めて）そのまま書き出す
@@ -2261,8 +2164,16 @@ function scheduleSaveForm() {
 
 /* ---------- init ---------- */
 
+// 端末間同期（共有モジュール）。他端末の変更が届いたら候補を作り直す
+deviceSync.init({
+  onRemote() {
+    refreshLoraSelects();
+    populateCkptSelect(els.ckptSelect.value);
+  },
+});
+
 // LoRA ライブラリ（共有モジュール）。保存のたびに端末間同期へ知らせる
-loraLib.onChange = () => syncMarkDirty('loras');
+loraLib.onChange = () => deviceSync.markDirty('loras');
 loraLib.migrate();
 
 initHfDialog();
@@ -2312,7 +2223,7 @@ if (MOBILE_MQ.matches) els.loraField.open = false;
 }
 
 // 起動時に他端末の変更（LoRA ライブラリ）を取り込む
-syncPull();
+deviceSync.pull();
 
 // フォームの変更を localStorage に保存（入力のたび・離脱時）
 document.addEventListener('input', scheduleSaveForm);
@@ -2320,17 +2231,13 @@ document.addEventListener('change', scheduleSaveForm);
 window.addEventListener('pagehide', () => {
   saveFormState();
   // 送信待ちの同期があれば離脱前に送っておく
-  if (syncPushTimer) {
-    clearTimeout(syncPushTimer);
-    syncPushTimer = null;
-    syncPush();
-  }
+  deviceSync.flush(); // 送信待ちの同期があれば離脱前に送っておく
 });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') saveFormState();
   // タブに戻ってきたら他端末の変更（LoRA ライブラリ・履歴）を取り込む
   if (document.visibilityState === 'visible') {
-    syncPull();
+    deviceSync.pull();
     fetchHistoryFromServer();
   }
 });

@@ -282,7 +282,7 @@ node test/import.test.mjs
 | fal API キー / Modal トークン | Worker の Secret | ブラウザには一切渡らない |
 | 生成履歴（プロンプト・設定・結果） | サーバー（Durable Object） | 直近 1000 件。超過分は画像ごと古い順に自動削除。全端末で共通 |
 | 生成画像 | サーバー（R2 バケット `fal-playground-images`） | fal / WaveSpeed / Runware の CDN からも取り込むため**失効しない**。履歴の削除と連動して削除。R2 移行前の画像は旧 Durable Object から後方互換で配信 |
-| LoRA ライブラリ | サーバー（自動同期） + localStorage | 全端末で共通 |
+| LoRA ライブラリ | サーバー（自動同期） + localStorage | 全端末で共通。どの画面から登録しても同期されます（生成 / 画像編集 / ライブラリ / 比較アリーナ） |
 | Runware の LoRA（AIR）の控え | localStorage | 端末ごと。実体は Runware 側にあるので、「Runware から取り込み」で再取得できる |
 | 比較アリーナのセッション・投票結果 | サーバー（自動同期） + localStorage | 全端末で共通。画像は生成履歴と共用 |
 | フォームの下書き・テーマ | localStorage | 端末ごと（意図的に同期しない） |

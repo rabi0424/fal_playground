@@ -18,7 +18,6 @@
 const LS_LORAS = 'fal_lora_library';
 const LS_CKPTS = 'fal_ckpt_library'; // 同期のためここでも扱う（値は触らない）
 const LS_ARENA = 'fal_arena';
-const LS_SYNC_TS = 'fal_sync_ts';
 
 const SAVE_DELAY_MS = 400; // 入力が落ち着いてから保存する
 const HF_DEFAULT_REPO = 'tottie2215/temp_str'; // 取り込み先の既定（app.js と同じ）
@@ -563,100 +562,19 @@ async function fetchAllMeta() {
     + (missing > 0 ? `（${missing} 件はサイト情報 JSON がありませんでした）` : ''), true);
 }
 
-/* ---------- device sync（app.js と同じ仕組み） ---------- */
-// 注意: /api/state はドキュメント全体を置き換えるため、本体（app.js）側の
-// SYNC_SECTIONS と同じセクション一覧をここでも送る（欠けると本体のデータが消える）
-
-const SYNC_SECTIONS = { loras: LS_LORAS, arena: LS_ARENA, ckpts: LS_CKPTS };
-const SYNC_PUSH_DELAY_MS = 2000;
-
-let syncPushTimer = null;
-
-function loadSyncTs() {
-  try {
-    return JSON.parse(localStorage.getItem(LS_SYNC_TS)) || {};
-  } catch {
-    return {};
-  }
-}
-
-function saveSyncTs(ts) {
-  localStorage.setItem(LS_SYNC_TS, JSON.stringify(ts));
-}
-
-function syncMarkDirty(section) {
-  const ts = loadSyncTs();
-  ts[section] = Date.now();
-  saveSyncTs(ts);
-  clearTimeout(syncPushTimer);
-  syncPushTimer = setTimeout(() => {
-    syncPushTimer = null;
-    syncPull();
-  }, SYNC_PUSH_DELAY_MS);
-}
-
-function syncFetch(method, body) {
-  return fetch('/api/state', {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
-    body,
-    keepalive: method === 'PUT',
-  });
-}
-
-async function syncPull() {
-  let doc;
-  try {
-    const res = await syncFetch('GET');
-    if (!res.ok || isHtmlResponse(res)) return;
-    doc = await res.json();
-  } catch {
-    return;
-  }
-
-  const ts = loadSyncTs();
-  let changed = false;
-  let needPush = !doc;
-  for (const [section, lsKey] of Object.entries(SYNC_SECTIONS)) {
-    const remote = doc?.[section];
-    const localTs = ts[section] || 0;
-    if (remote && remote.ts > localTs) {
-      if (remote.value) localStorage.setItem(lsKey, remote.value);
-      else localStorage.removeItem(lsKey);
-      ts[section] = remote.ts;
-      changed = true;
-    } else if (localTs > (remote?.ts ?? 0)) {
-      needPush = true;
-    }
-  }
-  saveSyncTs(ts);
-
-  // 編集中に他端末の内容で画面を差し替えると入力が消えるので、保存待ちが
-  // 残っている間は取り込みを反映しない（次の pull で追いつく）
-  if (changed && saveTimers.size === 0) {
-    loraLib.migrate(); // 同期で届いた古い形式のデータもここで揃える
-    library = loadLibrary();
-    render();
-  }
-  if (needPush) syncPush();
-}
-
-async function syncPush() {
-  const ts = loadSyncTs();
-  const doc = {};
-  for (const [section, lsKey] of Object.entries(SYNC_SECTIONS)) {
-    doc[section] = { value: localStorage.getItem(lsKey) ?? '', ts: ts[section] || 0 };
-  }
-  try {
-    await syncFetch('PUT', JSON.stringify(doc));
-  } catch {
-    // 失敗しても次の変更・次回起動時に再送される
-  }
-}
-
 /* ---------- init ---------- */
 
-loraLib.onChange = () => syncMarkDirty('loras');
+// 端末間同期（共有モジュール）。編集中の入力が消えないよう、保存待ちが
+// 残っている間は他端末の内容を反映しない（次の pull で追いつく）
+deviceSync.init({
+  canApply: () => saveTimers.size === 0,
+  onRemote() {
+    library = loadLibrary();
+    render();
+  },
+});
+
+loraLib.onChange = () => deviceSync.markDirty('loras');
 loraLib.migrate();
 library = loadLibrary(); // 移行後の内容で描画する
 
@@ -681,16 +599,12 @@ els.metaDialog.addEventListener('close', () => { metaTarget = null; });
 
 window.addEventListener('pagehide', () => {
   flushSaves();
-  if (syncPushTimer) {
-    clearTimeout(syncPushTimer);
-    syncPushTimer = null;
-    syncPush();
-  }
+  deviceSync.flush(); // 送信待ちの同期があれば離脱前に送っておく
 });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') flushSaves();
-  else syncPull();
+  else deviceSync.pull();
 });
 
 render();
-syncPull();
+deviceSync.pull();
