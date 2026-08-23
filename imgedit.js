@@ -855,10 +855,10 @@ function blurAlphaInPlace(canvas, radius) {
   return canvas;
 }
 
-// 近似ぼかしを行う作業解像度の上限（長辺）。合成用のマスクは元画像と同じ
-// 大きさ（最大 4096px）で作るので、そのまま JS で回すと重すぎる。
-// ぼかした後のマスクはなだらかなので、この解像度から拡大しても縁は滑らか
-const BLUR_FALLBACK_MAX_PX = 1024;
+// ぼかしを行う作業解像度の上限（長辺）。合成用のマスクは元画像と同じ大きさ
+// （最大 4096px）で作るので、そのまま扱うと重すぎる。ぼかした後のマスクは
+// なだらかなので、この解像度から拡大しても縁は滑らか
+const BLUR_WORK_MAX_PX = 1024;
 
 // ctx.filter は「プロパティはあるが無視される」実装もあるので、型で判定せず
 // 実際ににじむかどうかを 1 度だけ試して覚える
@@ -885,30 +885,64 @@ function supportsFilterBlur() {
   return filterBlurs;
 }
 
-// ぼかし。ctx.filter が実際に効く環境ではそれに任せる
+// src を w×h に描き直し、周囲 pad px を「縁の画素が続いている」ものとして
+// 埋めた canvas を返す。ぼかす前にこれを挟まないと、画像の外側が透明として
+// 混ざり、端まで塗ったマスクが縁で薄くなってしまう
+function padWithEdge(src, w, h, pad) {
+  const out = makeCanvas(w + pad * 2, h + pad * 2);
+  const ctx = out.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  const sw = src.width;
+  const sh = src.height;
+  ctx.drawImage(src, 0, 0, sw, sh, pad, pad, w, h);
+  // 四辺は 1px の帯を引き伸ばす
+  ctx.drawImage(src, 0, 0, 1, sh, 0, pad, pad, h);
+  ctx.drawImage(src, sw - 1, 0, 1, sh, pad + w, pad, pad, h);
+  ctx.drawImage(src, 0, 0, sw, 1, pad, 0, w, pad);
+  ctx.drawImage(src, 0, sh - 1, sw, 1, pad, pad + h, w, pad);
+  // 四隅は角の 1px
+  ctx.drawImage(src, 0, 0, 1, 1, 0, 0, pad, pad);
+  ctx.drawImage(src, sw - 1, 0, 1, 1, pad + w, 0, pad, pad);
+  ctx.drawImage(src, 0, sh - 1, 1, 1, 0, pad + h, pad, pad);
+  ctx.drawImage(src, sw - 1, sh - 1, 1, 1, pad + w, pad + h, pad, pad);
+  return out;
+}
+
+// ぼかし。画像の外側は「縁が続いている」ものとして扱う。
+//
+// 素直に canvas をぼかすと、外側は透明として混ざる。すると画像の端まで塗った
+// マスクが縁で半分ほどの濃さになり、端に沿って元画像が帯状に残ってしまう
+// （端の物体を消しても縁だけ消えない、といった形で出る）。
+// ぼかす前に縁を外へ伸ばしておけば、端まで塗った範囲は端まで有効なままになる
 function blurCanvas(src, radius) {
   if (radius < 0.5) return src;
-  const out = makeCanvas(src.width, src.height);
-  const ctx = out.getContext('2d');
+
+  // 作業解像度。ぼかした後はなだらかなので、ここから拡大しても縁は滑らか
+  const scale = Math.min(1, BLUR_WORK_MAX_PX / Math.max(src.width, src.height));
+  const w = Math.max(1, Math.round(src.width * scale));
+  const h = Math.max(1, Math.round(src.height * scale));
+  const r = radius * scale;
+  const pad = Math.ceil(r * 2) + 1; // gaussian の裾が収まる幅
+
+  let work = padWithEdge(src, w, h, pad);
   if (supportsFilterBlur()) {
-    ctx.filter = `blur(${radius}px)`;
-    ctx.drawImage(src, 0, 0);
-    return out;
+    const blurred = makeCanvas(work.width, work.height);
+    const bctx = blurred.getContext('2d');
+    bctx.filter = `blur(${r}px)`;
+    bctx.drawImage(work, 0, 0);
+    work = blurred;
+  } else {
+    // ctx.filter が無い（または効かない）環境。以前はぼかし半径のぶんだけ
+    // 縮小してから拡大し直していたが、それだと縮小率がそのままブロックの
+    // 大きさになり、縁が階段状に見えてしまう
+    blurAlphaInPlace(work, r);
   }
 
-  // ctx.filter が無い（または効かない）環境。
-  // 以前はぼかし半径のぶんだけ縮小してから拡大し直していたが、それだと縮小率が
-  // そのままブロックの大きさになり、縁が階段状に見えてしまう。作業用の縮小は
-  // 上限までに留めて、ぼかし自体は箱ぼかしで正しくかける
-  const scale = Math.min(1, BLUR_FALLBACK_MAX_PX / Math.max(src.width, src.height));
-  const work = makeCanvas(src.width * scale, src.height * scale);
-  const wctx = work.getContext('2d');
-  wctx.imageSmoothingQuality = 'high';
-  wctx.drawImage(src, 0, 0, work.width, work.height);
-  blurAlphaInPlace(work, radius * scale);
-
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(work, 0, 0, out.width, out.height);
+  // 余白を切り落として元の大きさに戻す
+  const out = makeCanvas(src.width, src.height);
+  const octx = out.getContext('2d');
+  octx.imageSmoothingQuality = 'high';
+  octx.drawImage(work, pad, pad, w, h, 0, 0, out.width, out.height);
   return out;
 }
 
@@ -925,8 +959,8 @@ function rasterizeMask(w, h, strokes = mask.strokes, feather = mask.feather) {
   for (const stroke of strokes) {
     ctx.globalCompositeOperation = stroke.mode === 'erase' ? 'destination-out' : 'source-over';
     if (stroke.rect) {
-      // 「全面」。ぼかしで画像の縁が薄くならないよう外側まで塗る
-      ctx.fillRect(-long, -long, w + long * 2, h + long * 2);
+      // 「全面」。縁が薄くならないのは blurCanvas が縁を外へ伸ばすため
+      ctx.fillRect(0, 0, w, h);
       continue;
     }
     const width = Math.max(1, stroke.r * 2 * long);
