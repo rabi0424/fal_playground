@@ -21,24 +21,36 @@
 /* ---------- constants ---------- */
 
 const MAX_LORAS = 3; // どちらのプロバイダも最大 3 個
-const MAX_INPUT_PX = 2048; // 送信前に長辺をここまで縮める
-const INPUT_QUALITY = 0.92; // 縮小後の JPEG 品質
+const MAX_INPUT_PX = 2048; // リサイズしない設定のときの上限（長辺）
+const INPUT_QUALITY = 0.92; // 送信用 JPEG の品質
+// 合成の土台に使う元画像の上限。元解像度を保つのが目的なので大きめだが、
+// iOS Safari の canvas 面積上限（約 1670 万画素）に収まる範囲にする
+const MAX_ORIGINAL_PX = 4096;
+const MAX_ORIGINAL_AREA = 16 * 1024 * 1024;
+const ORIGINAL_QUALITY = 0.95;
 
 const LS_THEME = 'fal_theme';
 const HF_DEFAULT_REPO = 'tottie2215/temp_str'; // 取り込み先の既定（app.js と同じ）
 const LS_JOB = 'fal_imgedit_job';
 const LS_FORM = 'fal_imgedit_form';
 
-// 出力サイズ。既定は「入力画像に合わせる」（image_size を送らない）
+// 送信サイズ。Qwen-Image が学習時に使っている解像度（公式の aspect_ratios）で、
+// ここに合わせて送ると崩れにくい。送った画像と同じサイズで返させるので、
+// 出力サイズでもある
+// https://github.com/QwenLM/Qwen-Image/issues/7
 const SIZES = [
-  { value: 'auto', label: '入力画像に合わせる' },
-  { value: 'square_1_1', label: '正方形 1:1（1024×1024）', width: 1024, height: 1024 },
-  { value: 'landscape_4_3', label: '横長 4:3（1152×896）', width: 1152, height: 896 },
-  { value: 'landscape_16_9', label: '横長 16:9（1344×768）', width: 1344, height: 768 },
-  { value: 'portrait_3_4', label: '縦長 3:4（896×1152）', width: 896, height: 1152 },
-  { value: 'portrait_2_3', label: '縦長 2:3（1024×1536）', width: 1024, height: 1536 },
-  { value: 'portrait_9_16', label: '縦長 9:16（768×1344）', width: 768, height: 1344 },
+  { value: 'auto', label: '自動（近いアスペクト比に合わせる）' },
+  { value: 'qwen_1_1', label: '1:1（1328×1328）', width: 1328, height: 1328 },
+  { value: 'qwen_16_9', label: '16:9（1664×928）', width: 1664, height: 928 },
+  { value: 'qwen_9_16', label: '9:16（928×1664）', width: 928, height: 1664 },
+  { value: 'qwen_4_3', label: '4:3（1472×1140）', width: 1472, height: 1140 },
+  { value: 'qwen_3_4', label: '3:4（1140×1472）', width: 1140, height: 1472 },
+  { value: 'qwen_3_2', label: '3:2（1584×1056）', width: 1584, height: 1056 },
+  { value: 'qwen_2_3', label: '2:3（1056×1584）', width: 1056, height: 1584 },
+  { value: 'none', label: `リサイズしない（長辺 ${MAX_INPUT_PX}px まで）` },
 ];
+
+const QWEN_SIZES = SIZES.filter((s) => s.width);
 
 const ACCESS_EXPIRED_MSG = 'セッションが切れました。ページを再読み込みしてください。';
 
@@ -74,6 +86,7 @@ const els = {
   civitaiBtn: $('#civitaiBtn'),
   loraHint: $('#loraHint'),
   sizeSelect: $('#sizeSelect'),
+  sizeHint: $('#sizeHint'),
   numImages: $('#numImages'),
   steps: $('#steps'),
   guidance: $('#guidance'),
@@ -292,8 +305,10 @@ function collectLoras() {
 
 /* ---------- 入力画像 ---------- */
 
-// { dataUri, url, width, height, from } を持つ。url は R2 に置いた履歴用の URL
+// { url, width, height, from } を持つ。url は R2 に置いた元解像度の画像で、
+// マスク合成の土台になる。モデルへ送るのはここから作る縮小版（sendSize）
 let source = null;
+let sourceImage = null; // 読み込み済みの元画像。送信サイズへの描き直しに使う
 
 function loadImageEl(src, crossOrigin = null) {
   return new Promise((resolve, reject) => {
@@ -334,20 +349,57 @@ async function captureImage(url) {
   return (await res.json()).url;
 }
 
-// 長辺を MAX_INPUT_PX まで縮めて JPEG の data URI にする。
-// 元のままだと data URI が数十 MB になり、キューへの送信が通らないことがある
-function toSendableDataUri(img) {
-  const longest = Math.max(img.naturalWidth, img.naturalHeight);
-  const ratio = longest > MAX_INPUT_PX ? MAX_INPUT_PX / longest : 1;
-  const width = Math.round(img.naturalWidth * ratio);
-  const height = Math.round(img.naturalHeight * ratio);
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
+// 指定サイズに描き直して JPEG の data URI にする。size 省略時は長辺 MAX_INPUT_PX
+// までの縮小のみ（元のままだと data URI が数十 MB になり送信が通らない）
+function toDataUri(img, size = null, quality = INPUT_QUALITY) {
+  let { width, height } = size ?? fitWithin(img, MAX_INPUT_PX);
+  const canvas = makeCanvas(width, height);
   const ctx = canvas.getContext('2d');
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(img, 0, 0, width, height);
-  return { dataUri: canvas.toDataURL('image/jpeg', INPUT_QUALITY), width, height };
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return { dataUri: canvas.toDataURL('image/jpeg', quality), width: canvas.width, height: canvas.height };
+}
+
+// 読み込み済みの元画像。復元直後などで手元に無ければ R2 から読み直す
+async function sourceImageEl() {
+  if (sourceImage) return sourceImage;
+  if (!source?.url) throw new Error('入力画像がありません');
+  sourceImage = await loadImageForCanvas(source.url);
+  return sourceImage;
+}
+
+// 縦横比を保ったまま長辺 max（と面積 maxArea）に収める
+function fitWithin(img, max, maxArea = Infinity) {
+  const w = img.naturalWidth ?? img.width;
+  const h = img.naturalHeight ?? img.height;
+  const ratio = Math.min(1, max / Math.max(w, h), Math.sqrt(maxArea / (w * h)));
+  return { width: Math.round(w * ratio), height: Math.round(h * ratio) };
+}
+
+/* ---------- 送信サイズ ---------- */
+
+// 縦横比が一番近い Qwen の解像度。比の対数で比べる（横長・縦長を対称に扱う）
+function nearestQwenSize(width, height) {
+  const target = Math.log(width / height);
+  return QWEN_SIZES.reduce((best, size) => (
+    Math.abs(Math.log(size.width / size.height) - target)
+      < Math.abs(Math.log(best.width / best.height) - target) ? size : best));
+}
+
+// 選択中の設定での送信サイズ。'none' はリサイズしない（長辺の上限のみ）
+function sendSize(width = source?.width, height = source?.height) {
+  if (!width || !height) return null;
+  const choice = els.sizeSelect.value;
+  if (choice === 'none') return fitWithin({ width, height }, MAX_INPUT_PX);
+  if (choice === 'auto') return nearestQwenSize(width, height);
+  return SIZES.find((s) => s.value === choice) ?? nearestQwenSize(width, height);
+}
+
+// 元画像と送信サイズで縦横比がどれだけ違うか（1.0 = 同じ）。
+// 離れているほど引き伸ばされて送られる
+function aspectStretch(size) {
+  if (!source || !size) return 1;
+  return (size.width / size.height) / (source.width / source.height);
 }
 
 // 既に R2 にある画像か（同一オリジンの /api/image/... なら保存済み）。
@@ -377,12 +429,20 @@ async function setSourceFromSrc(src, from) {
   setStatus('画像を読み込み中…');
   try {
     const img = await loadImageEl(src);
-    const { dataUri, width, height } = toSendableDataUri(img);
-    // 再開と履歴表示のために R2 にも置く。既に R2 にある画像（履歴・前回の結果・
-    // 復元した入力）はそのまま使い回す（同じ画像を二重に持たない）
-    const url = storedImageUrl(src)
-      ?? await uploadDataUri(dataUri, { app: 'fal playground', source: 'imgedit-input' });
-    source = { dataUri, url, width, height, from };
+    // 合成の土台は元解像度のまま残す（モデルへ送るのは実行時に作る縮小版）。
+    // 既に R2 にある画像（履歴・前回の結果・復元した入力）はそのまま使い回す
+    const stored = storedImageUrl(src);
+    let url = stored;
+    let { width, height } = fitWithin(img, MAX_ORIGINAL_PX, MAX_ORIGINAL_AREA);
+    if (stored) {
+      width = img.naturalWidth;
+      height = img.naturalHeight;
+    } else {
+      const original = toDataUri(img, { width, height }, ORIGINAL_QUALITY);
+      url = await uploadDataUri(original.dataUri, { app: 'fal playground', source: 'imgedit-input' });
+    }
+    sourceImage = img;
+    source = { url, width, height, from };
     renderSource();
     saveForm();
     setStatus('');
@@ -412,16 +472,37 @@ function renderSource() {
   els.sourcePreview.hidden = !has;
   els.uploadArea.hidden = has;
   if (has) {
-    els.sourceImg.src = source.dataUri || source.url;
+    els.sourceImg.src = source.url;
     els.sourceInfo.textContent = `${source.width} × ${source.height}`
       + (source.from === 'history' ? '（履歴から）' : source.from === 'result' ? '（前回の結果）' : '');
   }
   syncMaskUi();
   syncRunBtn();
+  renderSizeHint();
+}
+
+// 何をどのサイズで送るかを明示する。引き伸ばして送る場合はそれも出す
+function renderSizeHint() {
+  const size = sendSize();
+  if (!size) {
+    els.sizeHint.hidden = true;
+    return;
+  }
+  const stretch = aspectStretch(size);
+  const off = Math.abs(1 - stretch) * 100;
+  // 引き伸ばして送った場合、元の比率に戻るのはマスク合成のときだけ
+  //（マスク無しはモデルの出力がそのまま結果になる）
+  const stretched = `${stretch > 1 ? '横' : '縦'}に ${off.toFixed(0)}% 引き伸ばして送り、`
+    + (maskOn() ? '合成で元の比率へ戻します' : '結果もその比率になります');
+  els.sizeHint.hidden = false;
+  els.sizeHint.textContent = `${source.width}×${source.height} → ${size.width}×${size.height} で送信`
+    + (off < 0.5 ? '（比率そのまま）' : `（${stretched}）`);
+  els.sizeHint.classList.toggle('warn', off > 12);
 }
 
 function clearSource() {
   source = null;
+  sourceImage = null;
   els.fileInput.value = '';
   renderSource();
   saveForm();
@@ -470,12 +551,6 @@ function syncMaskUi() {
     ? 'なし' : `${els.maskFeather.value}`;
   els.maskUndoBtn.disabled = mask.strokes.length === 0;
   els.maskClearBtn.disabled = mask.strokes.length === 0;
-  // 出力サイズが入力と違うと重ねられないので、マスク中は入力に合わせる
-  els.sizeSelect.disabled = on;
-  if (on && els.sizeSelect.value !== 'auto') {
-    els.sizeSelect.value = 'auto';
-    renderCostHint();
-  }
   if (on) drawMaskOverlay();
 }
 
@@ -648,11 +723,14 @@ function maskAll() {
 
 /* ---------- 合成 ---------- */
 
-// 出力画像をマスクの内側だけ元画像に重ねる。合成は出力の解像度で行い、
-// 元画像はそこへ引き伸ばす（出力が入力より大きいときに解像度を落とさない）
+// 出力画像をマスクの内側だけ元画像に重ねる。
+//
+// 合成は「元画像の解像度・縦横比」で行い、出力をそこへ引き伸ばす。モデルへは
+// Qwen の解像度に合わせて縮めた（必要なら比を変えた）画像を送っているので、
+// ここで戻すことで、マスクの外側は元の画素のまま・内側だけが差し替わる
 function compositeWithMask(baseImg, editedImg, maskData) {
-  const w = editedImg.naturalWidth || editedImg.width;
-  const h = editedImg.naturalHeight || editedImg.height;
+  const w = baseImg.naturalWidth || baseImg.width;
+  const h = baseImg.naturalHeight || baseImg.height;
   const out = makeCanvas(w, h);
   const ctx = out.getContext('2d');
   ctx.imageSmoothingQuality = 'high';
@@ -826,8 +904,7 @@ const PROVIDERS = {
     supports: { size: true, count: true, steps: true, guidance: true, acceleration: true, negative: true },
     pollMs: 1200,
 
-    buildInput(dataUri) {
-      const size = SIZES.find((x) => x.value === els.sizeSelect.value);
+    buildInput(dataUri, size) {
       const input = {
         prompt: els.prompt.value.trim(),
         image_urls: [dataUri],
@@ -837,7 +914,8 @@ const PROVIDERS = {
         acceleration: els.acceleration.value,
         output_format: els.outputFormat.value,
       };
-      if (size && size.width) input.image_size = { width: size.width, height: size.height };
+      // 送った画像と同じ大きさで返させる（マスク合成が枠ごとに重なる）
+      if (size) input.image_size = { width: size.width, height: size.height };
       if (els.seedLock.checked && els.seed.value !== '') input.seed = Number(els.seed.value);
       const negative = els.negativePrompt.value.trim();
       if (negative) input.negative_prompt = negative;
@@ -882,10 +960,9 @@ const PROVIDERS = {
     },
 
     costHint() {
-      const size = SIZES.find((x) => x.value === els.sizeSelect.value);
-      const width = size?.width ?? source?.width;
-      const height = size?.height ?? source?.height;
-      if (!width || !height) return '';
+      const size = sendSize();
+      if (!size) return '';
+      const { width, height } = size;
       const mp = (width * height) / 1e6 * Number(els.numImages.value);
       return `出力 ${width}×${height} × ${els.numImages.value} 枚`
         + ` ・ ${mp.toFixed(1)} MP ・ 目安 $${(mp * 0.035).toFixed(3)}`;
@@ -895,7 +972,7 @@ const PROVIDERS = {
   wavespeed: {
     label: 'WaveSpeed（wavespeed-ai/qwen-image/edit-2511-lora）',
     model: 'wavespeed-ai/qwen-image/edit-2511-lora',
-    note: '指定できるのは指示文・LoRA・seed・形式だけです（解像度やステップは API に無く、出力は 1 枚）。課金は 1 枚 $0.025 の固定制。LoRA は公開アクセスできる URL である必要があります。',
+    note: '指定できるのは指示文・LoRA・seed・形式だけです（ステップ等は API に無く、出力は 1 枚）。出力サイズの指定も無いので、送信サイズがそのまま効きます。課金は 1 枚 $0.025 の固定制。LoRA は公開アクセスできる URL である必要があります。',
     supports: {},
     pollMs: 2000,
     endpoint: 'https://api.wavespeed.ai/api/v3/wavespeed-ai/qwen-image/edit-2511-lora',
@@ -1020,8 +1097,20 @@ async function run() {
   setRunning(true);
   setStatus('リクエストを送信中…');
 
+  // 送るのはここで作る縮小版。元画像は合成の土台として R2 に残っている
+  const size = sendSize();
+  let dataUri;
+  try {
+    dataUri = toDataUri(await sourceImageEl(), size).dataUri;
+  } catch (err) {
+    setRunning(false);
+    setStatus('');
+    setError(`入力画像を用意できませんでした: ${err.message}`);
+    return;
+  }
+
   const api = provider();
-  const input = api.buildInput(source.dataUri);
+  const input = api.buildInput(dataUri, size);
   const job = {
     id: makeId(),
     provider: providerId,
@@ -1029,6 +1118,9 @@ async function run() {
     startedAt: Date.now(),
     prompt,
     sourceUrl: source.url,
+    // 元画像と、実際に送った大きさ。合成は元解像度で行うので両方残す
+    sourceSize: { width: source.width, height: source.height },
+    sentSize: size,
     // 送信内容のうち、履歴と再開に必要な分だけ控える（画像本体は持たない）
     params: api.strip(input),
     loras: input.loras ?? [],
@@ -1076,6 +1168,8 @@ async function waitAndFinish(job) {
     seed: usedSeed,
     elapsed: ((Date.now() - job.startedAt) / 1000).toFixed(1),
     outputCount: images.length,
+    sourceSize: job.sourceSize ?? null,
+    sentSize: job.sentSize ?? null,
     // 出力に続けて入力画像も残す（削除時に一括で消える）
     images: [...images, { url: job.sourceUrl }],
   };
@@ -1152,7 +1246,10 @@ function renderResult(record) {
   shownResult = record;
   els.resultPanel.hidden = false;
   els.resultMeta.textContent = `${record.elapsed} 秒`
-    + (record.seed !== null && record.seed !== undefined ? ` ・ seed ${record.seed}` : '');
+    + (record.seed !== null && record.seed !== undefined ? ` ・ seed ${record.seed}` : '')
+    + (record.sentSize ? ` ・ 送信 ${record.sentSize.width}×${record.sentSize.height}` : '')
+    + (record.masked && record.sourceSize
+      ? ` ・ 合成 ${record.sourceSize.width}×${record.sourceSize.height}` : '');
   els.resultMaskHint.hidden = !record.masked;
   els.resultImages.innerHTML = '';
 
@@ -1405,16 +1502,19 @@ for (const el of [els.sizeSelect, els.numImages, els.steps, els.guidance,
   els.acceleration, els.outputFormat, els.seed, els.seedLock, els.negativePrompt]) {
   el.addEventListener('change', saveForm);
 }
-// 出力サイズと枚数は費用の目安に効く
-for (const el of [els.sizeSelect, els.numImages]) {
-  el.addEventListener('change', renderCostHint);
-}
+// 送信サイズと枚数は費用の目安に効く。送信サイズは何をどう送るかの説明も更新する
+els.numImages.addEventListener('change', renderCostHint);
+els.sizeSelect.addEventListener('change', () => {
+  renderCostHint();
+  renderSizeHint();
+});
 
 /* ---------- マスクの操作 ---------- */
 
 els.maskToggle.addEventListener('change', () => {
   syncMaskUi();
   syncRunBtn();
+  renderSizeHint(); // 引き伸ばしたときに元の比率へ戻るかどうかが変わる
   saveForm();
 });
 

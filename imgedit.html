@@ -90,6 +90,12 @@
       <span class="hint" id="providerHint"></span>
     </label>
 
+    <label class="field" title="Qwen が学習に使っている解像度に合わせて送ります。合成に使うのは元解像度のままの画像です">
+      <span class="label">送信サイズ</span>
+      <select id="sizeSelect"></select>
+      <span class="hint" id="sizeHint" hidden></span>
+    </label>
+
     <details class="field lora-accordion" open>
       <summary class="label">LoRA</summary>
       <div id="loraList" class="lora-list"></div>
@@ -104,21 +110,15 @@
     <details class="field lora-accordion">
       <summary class="label">詳細設定</summary>
 
-      <div class="row" data-only="fal">
-        <label class="field">
-          <span class="label">出力サイズ</span>
-          <select id="sizeSelect"></select>
-        </label>
-        <label class="field num-field">
-          <span class="label">枚数</span>
-          <select id="numImages">
-            <option value="1">1</option>
-            <option value="2">2</option>
-            <option value="3">3</option>
-            <option value="4">4</option>
-          </select>
-        </label>
-      </div>
+      <label class="field num-field" data-only="fal">
+        <span class="label">枚数</span>
+        <select id="numImages">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+        </select>
+      </label>
 
       <div class="row" data-only="fal">
         <label class="field num-field">

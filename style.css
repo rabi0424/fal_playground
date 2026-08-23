@@ -2302,6 +2302,9 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 }
 
 .ie-gallery-adjust { margin-top: 4px; width: 100%; }
+
+/* 送信サイズの説明。引き伸ばしが大きいときだけ色を変える */
+#sizeHint.warn { color: var(--danger); }
 .ie-source-meta .hint { margin: 0; }
 
 .ie-run {
