@@ -670,7 +670,7 @@ function rasterizeMask(w, h, strokes = mask.strokes, feather = mask.feather) {
 }
 
 // モデルへ渡すマスク画像。白 = 描き直す / 黒 = そのまま、という約束なので
-// 黒地に白で塗る（Runware の inputs.maskImage）。ぼかしはそのまま濃淡になる。
+// 黒地に白で塗る（Runware の maskImage）。ぼかしはそのまま濃淡になる。
 // PNG なのは、JPEG のブロックノイズで縁がにじむのを避けるため
 function maskDataUri(size, maskData = mask) {
   const canvas = makeCanvas(size.width, size.height);
@@ -1134,7 +1134,10 @@ const PROVIDERS = {
         // 同期で受け取ると生成のあいだ接続を掴んだままになる。他のプロバイダと
         // 同じく投入 → ポーリングにそろえる（タブを閉じても再開できる）
         deliveryMethod: 'async',
-        inputs: { seedImage: dataUri, ...(maskUri ? { maskImage: maskUri } : {}) },
+        // 画像はトップレベルに置く。Playground のスキーマには inputs でまとめる
+        // 形も載っているが、実際の API は「このモデルでは使えない」と弾く
+        seedImage: dataUri,
+        ...(maskUri ? { maskImage: maskUri } : {}),
       };
       if (els.seedLock.checked && els.seed.value !== '') task.seed = Number(els.seed.value);
       // 空欄はキーごと落としてモデル既定に任せる（0 も有効な値なので長さで見る）
@@ -1148,7 +1151,7 @@ const PROVIDERS = {
     },
 
     strip(input) {
-      return { ...input, inputs: undefined };
+      return { ...input, seedImage: undefined, maskImage: undefined };
     },
 
     async submit(input) {
