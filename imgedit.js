@@ -134,6 +134,7 @@ const els = {
   maskCanvas: $('#maskCanvas'),
   maskToggle: $('#maskToggle'),
   maskModeHint: $('#maskModeHint'),
+  alignToggle: $('#alignToggle'),
   maskTools: $('#maskTools'),
   maskUndoBtn: $('#maskUndoBtn'),
   maskAllBtn: $('#maskAllBtn'),
@@ -1289,6 +1290,165 @@ function maskAll() {
   commitMaskChange();
 }
 
+/* ---------- ずれの補正 ---------- */
+//
+// Qwen Image Edit は画像全体を作り直すので、返ってくる絵が数 px ずれることが
+// ある。そのままマスクで抜くと、差し替えた部分だけ位置がずれて見える。
+//
+// マスクの外側は「変わらないはず」の領域なので、そこの特徴が一番よく重なる
+// 平行移動を探して、重ねる前にずらす。明るさの違いに引きずられないよう、
+// 輝度そのものではなく勾配（＝輪郭の出方）で比べる
+
+const ALIGN_COARSE_PX = 192; // 粗く探すときの作業解像度（長辺）
+const ALIGN_FINE_PX = 512; // 詰めるときの作業解像度
+const ALIGN_RANGE_RATIO = 0.03; // 探す範囲（長辺に対する比）
+const ALIGN_MIN_SAMPLES = 512; // これ未満しか比べられないならあきらめる
+const ALIGN_MIN_SCORE = 0.3; // 相関がこれ以下なら、ずらさない
+
+// 画像を w×h に描き直して勾配（|dx| + |dy|）を返す
+function gradientField(img, w, h, crop = null) {
+  const c = makeCanvas(w, h);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingQuality = 'high';
+  if (crop) ctx.drawImage(img, crop.x, crop.y, crop.width, crop.height, 0, 0, w, h);
+  else ctx.drawImage(img, 0, 0, w, h);
+  const d = ctx.getImageData(0, 0, w, h).data;
+
+  const lum = new Float32Array(w * h);
+  for (let i = 0; i < lum.length; i++) {
+    lum[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+  }
+  const g = new Float32Array(w * h);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      g[i] = Math.abs(lum[i + 1] - lum[i - 1]) + Math.abs(lum[i + w] - lum[i - w]);
+    }
+  }
+  return g;
+}
+
+// 比べてよい画素（マスクの外側）。境目は編集の影響を受けるので広めに除く
+function alignWeights(maskData, w, h) {
+  const long = Math.max(w, h);
+  const shape = rasterizeMask(w, h, maskData.strokes, maskData.feather, long * 0.04);
+  const alpha = shape.getContext('2d', { willReadFrequently: true })
+    .getImageData(0, 0, w, h).data;
+  const weights = new Uint8Array(w * h);
+  let n = 0;
+  for (let i = 0; i < weights.length; i++) {
+    if (alpha[i * 4 + 3] <= 8) {
+      weights[i] = 1;
+      n++;
+    }
+  }
+  return { weights, count: n };
+}
+
+// b を (dx, dy) ずらしたときに a と一番よく重なる位置を探す。
+// 正規化相互相関なので、明るさやコントラストの違いには反応しない
+function bestShift(a, b, weights, w, h, range, from = { dx: 0, dy: 0 }) {
+  let best = { dx: from.dx, dy: from.dy, score: -Infinity };
+  const scores = new Map(); // 副画素まで詰めるのに、ピークの周りの値が要る
+  for (let dy = from.dy - range; dy <= from.dy + range; dy++) {
+    for (let dx = from.dx - range; dx <= from.dx + range; dx++) {
+      const y0 = Math.max(1, 1 - dy);
+      const y1 = Math.min(h - 1, h - 1 - dy);
+      const x0 = Math.max(1, 1 - dx);
+      const x1 = Math.min(w - 1, w - 1 - dx);
+      let n = 0; let sa = 0; let sb = 0; let saa = 0; let sbb = 0; let sab = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const i = y * w + x;
+          if (!weights[i]) continue;
+          const va = a[i];
+          const vb = b[i + dy * w + dx];
+          n++;
+          sa += va;
+          sb += vb;
+          saa += va * va;
+          sbb += vb * vb;
+          sab += va * vb;
+        }
+      }
+      if (n < ALIGN_MIN_SAMPLES) continue;
+      const ma = sa / n;
+      const mb = sb / n;
+      const cov = sab / n - ma * mb;
+      const varA = saa / n - ma * ma;
+      const varB = sbb / n - mb * mb;
+      const score = cov / Math.sqrt(Math.max(1e-6, varA * varB));
+      scores.set(`${dx},${dy}`, score);
+      if (score > best.score) best = { dx, dy, score };
+    }
+  }
+  return { ...best, scores };
+}
+
+// 相関のピークを放物線で近似して、画素の間まで読む。
+// ずれは 1px 未満のことも多いので、整数のままだと詰めきれない
+function subpixelPeak(best, scores) {
+  const at = (dx, dy) => scores.get(`${dx},${dy}`);
+  const axis = (minus, plus) => {
+    if (minus === undefined || plus === undefined) return 0;
+    const denom = minus - 2 * best.score + plus;
+    if (!(Math.abs(denom) > 1e-9)) return 0;
+    // 中心からの外れが半画素を超えるなら、そもそも当てはまりが悪い
+    const d = (0.5 * (minus - plus)) / denom;
+    return Math.abs(d) <= 0.5 ? d : 0;
+  };
+  return {
+    dx: best.dx + axis(at(best.dx - 1, best.dy), at(best.dx + 1, best.dy)),
+    dy: best.dy + axis(at(best.dx, best.dy - 1), at(best.dx, best.dy + 1)),
+  };
+}
+
+// 元画像に対する編集結果のずれ。合成時に引く量（元画像の解像度）を返す。
+// 判断できなければ null（ずらさない）
+function alignOffset(baseImg, editedImg, maskData, crop = null) {
+  const baseW = baseImg.naturalWidth || baseImg.width;
+  const baseH = baseImg.naturalHeight || baseImg.height;
+  const aspect = baseW / baseH;
+
+  const fit = (target) => (aspect >= 1
+    ? { w: target, h: Math.max(16, Math.round(target / aspect)) }
+    : { w: Math.max(16, Math.round(target * aspect)), h: target });
+
+  // 粗く探す
+  const c = fit(ALIGN_COARSE_PX);
+  const cw = alignWeights(maskData, c.w, c.h);
+  if (cw.count < ALIGN_MIN_SAMPLES) return null; // 比べられる場所がほとんど無い
+  const range = Math.max(2, Math.round(Math.max(c.w, c.h) * ALIGN_RANGE_RATIO));
+  const coarse = bestShift(
+    gradientField(baseImg, c.w, c.h),
+    gradientField(editedImg, c.w, c.h, crop),
+    cw.weights, c.w, c.h, range,
+  );
+  if (!Number.isFinite(coarse.score) || coarse.score < ALIGN_MIN_SCORE) return null;
+
+  // 作業解像度を上げて詰める
+  const f = fit(ALIGN_FINE_PX);
+  const scale = f.w / c.w;
+  const fw = alignWeights(maskData, f.w, f.h);
+  const start = { dx: Math.round(coarse.dx * scale), dy: Math.round(coarse.dy * scale) };
+  const fine = fw.count >= ALIGN_MIN_SAMPLES
+    ? bestShift(
+      gradientField(baseImg, f.w, f.h),
+      gradientField(editedImg, f.w, f.h, crop),
+      fw.weights, f.w, f.h, Math.ceil(scale) + 1, start,
+    )
+    : { ...start, score: coarse.score };
+
+  // 編集結果が (dx, dy) ずれているので、重ねるときは逆へ動かす。
+  // drawImage は小数の座標を受け取れるので、副画素のぶんも活かせる
+  const peak = fine.scores ? subpixelPeak(fine, fine.scores) : fine;
+  const k = baseW / f.w;
+  const round2 = (v) => Math.round(v * 100) / 100;
+  const offset = { dx: round2(-peak.dx * k), dy: round2(-peak.dy * k), score: fine.score };
+  // 4 分の 1 画素に満たないずれは、動かすほうが害になる
+  return Math.abs(offset.dx) < 0.25 && Math.abs(offset.dy) < 0.25 ? null : offset;
+}
+
 /* ---------- 合成 ---------- */
 
 // 出力画像をマスクの内側だけ元画像に重ねる。
@@ -1296,7 +1456,7 @@ function maskAll() {
 // 合成は「元画像の解像度・縦横比」で行い、出力をそこへ引き伸ばす。モデルへは
 // Qwen の解像度に合わせて縮めた（必要なら比を変えた）画像を送っているので、
 // ここで戻すことで、マスクの外側は元の画素のまま・内側だけが差し替わる
-function compositeWithMask(baseImg, editedImg, maskData, crop = null) {
+function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = null) {
   const w = baseImg.naturalWidth || baseImg.width;
   const h = baseImg.naturalHeight || baseImg.height;
   const out = makeCanvas(w, h);
@@ -1310,12 +1470,18 @@ function compositeWithMask(baseImg, editedImg, maskData, crop = null) {
   // 縁の余白を付けて送った場合は、元画像が入っていた範囲だけを取り出す。
   // 半画素ぶん内側から取るのは、拡大の補間が余白側の画素を拾わないようにするため
   // （そのままだと切り出した縁に余白の色が 1px にじむ）
-  if (crop) {
-    const i = 0.5;
-    lctx.drawImage(editedImg, crop.x + i, crop.y + i, crop.width - i * 2, crop.height - i * 2, 0, 0, w, h);
-  } else {
-    lctx.drawImage(editedImg, 0, 0, w, h);
-  }
+  const put = (dx, dy) => {
+    if (crop) {
+      const i = 0.5;
+      lctx.drawImage(editedImg,
+        crop.x + i, crop.y + i, crop.width - i * 2, crop.height - i * 2, dx, dy, w, h);
+    } else {
+      lctx.drawImage(editedImg, dx, dy, w, h);
+    }
+  };
+  // ずらすと端が空くので、先に素のまま敷いてから重ねる
+  put(0, 0);
+  if (offset && (offset.dx || offset.dy)) put(offset.dx, offset.dy);
   lctx.globalCompositeOperation = 'destination-in';
   lctx.drawImage(rasterizeMask(w, h, maskData.strokes, maskData.feather), 0, 0);
 
@@ -1325,16 +1491,20 @@ function compositeWithMask(baseImg, editedImg, maskData, crop = null) {
 
 // URL から合成した data URI を作る。画像は同一オリジン（R2）である必要がある
 // （別ドメインのままだと canvas が汚染されて取り出せない）
-async function compositeFromUrls(baseUrl, editedUrl, maskData, crop = null, mime = 'image/png') {
+// offset に 'auto' を渡すと、その場でずれを測る。測った結果も返すので、
+// 塗り直しのたびに測り直さずに済む
+async function compositeFromUrls(baseUrl, editedUrl, maskData, crop = null, offset = null, mime = 'image/png') {
   const [baseImg, editedImg] = await Promise.all([
     loadImageForCanvas(baseUrl), loadImageForCanvas(editedUrl),
   ]);
-  const canvas = compositeWithMask(baseImg, editedImg, maskData, crop);
+  const shift = offset === 'auto' ? alignOffset(baseImg, editedImg, maskData, crop) : offset;
+  const canvas = compositeWithMask(baseImg, editedImg, maskData, crop, shift);
   try {
     return {
       dataUri: canvas.toDataURL(mime, 0.95),
       width: canvas.width,
       height: canvas.height,
+      offset: shift,
     };
   } catch (err) {
     // ここに来るのは canvas が汚染されたときだけ。どちらの画像が原因か分かる
@@ -1485,6 +1655,8 @@ const PROVIDERS = {
     note: '解像度・ステップ・ガイダンスまで指定できます。課金はメガピクセル単価（$0.035/MP）。',
     supports: { size: true, count: true, steps: true, guidance: true, acceleration: true, negative: true },
     sizeKind: 'qwen',
+    // 画像全体を作り直すモデルなので、返ってくる絵が数 px ずれることがある
+    alignOutput: true,
     pollMs: 1200,
 
     buildInput(dataUri, size) {
@@ -1558,6 +1730,7 @@ const PROVIDERS = {
     note: '指定できるのは指示文・LoRA・seed・形式だけです（ステップ等は API に無く、出力は 1 枚）。出力サイズの指定も無いので、送信サイズがそのまま効きます。課金は 1 枚 $0.025 の固定制。LoRA は公開アクセスできる URL である必要があります。',
     supports: {},
     sizeKind: 'qwen',
+    alignOutput: true,
     pollMs: 2000,
     endpoint: 'https://api.wavespeed.ai/api/v3/wavespeed-ai/qwen-image/edit-2511-lora',
 
@@ -1941,6 +2114,8 @@ async function run() {
     mask: useMask ? structuredClone(mask) : null,
     // マスクを API にも渡したか（後から塗り直しても描き直しはやり直せない）
     maskNative: !!maskUri,
+    // 出力がずれて返るモデルでは、重ねる前に位置を合わせる
+    alignEnabled: useMask && !!api.alignOutput && els.alignToggle.checked,
   };
 
   try {
@@ -1987,6 +2162,7 @@ async function waitAndFinish(job) {
     ...(cost ? { cost } : {}),
     ...(job.maskNative ? { maskNative: true } : {}),
     ...(job.crop ? { crop: job.crop } : {}),
+    ...(job.alignEnabled ? { alignEnabled: true } : {}),
     sourceSize: job.sourceSize ?? null,
     sentSize: job.sentSize ?? null,
     // 出力に続けて入力画像も残す（削除時に一括で消える）
@@ -2032,8 +2208,15 @@ async function buildMaskedRecord(record, maskData) {
   const inputUrl = tail.at(-1).url;
   const raws = tail.slice(0, n);
   const composites = [];
+  // ずれは 1 枚につき 1 度だけ測り、記録に残す（塗り直しでは測り直さない）
+  const offsets = [...(record.align ?? [])];
   for (const [i, raw] of raws.entries()) {
-    const { dataUri, width, height } = await compositeFromUrls(inputUrl, raw.url, maskData, record.crop ?? null);
+    const want = offsets[i] === undefined && record.alignEnabled ? 'auto' : (offsets[i] ?? null);
+    if (want === 'auto') setStatus('ずれを測っています…');
+    const { dataUri, width, height, offset } = await compositeFromUrls(
+      inputUrl, raw.url, maskData, record.crop ?? null, want,
+    );
+    offsets[i] = offset ?? null;
     const url = await uploadDataUri(
       dataUri,
       { app: 'fal playground', source: 'imgedit-masked', model: record.model, prompt: record.prompt },
@@ -2041,7 +2224,13 @@ async function buildMaskedRecord(record, maskData) {
     );
     composites.push({ url, width, height });
   }
-  return { ...record, masked: true, mask: maskData, images: [...composites, ...tail] };
+  return {
+    ...record,
+    masked: true,
+    mask: maskData,
+    ...(record.alignEnabled ? { align: offsets } : {}),
+    images: [...composites, ...tail],
+  };
 }
 
 // images の並びから各画像の役割を決める。
@@ -2061,6 +2250,16 @@ const ROLE_LABELS = {
   input: () => '入力画像',
 };
 
+// 位置合わせの結果。ずれていなかったことも分かるようにしておく
+function alignMetaText(record) {
+  if (!record.alignEnabled) return '';
+  const found = (record.align ?? []).filter(Boolean);
+  if (found.length === 0) return ' ・ ずれ無し';
+  const shown = found[0];
+  return ` ・ ずれ補正 ${shown.dx > 0 ? '+' : ''}${shown.dx}, ${shown.dy > 0 ? '+' : ''}${shown.dy} px`
+    + (found.length > 1 ? ' ほか' : '');
+}
+
 function renderResult(record) {
   shownResult = record;
   els.resultPanel.hidden = false;
@@ -2069,7 +2268,8 @@ function renderResult(record) {
     + (record.sentSize ? ` ・ 送信 ${record.sentSize.width}×${record.sentSize.height}` : '')
     + (record.masked && record.sourceSize
       ? ` ・ 合成 ${record.sourceSize.width}×${record.sourceSize.height}` : '')
-    + (record.cost ? ` ・ $${Number(record.cost).toFixed(4)}` : '');
+    + (record.cost ? ` ・ $${Number(record.cost).toFixed(4)}` : '')
+    + alignMetaText(record);
   els.resultMaskHint.hidden = !record.masked;
   // マスクをモデルにも渡した場合、塗り直しで変わるのは重ね合わせだけ
   els.resultMaskHint.textContent = record.maskNative
@@ -2147,7 +2347,9 @@ async function refreshResultComposite() {
     for (let i = 0; i < n; i++) {
       const raw = record.images[n + i];
       if (!raw) continue;
-      const { dataUri } = await compositeFromUrls(inputUrl, raw.url, current, record.crop ?? null);
+      const { dataUri } = await compositeFromUrls(
+        inputUrl, raw.url, current, record.crop ?? null, record.align?.[i] ?? null,
+      );
       if (run !== compositeRun || shownResult !== record) return; // 続けて塗られた
       const el = els.resultImages.querySelector(`[data-result-index="${i}"] img`);
       if (el) el.src = dataUri;
@@ -2217,6 +2419,7 @@ function saveForm() {
     rwStrength: els.rwStrength.value,
     rwMaskGrow: els.rwMaskGrow.value,
     rwPadEdges: els.rwPadEdges.value,
+    align: els.alignToggle.checked,
     rwMaskMargin: els.rwMaskMargin.value,
     rwScheduler: els.rwScheduler.value,
     rwOutputQuality: els.rwOutputQuality.value,
@@ -2279,6 +2482,7 @@ async function restoreForm() {
   for (const l of s.loras || []) addLoraRow(l.path, l.scale);
   for (const l of s.rwLoras || []) addRwLoraRow(l.air, l.weight);
   els.maskToggle.checked = !!s.maskOn;
+  els.alignToggle.checked = s.align !== false;
   if (s.maskSize) els.maskSize.value = s.maskSize;
   if (s.maskFeather) els.maskFeather.value = s.maskFeather;
   if (Array.isArray(s.mask?.strokes)) mask = s.mask;
@@ -2420,6 +2624,7 @@ for (const btn of els.maskTools.querySelectorAll('.seg-btn')) {
   });
 }
 
+els.alignToggle.addEventListener('change', saveForm);
 els.maskUndoBtn.addEventListener('click', maskUndo);
 els.maskClearBtn.addEventListener('click', maskClear);
 els.maskAllBtn.addEventListener('click', maskAll);

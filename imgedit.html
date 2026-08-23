@@ -51,6 +51,10 @@
         </label>
         <p class="hint" id="maskModeHint"></p>
 
+        <label class="mask-toggle" data-only="fal wavespeed" title="このモデルは画像全体を作り直すので、返ってくる絵が数 px ずれることがあります。マスクの外側（変わらないはずの部分）を手がかりに、重ねる前に位置を合わせます">
+          <input type="checkbox" id="alignToggle" checked> ずれを補正してから重ねる
+        </label>
+
         <div id="maskTools" class="ie-mask-tools" hidden>
           <div class="ie-mask-row">
             <div class="seg" role="group" aria-label="ツール">
