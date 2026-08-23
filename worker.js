@@ -453,8 +453,10 @@ function recordImageLists(record) {
 }
 
 // このアプリが配信している画像 URL から id を取り出す（/api/krea2/image/ は旧 URL 互換）
+// 末尾の ?v=... は差し替え時のキャッシュ避け（/api/upload の replace）。
+// 同じキーを指すので、削除対象の判定では無視する
 function localImageId(u) {
-  const m = typeof u === 'string' ? u.match(/^\/api(?:\/krea2)?\/image\/([0-9a-f]{32})$/) : null;
+  const m = typeof u === 'string' ? u.match(/^\/api(?:\/krea2)?\/image\/([0-9a-f]{32})(?:\?.*)?$/) : null;
   return m ? m[1] : null;
 }
 
@@ -1998,6 +2000,45 @@ export default {
       return Response.json({ ok: true });
     }
 
+    // 別サイトにある画像を R2 へ取り込んで、同一オリジンの URL にして返す。
+    //
+    // 履歴の保存時にも同じことをしているが、取り込めるホストを絞っているため、
+    // プロバイダが別ドメインの CDN で返すと外部 URL のまま残る。それだと
+    // (1) canvas で画素を扱えず（マスク合成が "The operation is insecure" で失敗）、
+    // (2) CDN の URL が失効したあとに開き直せない。
+    // 踏み台にされないよう、取り込めるのはこの履歴に実際に載っている URL だけ
+    if (url.pathname === '/api/capture') {
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+      if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return new Response('Invalid JSON', { status: 400 });
+      }
+      const target = typeof body?.url === 'string' ? body.url : '';
+      let src;
+      try {
+        src = new URL(target);
+      } catch {
+        return new Response('Invalid url', { status: 422 });
+      }
+      if (src.protocol !== 'https:') return new Response('https only', { status: 403 });
+      const known = (await stub.listHistory()).some((record) => recordImageLists(record)
+        .some(({ images }) => images.some((img) => img?.url === target)));
+      if (!known) return new Response('Unknown image', { status: 403 });
+
+      const res = await fetch(src, { signal: apiSignal() });
+      if (!res.ok) return new Response('Upstream error', { status: 502 });
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength > UPLOAD_MAX_BYTES) return new Response('Image too large', { status: 413 });
+      const id = randomId();
+      await env.IMAGES.put(`${id}.png`, buf, {
+        httpMetadata: { contentType: res.headers.get('Content-Type') || 'image/png' },
+      });
+      return Response.json({ url: `/api/image/${id}` });
+    }
+
     // クライアント側で生成した画像（部分編集の切り抜き・合成結果など）の保存先。
     // base64 の JSON で受け取り R2 に置いて /api/image/<id> の URL を返す（README の案 A）。
     // meta があれば PNG に生成設定として焼き込む（fal 経由の履歴取り込みと同じ扱い）
@@ -2019,11 +2060,15 @@ export default {
       if (body.meta && typeof body.meta === 'object') {
         buf = embedPngMetadata(buf, JSON.stringify(body.meta));
       }
-      const id = randomId();
+      // replace 指定があれば同じキーへ上書きする。画像編集のマスクを後から
+      // 変えたときに、合成画像が 1 回ごとに増えて置き去りになるのを防ぐ。
+      // 配信は immutable キャッシュなので、URL に版を付けて返す
+      const replaceId = localImageId(body?.replace);
+      const id = replaceId ?? randomId();
       await env.IMAGES.put(`${id}.png`, buf, {
         httpMetadata: { contentType: decoded.mime },
       });
-      return Response.json({ url: `/api/image/${id}` });
+      return Response.json({ url: replaceId ? `/api/image/${id}?v=${Date.now()}` : `/api/image/${id}` });
     }
 
     // Poe（OpenAI 互換 API）での部分AI編集ジョブの投入。API キー（Secret の
