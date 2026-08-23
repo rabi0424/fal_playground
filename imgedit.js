@@ -295,13 +295,43 @@ function collectLoras() {
 // { dataUri, url, width, height, from } を持つ。url は R2 に置いた履歴用の URL
 let source = null;
 
-function loadImageEl(src) {
+function loadImageEl(src, crossOrigin = null) {
   return new Promise((resolve, reject) => {
     const img = new Image();
+    if (crossOrigin) img.crossOrigin = crossOrigin;
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error('画像を読み込めませんでした'));
     img.src = src;
   });
+}
+
+function isSameOrigin(src) {
+  try {
+    return new URL(src, location.href).origin === location.origin;
+  } catch {
+    return true; // data URI など
+  }
+}
+
+// canvas で中身を読む画像の読み込み。別オリジンのままだと canvas が汚染されて
+// 合成結果を取り出せない（"The operation is insecure"）。CDN が CORS を
+// 許可していれば読める（許可していなければ onerror になる）
+function loadImageForCanvas(src) {
+  return isSameOrigin(src) ? loadImageEl(src) : loadImageEl(src, 'anonymous');
+}
+
+// 別サイトにある画像を R2 へ取り込んで、同一オリジンの URL にして返す。
+// プロバイダによっては履歴保存時の取り込み対象から外れて外部 URL のまま残り、
+// そのままでは合成できないうえ、CDN の URL が失効すると開き直せなくなる
+async function captureImage(url) {
+  if (isSameOrigin(url)) return url;
+  const res = await fetch('/api/capture', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+  if (!res.ok || isHtmlResponse(res)) return url; // 取り込めなければ元の URL のまま試す
+  return (await res.json()).url;
 }
 
 // 長辺を MAX_INPUT_PX まで縮めて JPEG の data URI にする。
@@ -641,13 +671,26 @@ function compositeWithMask(baseImg, editedImg, maskData) {
 // URL から合成した data URI を作る。画像は同一オリジン（R2）である必要がある
 // （別ドメインのままだと canvas が汚染されて取り出せない）
 async function compositeFromUrls(baseUrl, editedUrl, maskData, mime = 'image/png') {
-  const [baseImg, editedImg] = await Promise.all([loadImageEl(baseUrl), loadImageEl(editedUrl)]);
+  const [baseImg, editedImg] = await Promise.all([
+    loadImageForCanvas(baseUrl), loadImageForCanvas(editedUrl),
+  ]);
   const canvas = compositeWithMask(baseImg, editedImg, maskData);
-  return {
-    dataUri: canvas.toDataURL(mime, 0.95),
-    width: canvas.width,
-    height: canvas.height,
-  };
+  try {
+    return {
+      dataUri: canvas.toDataURL(mime, 0.95),
+      width: canvas.width,
+      height: canvas.height,
+    };
+  } catch (err) {
+    // ここに来るのは canvas が汚染されたときだけ。どちらの画像が原因か分かる
+    // ようにしておく（黙って「操作は安全ではありません」だけ出さない）
+    if (err.name !== 'SecurityError') throw err;
+    const outside = [baseUrl, editedUrl].filter((u) => !isSameOrigin(u))
+      .map((u) => new URL(u, location.href).hostname);
+    throw new Error(outside.length
+      ? `画像が別のサイト（${[...new Set(outside)].join(', ')}）にあるため取り出せませんでした`
+      : '画像を取り出せませんでした');
+  }
 }
 
 // 費用の目安。課金の考え方がプロバイダごとに違う（fal は解像度、WaveSpeed は枚数）
@@ -1063,10 +1106,17 @@ async function waitAndFinish(job) {
 // images は [合成 …, 生成結果そのまま …, 入力画像] の順になる
 async function buildMaskedRecord(record, maskData) {
   const n = record.outputCount ?? record.images.length - 1;
-  const inputUrl = record.images.at(-1).url;
   // 既に合成済みなら先頭 n 枚が前回の合成、その後ろが生成結果そのまま
   const previous = record.masked ? record.images.slice(0, n) : []; // 差し替え先
   const tail = record.masked ? record.images.slice(n) : record.images; // [生成結果 …, 入力]
+
+  // 合成には画素が要るので、外部 CDN のままの画像はここで R2 へ取り込む。
+  // 取り込んだ URL はレコードにも残す（CDN の失効後も塗り直せるように）
+  for (const img of tail) {
+    if (!isSameOrigin(img.url)) img.url = await captureImage(img.url);
+  }
+
+  const inputUrl = tail.at(-1).url;
   const raws = tail.slice(0, n);
   const composites = [];
   for (const [i, raw] of raws.entries()) {

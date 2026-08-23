@@ -2000,6 +2000,45 @@ export default {
       return Response.json({ ok: true });
     }
 
+    // 別サイトにある画像を R2 へ取り込んで、同一オリジンの URL にして返す。
+    //
+    // 履歴の保存時にも同じことをしているが、取り込めるホストを絞っているため、
+    // プロバイダが別ドメインの CDN で返すと外部 URL のまま残る。それだと
+    // (1) canvas で画素を扱えず（マスク合成が "The operation is insecure" で失敗）、
+    // (2) CDN の URL が失効したあとに開き直せない。
+    // 踏み台にされないよう、取り込めるのはこの履歴に実際に載っている URL だけ
+    if (url.pathname === '/api/capture') {
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+      if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return new Response('Invalid JSON', { status: 400 });
+      }
+      const target = typeof body?.url === 'string' ? body.url : '';
+      let src;
+      try {
+        src = new URL(target);
+      } catch {
+        return new Response('Invalid url', { status: 422 });
+      }
+      if (src.protocol !== 'https:') return new Response('https only', { status: 403 });
+      const known = (await stub.listHistory()).some((record) => recordImageLists(record)
+        .some(({ images }) => images.some((img) => img?.url === target)));
+      if (!known) return new Response('Unknown image', { status: 403 });
+
+      const res = await fetch(src, { signal: apiSignal() });
+      if (!res.ok) return new Response('Upstream error', { status: 502 });
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength > UPLOAD_MAX_BYTES) return new Response('Image too large', { status: 413 });
+      const id = randomId();
+      await env.IMAGES.put(`${id}.png`, buf, {
+        httpMetadata: { contentType: res.headers.get('Content-Type') || 'image/png' },
+      });
+      return Response.json({ url: `/api/image/${id}` });
+    }
+
     // クライアント側で生成した画像（部分編集の切り抜き・合成結果など）の保存先。
     // base64 の JSON で受け取り R2 に置いて /api/image/<id> の URL を返す（README の案 A）。
     // meta があれば PNG に生成設定として焼き込む（fal 経由の履歴取り込みと同じ扱い）

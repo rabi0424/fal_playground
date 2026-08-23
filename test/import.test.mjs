@@ -445,6 +445,44 @@ async function testUploadReplace() {
   console.log('✓ upload: replace で同じ画像を上書きし、版付き URL を返す');
 }
 
+// 外部 CDN の画像の取り込み。履歴に載っている URL だけを通す（踏み台防止）
+async function testCaptureEndpoint() {
+  const mod = await loadWorker();
+  const counters = { sub: 0 };
+  const bucket = makeBucket(counters);
+  const history = [{
+    id: 'r1',
+    images: [{ url: 'https://cdn.example.com/a.png' }, { url: '/api/image/' + 'a'.repeat(32) }],
+  }];
+  const fetched = [];
+  globalThis.fetch = async (u) => {
+    fetched.push(String(u));
+    return new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'image/png' } });
+  };
+  const env = {
+    IMAGES: bucket,
+    STATE: { idFromName: (n) => n, get: () => ({ listHistory: async () => history }) },
+  };
+  const call = (body) => mod.default.fetch(new Request('https://app.example/api/capture', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }), env);
+
+  const ok = await call({ url: 'https://cdn.example.com/a.png' });
+  assert.equal(ok.status, 200);
+  assert.match((await ok.json()).url, /^\/api\/image\/[0-9a-f]{32}$/);
+  assert.equal(bucket.objects.size, 1, 'R2 に取り込まれていない');
+  assert.equal(fetched.length, 1);
+
+  // 履歴に無い URL は取り込まない（任意の URL を取りに行かせない）
+  assert.equal((await call({ url: 'https://cdn.example.com/other.png' })).status, 403);
+  assert.equal((await call({ url: 'http://cdn.example.com/a.png' })).status, 403);
+  assert.equal((await call({ url: 'not a url' })).status, 422);
+  assert.equal(fetched.length, 1, '拒否したはずの URL を取りに行っている');
+  console.log('✓ capture: 履歴にある外部画像だけを R2 へ取り込む');
+}
+
 await testCheckpoint();
 await testLoraSingleRun();
 await testRetryDuringUpload();
@@ -459,5 +497,6 @@ await testStuckPastAlarm();
 await testLoraMetaEndpoint();
 await testWavespeedProxy();
 await testUploadReplace();
+await testCaptureEndpoint();
 rmSync(OUT, { force: true });
 console.log('\nすべて成功');
