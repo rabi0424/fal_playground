@@ -24,6 +24,9 @@
 /* ---------- constants ---------- */
 
 const MAX_LORAS = 3; // 既定。プロバイダ側で maxLoras を持てば上書きする
+// LoRA を名前で指定するプロバイダ（Modal）向けの「名前を直接入力…」の選択肢。
+// ライブラリのベースモデル表記に頼らずに指定できる逃げ道
+const LORA_NAME_OPTION = '__name__';
 const MAX_INPUT_PX = 2048; // リサイズしない設定のときの上限（長辺）
 const INPUT_QUALITY = 0.92; // 送信用 JPEG の品質
 // 合成の土台に使う元画像の上限。元解像度を保つのが目的なので大きめだが、
@@ -272,7 +275,9 @@ function sortedLoraLibrary() {
 
 function addLoraRow(path = '', scale) {
   const library = sortedLoraLibrary();
-  if (library.length === 0) return;
+  // 名前で指定できるプロバイダなら、ライブラリが空でも行は作れる
+  const byName = !!provider().loraByName;
+  if (library.length === 0 && !byName) return;
   if (els.loraList.querySelectorAll('.lora-row').length >= maxLoras()) return;
 
   const row = document.createElement('div');
@@ -290,7 +295,18 @@ function addLoraRow(path = '', scale) {
     opt.title = item.path;
     select.appendChild(opt);
   }
-  select.value = path && library.some((l) => l.path === path) ? path : library[0].path;
+  if (byName) {
+    const opt = document.createElement('option');
+    opt.value = LORA_NAME_OPTION;
+    opt.textContent = '名前を直接入力…';
+    select.appendChild(opt);
+  }
+  const known = !!path && library.some((l) => l.path === path);
+  // 新しい行は候補の先頭から。ライブラリに無い path（＝名前で打ったものの復元）と、
+  // 候補が空のときだけ「名前を直接入力…」にする
+  select.value = known ? path
+    : (path || library.length === 0) && byName ? LORA_NAME_OPTION
+      : library[0].path;
   head.appendChild(select);
 
   const delBtn = document.createElement('button');
@@ -304,6 +320,19 @@ function addLoraRow(path = '', scale) {
   });
   head.appendChild(delBtn);
   row.appendChild(head);
+
+  // ライブラリに無いものは名前で直接指定する（Modal Volume 内のファイル名。
+  // 無ければ Modal が初回リクエスト時に取り込む）
+  const nameInput = document.createElement('input');
+  nameInput.className = 'lora-path';
+  nameInput.type = 'text';
+  nameInput.placeholder = 'LoRA のファイル名（.safetensors は省略可）';
+  nameInput.spellcheck = false;
+  nameInput.autocomplete = 'off';
+  nameInput.value = known || !byName ? '' : path;
+  nameInput.hidden = select.value !== LORA_NAME_OPTION;
+  nameInput.addEventListener('input', saveForm);
+  row.appendChild(nameInput);
 
   const trigger = document.createElement('div');
   trigger.className = 'lora-trigger';
@@ -324,7 +353,8 @@ function addLoraRow(path = '', scale) {
   num.min = '0';
   num.max = '2';
   num.step = '0.05';
-  const initialScale = scale ?? loraDefaultScale(select.value);
+  // 名前で指定した行はライブラリを引けないので、既定 scale は 1
+  const initialScale = scale ?? (select.value === LORA_NAME_OPTION ? 1 : loraDefaultScale(select.value));
   slider.value = String(initialScale);
   num.value = String(initialScale);
   slider.addEventListener('input', () => { num.value = slider.value; row.dataset.scaleTouched = '1'; saveForm(); });
@@ -334,7 +364,9 @@ function addLoraRow(path = '', scale) {
 
   // 選択を変えたら、手で動かす前ならライブラリの既定 scale に合わせる
   select.addEventListener('change', () => {
-    if (!row.dataset.scaleTouched) {
+    nameInput.hidden = select.value !== LORA_NAME_OPTION;
+    if (select.value === LORA_NAME_OPTION) nameInput.focus();
+    if (!row.dataset.scaleTouched && select.value !== LORA_NAME_OPTION) {
       const def = loraDefaultScale(select.value);
       slider.value = String(def);
       num.value = String(def);
@@ -387,7 +419,8 @@ function syncAddLoraBtn() {
   const usable = sortedLoraLibrary().length;
   const max = maxLoras();
   const base = loraLib.baseLabel(loraBase());
-  els.addLoraBtn.disabled = count >= max || usable === 0;
+  // 名前で指定できるプロバイダなら、候補が無くても行は足せる
+  els.addLoraBtn.disabled = count >= max || (usable === 0 && !provider().loraByName);
   els.addLoraBtn.title = count >= max ? `LoRA はこのモデルでは最大 ${max} 個までです` : '';
 
   // 使える LoRA が無い / 別のベースモデル向けを隠したことを伝える
@@ -403,17 +436,24 @@ function syncAddLoraBtn() {
 function pruneLoraRows() {
   const usable = new Set(sortedLoraLibrary().map((item) => item.path));
   for (const row of els.loraList.querySelectorAll('.lora-row')) {
-    if (!usable.has(row.querySelector('.lora-select').value)) row.remove();
+    const value = row.querySelector('.lora-select').value;
+    // 名前で直接指定した行はライブラリに紐づかないので、名前で指定できる
+    // プロバイダのあいだは残す。URL 指定のプロバイダへ移ったら送れないので外す
+    if (value === LORA_NAME_OPTION ? provider().loraByName : usable.has(value)) continue;
+    row.remove();
   }
   syncAddLoraBtn();
 }
 
 function collectLoras() {
   return [...els.loraList.querySelectorAll('.lora-row')]
-    .map((row) => ({
-      path: row.querySelector('.lora-select').value,
-      scale: Number(row.querySelector('input[type="number"]').value) || 0,
-    }))
+    .map((row) => {
+      const select = row.querySelector('.lora-select');
+      // 「名前を直接入力…」の行は、選択値ではなく打った名前が識別子になる
+      const path = select.value === LORA_NAME_OPTION
+        ? row.querySelector('.lora-path').value.trim() : select.value;
+      return { path, scale: Number(row.querySelector('input[type="number"]').value) || 0 };
+    })
     // scale 0 は効果ゼロなのに LoRA 枠を消費するので送らない
     .filter((l) => l.path && l.scale > 0);
 }
@@ -1955,6 +1995,9 @@ const PROVIDERS = {
     supports: { size: true, steps: true, guidance: true, negative: true },
     sizeKind: 'wan',
     loraBase: 'wan',
+    // この API の LoRA は URL ではなく名前で指定するので、ライブラリに無いものも
+    // 名前だけで足せる（ベースモデルの表記に左右されない）
+    loraByName: true,
     // 蒸留 LoRA 2 本と合わせて、API のサニティ上限（10 本）に収まる数
     maxLoras: 8,
     fixedLoraNote: '標準の蒸留 2 本に追加',
