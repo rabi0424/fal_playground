@@ -31,7 +31,6 @@ const SIZES = [
   { value: 'portrait_9_16', label: '縦長 9:16（768×1344）', width: 768, height: 1344 },
 ];
 
-const LS_THEME = 'fal_theme';
 const LS_LORAS = 'fal_lora_library';
 const LS_CKPTS = 'fal_ckpt_library'; // 本体のチェックポイントライブラリ（同期のためここでも扱う）
 const LS_ARENA = 'fal_arena';
@@ -58,7 +57,6 @@ const STABILITY_MIN_WINDOW = 10;
 const $ = (sel) => document.querySelector(sel);
 
 const els = {
-  themeBtn: $('#themeBtn'),
   sessionListView: $('#sessionListView'),
   sessionList: $('#sessionList'),
   newSessionBtn: $('#newSessionBtn'),
@@ -135,25 +133,6 @@ async function falFetch(url, options = {}) {
     throw new Error(detail);
   }
   return res.json();
-}
-
-/* ---------- theme（app.js と同じ） ---------- */
-
-const THEME_LABELS = { auto: '自動', light: 'ライト', dark: 'ダーク' };
-const THEME_ORDER = ['auto', 'light', 'dark'];
-
-function initTheme() {
-  const apply = (theme) => {
-    document.documentElement.dataset.theme = theme;
-    els.themeBtn.textContent = THEME_LABELS[theme];
-  };
-  apply(localStorage.getItem(LS_THEME) || 'auto');
-  els.themeBtn.addEventListener('click', () => {
-    const current = document.documentElement.dataset.theme;
-    const next = THEME_ORDER[(THEME_ORDER.indexOf(current) + 1) % THEME_ORDER.length];
-    localStorage.setItem(LS_THEME, next);
-    apply(next);
-  });
 }
 
 /* ---------- LoRA ライブラリ（共有モジュール経由・読み取りのみ） ---------- */
@@ -1224,7 +1203,6 @@ function deleteCurrentSession() {
 loraLib.onChange = () => syncMarkDirty('loras');
 loraLib.migrate();
 
-initTheme();
 initSessionDialog();
 
 for (const s of SIZES) {

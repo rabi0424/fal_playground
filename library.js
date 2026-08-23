@@ -15,7 +15,6 @@
 
 /* ---------- constants ---------- */
 
-const LS_THEME = 'fal_theme';
 const LS_LORAS = 'fal_lora_library';
 const LS_CKPTS = 'fal_ckpt_library'; // 同期のためここでも扱う（値は触らない）
 const LS_ARENA = 'fal_arena';
@@ -29,7 +28,6 @@ const HF_DEFAULT_REPO = 'tottie2215/temp_str'; // 取り込み先の既定（app
 const $ = (sel) => document.querySelector(sel);
 
 const els = {
-  themeBtn: $('#themeBtn'),
   searchInput: $('#searchInput'),
   filterChips: $('#filterChips'),
   sortSelect: $('#sortSelect'),
@@ -59,25 +57,6 @@ function setError(text) {
 
 function isHtmlResponse(res) {
   return (res.headers.get('Content-Type') || '').includes('text/html');
-}
-
-/* ---------- theme（app.js と同じ） ---------- */
-
-const THEME_LABELS = { auto: '自動', light: 'ライト', dark: 'ダーク' };
-const THEME_ORDER = ['auto', 'light', 'dark'];
-
-function initTheme() {
-  const apply = (theme) => {
-    document.documentElement.dataset.theme = theme;
-    els.themeBtn.textContent = THEME_LABELS[theme];
-  };
-  apply(localStorage.getItem(LS_THEME) || 'auto');
-  els.themeBtn.addEventListener('click', () => {
-    const current = document.documentElement.dataset.theme;
-    const next = THEME_ORDER[(THEME_ORDER.indexOf(current) + 1) % THEME_ORDER.length];
-    localStorage.setItem(LS_THEME, next);
-    apply(next);
-  });
 }
 
 /* ---------- ライブラリ ---------- */
@@ -677,13 +656,6 @@ async function syncPush() {
 
 /* ---------- init ---------- */
 
-// 検索バーは topbar の直下に貼り付ける。topbar の高さは安全領域（Dynamic Island）で
-// 変わるので、実測値を CSS 変数に入れる
-function syncToolbarOffset() {
-  const bar = document.querySelector('.topbar');
-  if (bar) document.documentElement.style.setProperty('--lib-top', `${bar.offsetHeight}px`);
-}
-
 loraLib.onChange = () => syncMarkDirty('loras');
 loraLib.migrate();
 library = loadLibrary(); // 移行後の内容で描画する
@@ -699,9 +671,6 @@ civitaiImport.init({
   },
 });
 
-initTheme();
-syncToolbarOffset();
-window.addEventListener('resize', syncToolbarOffset);
 
 els.searchInput.addEventListener('input', render);
 els.sortSelect.addEventListener('change', render);

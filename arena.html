@@ -5,16 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>LoRA 比較アリーナ - fal playground</title>
 <link rel="stylesheet" href="style.css">
+<script>
+/* 保存済みのテーマとサイドバーの開閉は、描画前に反映する。
+   後から JS で当てると、明→暗の切り替わりや幅の跳ねが一瞬見えてしまう */
+(function () {
+  try {
+    var d = document.documentElement, s = localStorage;
+    d.dataset.theme = s.getItem('fal_theme') || 'auto';
+    d.dataset.sidebar = s.getItem('fal_sidebar') || 'open';
+  } catch (e) { /* ストレージが使えない環境では既定のまま */ }
+})();
+</script>
 </head>
 <body>
 
-<header class="topbar">
-  <div class="brand"><a href="./">fal <span>playground</span></a><span class="arena-tag">/ 比較アリーナ</span></div>
-  <div class="topbar-actions">
-    <a href="./" class="ghost-btn">← 生成画面へ</a>
-    <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
-  </div>
-</header>
+<div class="shell">
+
+<!-- サイドバーの中身は shell.js が描画する（全ページ共通） -->
+<aside id="appSidebar" class="sidebar" aria-label="ナビゲーション"></aside>
+
+<div class="shell-body">
 
 <main class="arena-main">
 
@@ -124,6 +134,9 @@
   </section>
 </main>
 
+</div><!-- /.shell-body -->
+</div><!-- /.shell -->
+
 <!-- セッション作成ダイアログ -->
 <dialog id="sessionDialog" class="key-dialog session-dialog">
   <form method="dialog" class="key-form">
@@ -177,6 +190,7 @@
   <img alt="">
 </div>
 
+<script src="shell.js"></script>
 <script src="lora-library.js"></script>
 <script src="arena.js"></script>
 </body>

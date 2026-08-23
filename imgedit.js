@@ -31,7 +31,6 @@ const MAX_ORIGINAL_PX = 4096;
 const MAX_ORIGINAL_AREA = 16 * 1024 * 1024;
 const ORIGINAL_QUALITY = 0.95;
 
-const LS_THEME = 'fal_theme';
 const HF_DEFAULT_REPO = 'tottie2215/temp_str'; // 取り込み先の既定（app.js と同じ）
 const LS_JOB = 'fal_imgedit_job';
 const LS_FORM = 'fal_imgedit_form';
@@ -122,7 +121,6 @@ const ACCESS_EXPIRED_MSG = 'セッションが切れました。ページを再�
 const $ = (sel) => document.querySelector(sel);
 
 const els = {
-  themeBtn: $('#themeBtn'),
   uploadArea: $('#uploadArea'),
   fileInput: $('#fileInput'),
   pickFileBtn: $('#pickFileBtn'),
@@ -212,25 +210,6 @@ function setError(text) {
 
 function makeId() {
   return crypto.randomUUID().replace(/-/g, '');
-}
-
-/* ---------- theme（app.js と同じ） ---------- */
-
-const THEME_LABELS = { auto: '自動', light: 'ライト', dark: 'ダーク' };
-const THEME_ORDER = ['auto', 'light', 'dark'];
-
-function initTheme() {
-  const apply = (theme) => {
-    document.documentElement.dataset.theme = theme;
-    els.themeBtn.textContent = THEME_LABELS[theme];
-  };
-  apply(localStorage.getItem(LS_THEME) || 'auto');
-  els.themeBtn.addEventListener('click', () => {
-    const current = document.documentElement.dataset.theme;
-    const next = THEME_ORDER[(THEME_ORDER.indexOf(current) + 1) % THEME_ORDER.length];
-    localStorage.setItem(LS_THEME, next);
-    apply(next);
-  });
 }
 
 /* ---------- LoRA ライブラリ（読み取りのみ・app.js と同じ形式） ---------- */
@@ -2530,7 +2509,6 @@ runwareLora.onChange = () => {
   for (const row of els.rwLoraList.querySelectorAll('.lora-row')) refreshRwRowOptions(row);
 };
 
-initTheme();
 
 for (const [id, api] of Object.entries(PROVIDERS)) {
   const opt = document.createElement('option');

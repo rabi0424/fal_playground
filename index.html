@@ -5,19 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>fal playground</title>
 <link rel="stylesheet" href="style.css">
+<script>
+/* 保存済みのテーマとサイドバーの開閉は、描画前に反映する。
+   後から JS で当てると、明→暗の切り替わりや幅の跳ねが一瞬見えてしまう */
+(function () {
+  try {
+    var d = document.documentElement, s = localStorage;
+    d.dataset.theme = s.getItem('fal_theme') || 'auto';
+    d.dataset.sidebar = s.getItem('fal_sidebar') || 'open';
+  } catch (e) { /* ストレージが使えない環境では既定のまま */ }
+})();
+</script>
 </head>
 <body>
 
-<header class="topbar">
-  <div class="brand">fal <span>playground</span></div>
-  <div class="topbar-actions">
-    <a href="imgedit.html" class="ghost-btn" title="画像 1 枚を指示文で編集する（Qwen Image Edit + LoRA / FLUX.1 Fill の修復）">画像編集</a>
-    <a href="edit.html" class="ghost-btn" title="画像の一部を選択して Poe の画像編集ボットで編集し、元画像にはめ込む">部分AI編集</a>
-    <a href="arena.html" class="ghost-btn" title="LoRA チェックポイントの匿名比較と Elo ランキング">比較アリーナ</a>
-    <button id="statsBtn" class="ghost-btn" title="アクセスポイント別の生成所要時間の統計">統計</button>
-    <button id="themeBtn" class="ghost-btn" title="テーマ切替">自動</button>
-  </div>
-</header>
+<div class="shell">
+
+<!-- サイドバーの中身は shell.js が描画する（全ページ共通） -->
+<aside id="appSidebar" class="sidebar" aria-label="ナビゲーション"></aside>
+
+<div class="shell-body">
 
 <main class="layout">
   <aside class="panel controls">
@@ -156,6 +163,9 @@
   </section>
 </main>
 
+</div><!-- /.shell-body -->
+</div><!-- /.shell -->
+
 <dialog id="hfDialog" class="key-dialog hf-dialog">
   <form method="dialog" class="key-form">
     <h2 id="hfTitle">Hugging Face から LoRA を一括登録</h2>
@@ -208,6 +218,7 @@
   <div id="lightboxCounter" class="lightbox-counter mobile-only" hidden></div>
 </div>
 
+<script src="shell.js"></script>
 <script src="lora-library.js"></script>
 <script src="civitai-import.js"></script>
 <script src="app.js"></script>
