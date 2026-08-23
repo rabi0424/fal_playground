@@ -49,6 +49,11 @@
         <label class="mask-toggle" title="マスクで塗った範囲だけを編集後の画像に差し替えます。範囲は後からでも変えられます">
           <input type="checkbox" id="maskToggle"> マスクした部分だけを差し替える
         </label>
+        <p class="hint" id="maskModeHint"></p>
+
+        <label class="mask-toggle" data-only="fal wavespeed" title="このモデルは画像全体を作り直すので、返ってくる絵が数 px ずれることがあります。マスクの外側（変わらないはずの部分）を手がかりに、重ねる前に位置を合わせます">
+          <input type="checkbox" id="alignToggle" checked> ずれを補正してから重ねる
+        </label>
 
         <div id="maskTools" class="ie-mask-tools" hidden>
           <div class="ie-mask-row">
@@ -84,19 +89,38 @@
       <textarea id="prompt" rows="3" placeholder="例: 背景を夜の街に変える / 服を白いシャツにする"></textarea>
     </label>
 
+    <div class="field" data-only="runware">
+      <span class="label">よく使う指示（このモデルの定型）</span>
+      <div class="rw-prompt-presets">
+        <button type="button" class="ghost-btn small" data-rwprompt="remove">物体を消す</button>
+        <button type="button" class="ghost-btn small" data-rwprompt="high-definition, perfect composition">まわりを描き足す</button>
+      </div>
+      <p class="hint">このモデルは用途ごとに書き方が決まっています。<strong>物体を消すときは説明文ではなく <code>remove</code> の 1 語</strong>、まわりを描き足すだけのときは定型文を使うと、公式の作例と同じ挙動になります。</p>
+    </div>
+
     <label class="field">
       <span class="label">プロバイダ</span>
       <select id="provider"></select>
       <span class="hint" id="providerHint"></span>
     </label>
 
-    <label class="field" title="Qwen が学習に使っている解像度に合わせて送ります。合成に使うのは元解像度のままの画像です">
+    <label class="field" title="モデルが学習に使っている解像度に合わせて送ります。合成に使うのは元解像度のままの画像です">
       <span class="label">送信サイズ</span>
       <select id="sizeSelect"></select>
       <span class="hint" id="sizeHint" hidden></span>
     </label>
 
-    <details class="field lora-accordion" open>
+    <details class="field lora-accordion" data-only="runware" open>
+      <summary class="label">LoRA</summary>
+      <div id="rwLoraList" class="lora-list"></div>
+      <div class="lora-actions">
+        <button id="rwAddLoraBtn" class="ghost-btn small" type="button">＋ LoRA を追加</button>
+        <button id="rwPickLoraBtn" class="ghost-btn small" type="button">検索・取り込み</button>
+      </div>
+      <p class="hint" id="rwLoraHint" hidden></p>
+    </details>
+
+    <details class="field lora-accordion" data-only="fal wavespeed" open>
       <summary class="label">LoRA</summary>
       <div id="loraList" class="lora-list"></div>
       <div class="lora-actions">
@@ -110,7 +134,7 @@
     <details class="field lora-accordion">
       <summary class="label">詳細設定</summary>
 
-      <label class="field num-field" data-only="fal">
+      <label class="field num-field" data-only="fal runware">
         <span class="label">枚数</span>
         <select id="numImages">
           <option value="1">1</option>
@@ -139,6 +163,66 @@
         </label>
       </div>
 
+      <div class="field" data-only="runware">
+        <div class="rw-preset-row">
+          <span class="label">生成パラメータ</span>
+          <button id="rwPresetBtn" class="ghost-btn small" type="button" title="このモデルの公式作例と同じ設定に戻します">推奨値に戻す</button>
+        </div>
+        <div class="row">
+          <label class="field num-field" title="公式の作例は 50。空欄ならモデルの既定に任せます">
+            <span class="label">ステップ</span>
+            <input id="rwSteps" type="number" min="1" max="50" step="1" placeholder="既定">
+          </label>
+          <label class="field num-field" title="FLUX の内蔵ガイダンス。このモデルは 1 が前提です">
+            <span class="label">CFG</span>
+            <input id="rwCfg" type="number" min="0" max="20" step="0.1" placeholder="既定">
+          </label>
+        </div>
+        <div class="row">
+          <label class="field num-field" title="本来の CFG。1 ステップに 2 回推論するので生成時間が倍近くになります。公式の作例は 4">
+            <span class="label">True CFG</span>
+            <input id="rwTrueCfg" type="number" min="0" max="10" step="0.1" placeholder="なし">
+          </label>
+          <label class="field num-field" title="1 未満だと、塗った範囲にも元画像が残ります。Runware の既定は 0.8">
+            <span class="label">変化の強さ</span>
+            <input id="rwStrength" type="number" min="0" max="1" step="0.05" placeholder="既定">
+          </label>
+        </div>
+        <div class="row">
+          <label class="field num-field" title="マスクの周囲を何 px ぶん一緒に切り出してモデルへ見せるか（32〜128）。空欄なら指定しません">
+            <span class="label">余白 px</span>
+            <input id="rwMaskMargin" type="number" min="32" max="128" step="1" placeholder="既定">
+          </label>
+          <label class="field num-field" title="モデルには少し広めのマスクを渡し、はみ出したぶんは合成で捨てます。塗った縁に元画像が残るときに上げてください">
+            <span class="label">広げる px</span>
+            <input id="rwMaskGrow" type="number" min="0" max="64" step="1" placeholder="0">
+          </label>
+        </div>
+        <div class="row">
+          <label class="field num-field" title="マスクがこの距離より画像の縁に近い辺を、単色で広げてから送ります。返ってきた画像は元の枠で切り出します。0 で無効">
+            <span class="label">縁の余白 px</span>
+            <input id="rwPadEdges" type="number" min="0" max="256" step="8" placeholder="0">
+          </label>
+        </div>
+        <p class="hint" id="rwParamHint"></p>
+
+        <details class="field">
+          <summary class="label">さらに細かい設定</summary>
+          <label class="field">
+            <span class="label">スケジューラ</span>
+            <select id="rwScheduler"></select>
+          </label>
+          <label class="field num-field" title="JPG / WebP のときだけ効きます">
+            <span class="label">出力品質</span>
+            <input id="rwOutputQuality" type="number" min="20" max="99" step="1" placeholder="95">
+          </label>
+          <label class="mask-toggle" title="(word:1.3) のような強調記法をプロンプトで使えるようにします">
+            <input type="checkbox" id="rwPromptWeighting"> プロンプトの強調記法（sdEmbeds）を使う
+          </label>
+          <p class="hint">スケジューラは「自動」のままで構いません（FLUX 系はフローマッチング前提なので、合わないものを選ぶと崩れます）。</p>
+        </details>
+      </div>
+
       <label class="field">
         <span class="label">形式</span>
         <select id="outputFormat">
@@ -158,9 +242,10 @@
         </div>
       </div>
 
-      <label class="field" data-only="fal">
+      <label class="field" data-only="fal runware">
         <span class="label">除外したい要素（negative prompt）</span>
         <input id="negativePrompt" type="text" placeholder="空欄で未指定">
+        <span class="hint" id="negativeHint" hidden></span>
       </label>
     </details>
 
@@ -210,6 +295,7 @@
 </dialog>
 
 <script src="lora-library.js"></script>
+<script src="runware-lora.js"></script>
 <script src="civitai-import.js"></script>
 <script src="imgedit.js"></script>
 </body>
