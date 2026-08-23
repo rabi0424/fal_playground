@@ -185,9 +185,13 @@
           </label>
         </div>
         <div class="row">
-          <label class="field num-field" title="マスクの周囲を何 px ぶん一緒に切り出してモデルへ見せるか（32〜128）">
+          <label class="field num-field" title="マスクの周囲を何 px ぶん一緒に切り出してモデルへ見せるか（32〜128）。空欄なら指定しません">
             <span class="label">余白 px</span>
             <input id="rwMaskMargin" type="number" min="32" max="128" step="1" placeholder="既定">
+          </label>
+          <label class="field num-field" title="モデルには少し広めのマスクを渡し、はみ出したぶんは合成で捨てます。塗った縁に元画像が残るときに上げてください">
+            <span class="label">広げる px</span>
+            <input id="rwMaskGrow" type="number" min="0" max="64" step="1" placeholder="0">
           </label>
         </div>
         <p class="hint" id="rwParamHint"></p>

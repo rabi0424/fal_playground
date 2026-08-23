@@ -37,7 +37,7 @@ const LS_JOB = 'fal_imgedit_job';
 const LS_FORM = 'fal_imgedit_form';
 // 下書きに入っている Runware の既定値の版。上げると、古い下書きの値を
 // 一度だけ推奨値へ入れ替える（空欄＝モデル既定任せのままだと質が出ない）
-const RW_DEFAULTS_VERSION = 2;
+const RW_DEFAULTS_VERSION = 3;
 
 // 送信サイズ。モデルが学習時に使っている解像度に合わせて送ると崩れにくい。
 // 送った画像と同じサイズで返させるので、出力サイズでもある。
@@ -95,6 +95,9 @@ const RUNWARE_RECOMMENDED = {
   // （ドキュメント上は FLUX Fill 系は strength を見ないとあるが、このモデルの
   //  スキーマは既定 0.8 を宣言しているので、明示して曖昧さを消す）
   strength: 1,
+  // モデルへ渡すマスクを広げる px（送信サイズ基準）。潜在空間のひと単位が
+  // 8px なので、2 単位ぶん見ておけば境目の混ざりは合成で捨てられる
+  maskGrow: 16,
   negativePrompt: 'low quality, blurry, distorted, deformed, artifacts',
 };
 
@@ -172,6 +175,7 @@ const els = {
   rwCfg: $('#rwCfg'),
   rwTrueCfg: $('#rwTrueCfg'),
   rwStrength: $('#rwStrength'),
+  rwMaskGrow: $('#rwMaskGrow'),
   rwMaskMargin: $('#rwMaskMargin'),
   rwScheduler: $('#rwScheduler'),
   rwOutputQuality: $('#rwOutputQuality'),
@@ -972,8 +976,11 @@ function boostMaskAlpha(src) {
 }
 
 // マスクを w×h のアルファ（白 = 差し替える）として描く。
-// ぼかしぶんは輪郭の外側が半透明になり、そのまま合成の混ざり具合になる
-function rasterizeMask(w, h, strokes = mask.strokes, feather = mask.feather) {
+// ぼかしぶんは輪郭の外側が半透明になり、そのまま合成の混ざり具合になる。
+//
+// grow は輪郭を外へ広げる px 数（モデルへ渡すマスク用）。塗り足す側は太く、
+// 消しゴム側は細くすることで、出来上がりの形だけを膨らませる
+function rasterizeMask(w, h, strokes = mask.strokes, feather = mask.feather, grow = 0) {
   const long = Math.max(w, h);
   const c = makeCanvas(w, h);
   const ctx = c.getContext('2d');
@@ -988,7 +995,7 @@ function rasterizeMask(w, h, strokes = mask.strokes, feather = mask.feather) {
       ctx.fillRect(0, 0, w, h);
       continue;
     }
-    const width = Math.max(1, stroke.r * 2 * long);
+    const width = Math.max(1, stroke.r * 2 * long + (stroke.mode === 'erase' ? -grow : grow) * 2);
     ctx.lineWidth = width;
     const pts = stroke.pts;
     if (pts.length === 1) {
@@ -1011,12 +1018,14 @@ function rasterizeMask(w, h, strokes = mask.strokes, feather = mask.feather) {
 // モデルへ渡すマスク画像。白 = 描き直す / 黒 = そのまま、という約束なので
 // 黒地に白で塗る（Runware の maskImage）。ぼかしはそのまま濃淡になる。
 // PNG なのは、JPEG のブロックノイズで縁がにじむのを避けるため
-function maskDataUri(size, maskData = mask) {
+function maskDataUri(size, maskData = mask, grow = 0) {
   const canvas = makeCanvas(size.width, size.height);
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(rasterizeMask(canvas.width, canvas.height, maskData.strokes, maskData.feather), 0, 0);
+  ctx.drawImage(
+    rasterizeMask(canvas.width, canvas.height, maskData.strokes, maskData.feather, grow), 0, 0,
+  );
   return canvas.toDataURL('image/png');
 }
 
@@ -1454,6 +1463,9 @@ const PROVIDERS = {
     supports: { size: true, count: true, steps: true, guidance: true, negative: true },
     sizeKind: 'flux',
     // LoRA の絞り込みに使う。FLUX.1 Fill [dev] は flux-1-dev 系
+    // 送信サイズ基準の px。マスクを広げるのはモデルへ渡す側だけで、
+    // 合成に使うマスクは塗ったままの形を保つ
+    maskGrow: () => Number(els.rwMaskGrow.value) || 0,
     loraArchitecture: 'flux1d',
     loraArchitectureLabel: 'FLUX.1 dev',
     defaultNegative: RUNWARE_RECOMMENDED.negativePrompt,
@@ -1638,6 +1650,7 @@ function applyRunwareRecommended() {
   els.rwCfg.value = String(RUNWARE_RECOMMENDED.cfg);
   els.rwTrueCfg.value = String(RUNWARE_RECOMMENDED.trueCfg);
   els.rwStrength.value = String(RUNWARE_RECOMMENDED.strength);
+  els.rwMaskGrow.value = String(RUNWARE_RECOMMENDED.maskGrow);
   els.rwMaskMargin.value = String(RUNWARE_RECOMMENDED.maskMargin);
   els.rwScheduler.value = '';
   els.rwPromptWeighting.checked = false;
@@ -1663,6 +1676,9 @@ function renderRunwareParamHint() {
   }
   if (els.rwMaskMargin.value === '') {
     notes.push('余白を 32〜64 にすると、狭い範囲を塗ったときの精細さが上がります');
+  }
+  if ((Number(els.rwMaskGrow.value) || 0) === 0) {
+    notes.push('塗った縁に元画像が残るときは「広げる」を 16 前後にしてください');
   }
   const base = trueCfg > 1
     ? 'True CFG は 1 ステップに 2 回推論するので、生成時間は倍近くになります（費用も上がることがあります）。'
@@ -1718,7 +1734,11 @@ async function run() {
   // 塗った範囲は「モデルへ渡すマスク」と「返ってきた画像の合成」の両方に使う。
   // 渡せないプロバイダでは合成だけで同じ見た目に寄せる
   const useMask = maskOn() && mask.strokes.length > 0;
-  const maskUri = useMask && api.nativeMask ? maskDataUri(size) : null;
+  // モデルには少し広めのマスクを渡す。修復モデルは輪郭のすぐ内側に元画像を
+  // 引きずりやすい（潜在空間では 8px 角がひと単位なので、境目はどうしても
+  // 混ざる）。広げたぶんは合成で捨てるので、出来上がりの範囲は変わらない
+  const maskUri = useMask && api.nativeMask
+    ? maskDataUri(size, mask, api.maskGrow ? api.maskGrow() : 0) : null;
   const input = api.buildInput(dataUri, size, maskUri);
   const job = {
     id: makeId(),
@@ -2012,6 +2032,7 @@ function saveForm() {
     rwCfg: els.rwCfg.value,
     rwTrueCfg: els.rwTrueCfg.value,
     rwStrength: els.rwStrength.value,
+    rwMaskGrow: els.rwMaskGrow.value,
     rwMaskMargin: els.rwMaskMargin.value,
     rwScheduler: els.rwScheduler.value,
     rwOutputQuality: els.rwOutputQuality.value,
@@ -2058,6 +2079,7 @@ async function restoreForm() {
   els.rwCfg.value = s.rwCfg ?? '';
   els.rwTrueCfg.value = s.rwTrueCfg ?? '';
   els.rwStrength.value = s.rwStrength ?? '';
+  els.rwMaskGrow.value = s.rwMaskGrow ?? '';
   els.rwMaskMargin.value = s.rwMaskMargin ?? '';
   els.rwScheduler.value = s.rwScheduler ?? '';
   els.rwOutputQuality.value = s.rwOutputQuality ?? '';
@@ -2162,11 +2184,12 @@ els.prompt.addEventListener('input', () => { syncRunBtn(); saveForm(); });
 for (const el of [els.sizeSelect, els.numImages, els.steps, els.guidance,
   els.acceleration, els.outputFormat, els.seed, els.seedLock, els.negativePrompt,
   els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength, els.rwMaskMargin,
-  els.rwScheduler, els.rwOutputQuality, els.rwPromptWeighting]) {
+  els.rwMaskGrow, els.rwScheduler, els.rwOutputQuality, els.rwPromptWeighting]) {
   el.addEventListener('change', saveForm);
 }
 // 推奨から外れたらその場で理由を出す
-for (const el of [els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength, els.rwMaskMargin]) {
+for (const el of [els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength,
+  els.rwMaskMargin, els.rwMaskGrow]) {
   el.addEventListener('input', renderRunwareParamHint);
 }
 els.rwPresetBtn.addEventListener('click', () => {
