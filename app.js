@@ -1417,10 +1417,12 @@ async function generateModal(model, prompt) {
     setError('この API のガイダンス（cfg）は 0〜1 の範囲で指定してください');
     return;
   }
-  // この API の LoRA は URL ではなく名前（.safetensors 抜き）で指定する仕様のため変換する
+  // この API の LoRA は名前でも HF の resolve URL でも指定できる。名前だけに落とすと
+  // Volume と既定リポジトリ（tottie2215/temp_str）の直下にあるものしか解決できず、
+  // 別のリポジトリから取り込んだ LoRA が 404 になるので、URL はそのまま渡す
   const loras = !els.loraField.hidden ? collectLoras() : [];
   if (loras.length > 0) {
-    input.loras = loras.map((l) => ({ name: loraDisplayName(l.path), strength: l.scale }));
+    input.loras = loras.map((l) => ({ name: loraLib.modalRef(l.path), strength: l.scale }));
   }
 
   const count = Number(els.numImages.value);

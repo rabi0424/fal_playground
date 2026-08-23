@@ -2152,7 +2152,7 @@ const PROVIDERS = {
   modal: {
     label: 'Modal 自前ホスト（Wan2.2 + VACE マスク編集）',
     model: 'modal/wan-vace-edit',
-    note: 'マスクで塗った範囲を描き直します（マスク必須）。画面全体を作り直して返すモデルなので、塗った範囲だけを元画像に重ねます。蒸留 LoRA を常時適用するため CFG は 1・20 ステップが前提です。LoRA は Wan 用のものを追加で指定できます（名前指定なので、Modal Volume に無いものは初回リクエスト時に取り込まれます）。出力は 1 枚で、送信サイズは 32 の倍数に丸めます。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。初回はモデルの読み込みで数分かかります。',
+    note: 'マスクで塗った範囲を描き直します（マスク必須）。画面全体を作り直して返すモデルなので、塗った範囲だけを元画像に重ねます。蒸留 LoRA を常時適用するため CFG は 1・20 ステップが前提です。LoRA は Wan 用のものを追加で指定できます（ライブラリから選んだものは Hugging Face の URL で渡すので、Modal Volume に無ければ初回リクエスト時に取り込まれます）。出力は 1 枚で、送信サイズは 32 の倍数に丸めます。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。初回はモデルの読み込みで数分かかります。',
     supports: { size: true, steps: true, guidance: true, negative: true },
     sizeKind: 'wan',
     loraBase: 'wan',
@@ -2189,8 +2189,10 @@ const PROVIDERS = {
         // 蒸留 LoRA が先。指定した順に数珠つなぎになるので、標準の土台の上に
         // ユーザーの LoRA を重ねる形にする
         loras: [...WAN_EDIT_LORAS, ...collectLoras().map((l) => ({
-          // この API の LoRA は URL ではなく名前（.safetensors 抜き）で指定する
-          name: loraLib.fileName(l.path),
+          // この API の LoRA は名前でも HF の resolve URL でも指定できる。名前だけに
+          // 落とすと Volume と既定リポジトリの直下にあるものしか解決できないので、
+          // URL を持つものは URL のまま渡して Modal 側に取り込ませる
+          name: loraLib.modalRef(l.path),
           strength: l.scale,
         }))],
       };
