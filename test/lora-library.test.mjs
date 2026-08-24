@@ -8,15 +8,21 @@ import { readFileSync } from 'node:fs';
 import { createContext, runInContext } from 'node:vm';
 import assert from 'node:assert/strict';
 
-function loadLib(store = {}) {
+// full: true にすると setItem が容量あふれの例外を投げる（満杯の端末の再現）
+function loadLib(store = {}, { full = false } = {}) {
   const localStorage = {
     getItem: (k) => (k in store ? store[k] : null),
-    setItem: (k, v) => { store[k] = String(v); },
+    setItem: (k, v) => {
+      if (full) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      store[k] = String(v);
+    },
     removeItem: (k) => { delete store[k]; },
   };
-  const sandbox = { localStorage, console };
+  const sandbox = { localStorage, console, DOMException };
   sandbox.window = sandbox;
   createContext(sandbox);
+  // 保存は store.js（falStore）越しに行うので、本体と同じ順で読み込む
+  runInContext(readFileSync(new URL('../store.js', import.meta.url), 'utf8'), sandbox);
   runInContext(readFileSync(new URL('../lora-library.js', import.meta.url), 'utf8'), sandbox);
   return sandbox.loraLib;
 }
@@ -90,5 +96,31 @@ check('Wan 2.2 表記は wan', loraLib.baseKind('Wan Video 2.2 I2V-A14B'), 'wan'
 check('Qwen は qwen（wan を含まない）', loraLib.baseKind('Qwen-Image'), 'qwen');
 check('Krea は krea2', loraLib.baseKind('Krea 2'), 'krea2');
 check('空は null', loraLib.baseKind(''), null);
+
+/* ---- 保存（store.js 経由） ---- */
+
+// 登録したものが読み戻せる
+{
+  const store = {};
+  const lib = loadLib(store);
+  lib.register('https://huggingface.co/owner/repo/resolve/main/x.safetensors');
+  check('登録すると保存される', lib.load().length, 1);
+  check('保存先は fal_lora_library', JSON.parse(store.fal_lora_library).length, 1);
+  lib.unregister('https://huggingface.co/owner/repo/resolve/main/x.safetensors');
+  check('削除も保存される', lib.load().length, 0);
+}
+
+// 満杯の端末では、黙って消えたことにせず理由の分かる例外を出す
+// （素の setItem をそのまま呼んでいた頃は "The quota has been exceeded." だった）
+{
+  const lib = loadLib({}, { full: true });
+  let message = '';
+  try {
+    lib.register('https://huggingface.co/owner/repo/resolve/main/x.safetensors');
+  } catch (err) {
+    message = err.message;
+  }
+  check('容量あふれは日本語で伝える', message.includes('保存領域がいっぱい'), true);
+}
 
 console.log(`ok: ${passed} checks passed`);

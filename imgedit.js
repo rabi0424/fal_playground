@@ -1514,8 +1514,15 @@ function onMaskLeave() {
   drawMaskCursor();
 }
 
+// 塗りは下書き（localStorage）と履歴レコードにそのまま載る。座標を丸めずに
+// 持つと 1 本で数十 KB になり、保存領域を食い潰して「生成中のジョブの控えが
+// 書けない」といった巻き添えを起こす。長辺 2048px でも 0.2px の差なので、
+// 4 桁に丸めても塗った形は変わらない
+const roundPoint = ([x, y]) => [Math.round(x * 1e4) / 1e4, Math.round(y * 1e4) / 1e4];
+
 function onMaskUp() {
   if (!maskStroke) return;
+  maskStroke.pts = maskStroke.pts.map(roundPoint);
   mask.strokes.push(maskStroke);
   maskStroke = null;
   commitMaskChange();
@@ -2672,14 +2679,16 @@ function queuedCount() {
 }
 
 function saveJobs() {
-  // 行の DOM は持たない。handle と組み立て済みの情報だけを残す
-  localStorage.setItem(LS_JOB, JSON.stringify(activeJobs));
+  // 行の DOM は持たない。handle と組み立て済みの情報だけを残す。
+  // 控えを書けなくても、走っているジョブは落とさない（開き直したときに
+  // 拾えなくなるだけで、このタブでは最後まで受け取れる）
+  falStore.set(LS_JOB, JSON.stringify(activeJobs));
 }
 
 function loadJobs() {
   let saved;
   try {
-    saved = JSON.parse(localStorage.getItem(LS_JOB));
+    saved = JSON.parse(falStore.get(LS_JOB));
   } catch {
     return [];
   }
@@ -3217,13 +3226,13 @@ function saveForm() {
     maskFeather: els.maskFeather.value,
     mask, // ストロークなので軽い（画像として持つと保存に収まらない）
   };
-  localStorage.setItem(LS_FORM, JSON.stringify(state));
+  falStore.set(LS_FORM, JSON.stringify(state));
 }
 
 async function restoreForm() {
   let s;
   try {
-    s = JSON.parse(localStorage.getItem(LS_FORM));
+    s = JSON.parse(falStore.get(LS_FORM));
   } catch {
     s = null;
   }

@@ -265,9 +265,10 @@ LoRA 欄の「ライブラリを管理」（`library.html`）で、登録済み 
 node test/import.test.mjs        # Civitai 取り込みパイプライン
 node test/modal.test.mjs         # Modal（modal_comfy）ジョブ
 node test/lora-library.test.mjs  # LoRA ライブラリ（Modal へ渡す識別子など）
+node test/store.test.mjs         # localStorage のラッパー（容量あふれの扱い）
 ```
 
-前の 2 つは `worker.js` をそのまま Node に読み込み、Civitai / Hugging Face / R2 / Modal をモックして流します。取り込みのテストはサイズ関連の定数を小さくパッチするので、1 MB のダミーファイルでも「複数回の alarm 実行に分割される」実際の経路を確認できます。`DEBUG_ERRORS=1` を付けると、再試行のために握りつぶしている例外を表示します。最後の 1 つはブラウザ用の `lora-library.js` を `node:vm` で読み込み、`localStorage` だけ差し替えて確かめます。
+前の 2 つは `worker.js` をそのまま Node に読み込み、Civitai / Hugging Face / R2 / Modal をモックして流します。取り込みのテストはサイズ関連の定数を小さくパッチするので、1 MB のダミーファイルでも「複数回の alarm 実行に分割される」実際の経路を確認できます。`DEBUG_ERRORS=1` を付けると、再試行のために握りつぶしている例外を表示します。後ろの 2 つはブラウザ用の `lora-library.js` / `store.js` を `node:vm` で読み込み、`localStorage` だけ差し替えて確かめます。
 
 ## LoRA 比較アリーナ
 
@@ -309,7 +310,17 @@ node test/lora-library.test.mjs  # LoRA ライブラリ（Modal へ渡す識別�
 | Runware の LoRA（AIR）の控え | localStorage | 端末ごと。実体は Runware 側にあるので、「Runware から取り込み」で再取得できる |
 | 比較アリーナのセッション・投票結果 | サーバー（自動同期） + localStorage | 全端末で共通。画像は生成履歴と共用 |
 | フォームの下書き・テーマ | localStorage | 端末ごと（意図的に同期しない） |
+| 生成履歴の表示キャッシュ | localStorage | 端末ごと。開いた直後にギャラリーを描くためだけのもので、直近 60 件・マスクのストロークを除いた形で持つ（正はサーバー） |
 | 部分AI編集の作業状態（元画像・選択範囲・プロンプト） | localStorage + IndexedDB（元画像） | 端末ごと。再読み込みしても復元される |
+
+### localStorage の容量あふれ
+
+localStorage はブラウザごとに 5MB 前後で頭打ちになり、超えると `QuotaExceededError`（Safari の文言は "The quota has been exceeded."）を投げます。**この例外はアプリの外へ出しません**（`store.js` の `falStore`）。
+
+- 素の `setItem` を呼んでいた頃は、いっぱいになった端末で**生成の途中**（送信済みジョブの控えを書くところ）に例外が飛び、走っているジョブがエラー扱いになって落ちていました。fal 側では成功しているのに結果を取り逃がし、画面には英語のまま "The quota has been exceeded." だけが出ます
+- 書けなかったときは、捨ててよいキャッシュ（生成履歴の表示キャッシュ）を落として一度だけ書き直します。それでも駄目なら諦めます。下書き・ジョブの控え・キャッシュは、失っても次に開けば取り直せるものばかりです
+- ライブラリへの登録のように**失うと困るもの**だけは、`setOrThrow` で日本語の理由（「この端末の保存領域がいっぱいで…」）を出します
+- あふれさせない側の手当てとして、生成履歴の表示キャッシュは直近 60 件・マスクのストロークを除いた形で持ち、マスクの座標は 4 桁に丸めて保存します（長辺 2048px でも 0.2px の差なので形は変わらず、ストローク 1 本あたりの JSON が半分以下になります）
 
 ### 生成設定の画像への焼き込み
 

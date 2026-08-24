@@ -15,6 +15,15 @@
 
   const LS_THEME = 'fal_theme';
   const LS_SIDEBAR = 'fal_sidebar';
+
+  /* 保存できなくても、その操作自体は効かせる（次に開いたとき既定に戻るだけ）。
+     ストレージが無効な環境や、容量がいっぱいの端末で例外を投げないため。
+     このファイルは store.js より先に走るので、falStore には頼らない */
+  function rememberSetting(key, value) {
+    try {
+      localStorage.setItem(key, value);
+    } catch (e) { /* 覚えられないだけ */ }
+  }
   /* サイドバーが常設からドロワーに変わる幅。1 カラム化の 900px に合わせる */
   const DRAWER_MQ = window.matchMedia('(max-width: 900px)');
 
@@ -187,7 +196,7 @@
   for (const btn of sidebar.querySelectorAll('.theme-btn')) {
     btn.addEventListener('click', () => {
       try {
-        localStorage.setItem(LS_THEME, btn.dataset.themeValue);
+        rememberSetting(LS_THEME, btn.dataset.themeValue);
       } catch { /* プライベートブラウズなどで書けなくても切替自体は効かせる */ }
       applyTheme(btn.dataset.themeValue);
     });
@@ -198,7 +207,7 @@
   function setCollapsed(collapsed) {
     root.dataset.sidebar = collapsed ? 'rail' : 'open';
     try {
-      localStorage.setItem(LS_SIDEBAR, root.dataset.sidebar);
+      rememberSetting(LS_SIDEBAR, root.dataset.sidebar);
     } catch { /* 保存できなくても今のセッションでは効く */ }
     syncToggle();
   }

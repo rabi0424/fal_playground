@@ -188,7 +188,7 @@ let onChange = null;
 
 function load() {
   try {
-    const items = JSON.parse(localStorage.getItem(LS_RW_LORAS));
+    const items = JSON.parse(falStore.get(LS_RW_LORAS));
     return Array.isArray(items) ? items.filter((i) => i && typeof i.air === 'string') : [];
   } catch {
     return [];
@@ -196,7 +196,8 @@ function load() {
 }
 
 function save(items) {
-  localStorage.setItem(LS_RW_LORAS, JSON.stringify(items));
+  // 登録は失うと困るので、書けなかったことは黙って飲み込まない
+  falStore.setOrThrow(LS_RW_LORAS, JSON.stringify(items));
   onChange?.();
 }
 
@@ -303,7 +304,7 @@ async function search({ query = '', visibility = 'owned', architecture = '' } = 
 /* ---------- 取り込み（Civitai の AIR / Hugging Face からのアップロード） ---------- */
 
 function namespace() {
-  const saved = localStorage.getItem(LS_AIR_NAMESPACE) || '';
+  const saved = falStore.get(LS_AIR_NAMESPACE) || '';
   return /^[\w.-]+$/.test(saved) ? saved : DEFAULT_NAMESPACE;
 }
 

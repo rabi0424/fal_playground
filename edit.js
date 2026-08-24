@@ -560,12 +560,11 @@ function selToRect() {
 // 選択範囲とアップロード済み元画像 URL を保存する（再読み込みでの復元用）。
 // 元画像そのものは IndexedDB（loadFile 時に保存）にある
 function saveWorkState() {
-  try {
-    localStorage.setItem(LS_STATE, JSON.stringify({
-      rect: img && hasSel ? selToRect() : null,
-      origUrl,
-    }));
-  } catch { /* 容量超過などは無視（復元できなくなるだけ） */ }
+  // 容量超過などは無視（復元できなくなるだけ）
+  falStore.set(LS_STATE, JSON.stringify({
+    rect: img && hasSel ? selToRect() : null,
+    origUrl,
+  }));
 }
 
 // 再読み込み時: 元画像座標の rect から表示座標の選択範囲を復元する
@@ -899,7 +898,8 @@ async function execute() {
       parameters: job.parameters,
     });
     // ここまで来ればサーバー側で完結するので、タブを閉じても次回再開できる
-    localStorage.setItem(LS_JOB, JSON.stringify(job));
+    // （控えを書けなくても、このタブでは最後まで受け取れる）
+    falStore.set(LS_JOB, JSON.stringify(job));
 
     await awaitAndComposite(job);
   } catch (err) {
@@ -920,14 +920,14 @@ async function awaitAndComposite(job) {
     const res = await fetch(`/api/poe/job/${job.jobId}`);
     if (isHtmlResponse(res)) throw new Error(ACCESS_EXPIRED_MSG);
     if (res.status === 404) {
-      localStorage.removeItem(LS_JOB);
+      falStore.remove(LS_JOB);
       throw new Error('ジョブが見つかりませんでした（保持期限が切れた可能性があります）');
     }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     result = await res.json();
     if (result.status === 'done') break;
     if (result.status === 'error') {
-      localStorage.removeItem(LS_JOB);
+      falStore.remove(LS_JOB);
       throw new Error(result.error || 'AI 編集に失敗しました');
     }
     await sleep(POLL_INTERVAL_MS);
@@ -975,7 +975,7 @@ async function awaitAndComposite(job) {
   historyItems = [record, ...historyItems.filter((r) => r.id !== record.id)];
   renderGallery();
 
-  localStorage.removeItem(LS_JOB);
+  falStore.remove(LS_JOB);
   setStatus('');
   showResult({
     compUri,
@@ -1178,10 +1178,10 @@ function hideResult() {
 async function resumeJob() {
   let job = null;
   try {
-    job = JSON.parse(localStorage.getItem(LS_JOB));
+    job = JSON.parse(falStore.get(LS_JOB));
   } catch { /* 壊れたデータは下で破棄する */ }
   if (!job?.jobId || !job.origUrl || !job.rect) {
-    localStorage.removeItem(LS_JOB);
+    falStore.remove(LS_JOB);
     return;
   }
 
@@ -1192,7 +1192,7 @@ async function resumeJob() {
     } catch {
       // 元画像を読み戻せない（削除済みなど）場合は再開をあきらめる。
       // 残したままだと開くたびに失敗し続けるのでジョブは破棄する
-      localStorage.removeItem(LS_JOB);
+      falStore.remove(LS_JOB);
       setEditError('前回のジョブの元画像を読み戻せなかったため、再開を中止しました');
       return;
     }
@@ -1214,7 +1214,7 @@ async function resumeJob() {
 /* ---------- form persistence（端末ごとの下書き） ---------- */
 
 function saveForm() {
-  localStorage.setItem(LS_FORM, JSON.stringify({
+  falStore.set(LS_FORM, JSON.stringify({
     prompt: els.editPrompt.value,
     name: els.nameInput.value,
     bot: els.botSelect.value,
@@ -1230,7 +1230,7 @@ function saveForm() {
 function restoreForm() {
   let saved = null;
   try {
-    saved = JSON.parse(localStorage.getItem(LS_FORM));
+    saved = JSON.parse(falStore.get(LS_FORM));
   } catch { /* 壊れていたら既定値のまま */ }
   if (!saved) return;
   if (typeof saved.prompt === 'string') els.editPrompt.value = saved.prompt;
@@ -1263,14 +1263,14 @@ function updatePromptPreview() {
 // 実行中ジョブがあればその再開を優先し（元画像はサーバーから読み戻す）、
 // なければ端末内に保存した元画像と選択範囲を復元する
 async function restoreWorkspace() {
-  if (localStorage.getItem(LS_JOB)) {
+  if (falStore.get(LS_JOB)) {
     await resumeJob();
     return;
   }
 
   let state = null;
   try {
-    state = JSON.parse(localStorage.getItem(LS_STATE));
+    state = JSON.parse(falStore.get(LS_STATE));
   } catch { /* 壊れていたら無視 */ }
 
   let saved = null;
