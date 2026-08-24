@@ -79,6 +79,21 @@
           <input type="checkbox" id="colorToggle" checked> 色味を合わせてから重ねる
         </label>
 
+        <label class="mask-toggle" data-only="lanpaint" title="編集に関係ない部分を切り落とし、塗った範囲のまわりだけをモデルへ送ります。狭い範囲を塗ったときほど、そこに使える解像度が上がります。返ってきた画像は元の位置へ戻して重ねます">
+          <input type="checkbox" id="cropToggle" checked> 塗った範囲のまわりだけを切り抜いて送る
+        </label>
+
+        <div id="cropTools" class="ie-crop" hidden>
+          <div class="ie-mask-row">
+            <label class="ie-crop-num" title="塗った範囲（ぼかしの届く先）の外側に、どれだけ広く元画像を残して切り抜くか。元画像の px で数えます">
+              <span class="label">切り抜きの余白（px）</span>
+              <input id="cropMargin" type="number" min="0" max="512" step="8" value="64">
+            </label>
+            <button id="cropResetBtn" class="ghost-btn small" type="button" title="四隅を動かして決めた枠を捨てて、塗った範囲から自動で決め直します">自動に戻す</button>
+          </div>
+          <p class="hint" id="cropHint"></p>
+        </div>
+
         <div id="maskTools" class="ie-mask-tools" hidden>
           <div class="ie-mask-row">
             <div class="seg" role="group" aria-label="ツール">
