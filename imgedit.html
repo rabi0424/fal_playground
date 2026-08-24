@@ -55,6 +55,9 @@
       <div class="ie-canvas-wrap">
         <img id="sourceImg" alt="入力画像">
         <canvas id="maskCanvas" hidden></canvas>
+        <!-- ブラシの下見（円）だけを描く層。塗りの重ね描きと分けておくと、
+             カーソルを動かしただけでマスクを描き直さずに済む -->
+        <canvas id="maskCursor" hidden></canvas>
       </div>
       <div class="ie-source-meta">
         <span id="sourceInfo" class="hint"></span>
@@ -96,7 +99,7 @@
             <input id="maskFeather" type="range" min="0" max="20" step="1" value="4">
           </label>
 
-          <p class="hint">画像をなぞって範囲を塗ります。縁はぼかしぶんだけ半透明にブレンドされます。</p>
+          <p class="hint">画像をなぞって範囲を塗ります。<strong>白い実線の内側が完全に差し替わる範囲</strong>で、その外の薄い線までがぼかしで混ざる範囲です。</p>
         </div>
       </div>
     </div>
@@ -343,6 +346,13 @@
     </div>
   </form>
 </dialog>
+
+<!-- 履歴サムネイルの拡大表示 -->
+<div id="lightbox" class="lightbox" hidden>
+  <button id="lightboxClose" class="lightbox-close mobile-only" type="button" aria-label="閉じる">✕</button>
+  <img alt="">
+  <div id="lightboxCounter" class="lightbox-counter" hidden></div>
+</div>
 
 <script src="shell.js"></script>
 </body>

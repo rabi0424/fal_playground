@@ -2546,6 +2546,9 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
   cursor: crosshair;
 }
 
+/* ブラシの下見だけを描く層。操作は下の #maskCanvas が受け取る */
+#maskCursor { pointer-events: none; }
+
 .ie-source-meta {
   display: flex;
   align-items: center;
@@ -2621,8 +2624,6 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
   color: var(--text);
 }
 
-.ie-gallery-adjust { margin-top: 4px; width: 100%; }
-
 /* 送信サイズの説明。引き伸ばしが大きいときだけ色を変える */
 #sizeHint.warn { color: var(--danger); }
 
@@ -2677,6 +2678,25 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 .ie-run .primary-btn { width: 100%; }
 .ie-run .hint { margin: 0; }
 
+/* 順番待ちは 1 件 = 1 行。折り返すと、待っているだけで実行バーが
+   画面を押し上げてしまう。収まらない文字は省略し、押したときだけ全文を出す */
+.ie-run .job-row {
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+.ie-run .job-row .job-prompt,
+.ie-run .job-row .error { min-width: 0; }
+
+/* 経過秒。桁が増えても行がガタつかないよう数字を等幅にする */
+.ie-run .job-elapsed {
+  flex: none;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 全文表示に切り替えたときだけ、その行の折り返しを許す */
+.ie-run .job-row:has(.expanded) { flex-wrap: wrap; }
+
 /* サイドバーが引き出しになる幅では、バーは画面いっぱいに広げる */
 @media (max-width: 900px) {
   .ie-run { left: 0; }
@@ -2724,16 +2744,83 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 }
 .ie-gallery:empty { display: none; }
 .ie-gallery-item { margin: 0; }
+
+/* サムネイル本体（押すと拡大表示）と、右上の ⋯ メニューの入れ物 */
+.ie-thumb { position: relative; }
+
+.ie-thumb-open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  line-height: 0;
+  cursor: zoom-in;
+}
 .ie-gallery-item img {
   width: 100%;
   aspect-ratio: 1;
   object-fit: cover;
   border-radius: 8px;
   border: 1px solid var(--border);
-  cursor: pointer;
   transition: transform var(--dur-move) var(--spring);
 }
-.ie-gallery-item img:active { transform: scale(0.97); }
+.ie-thumb-open:active img { transform: scale(0.97); }
+.ie-thumb-open:focus-visible { outline: 2px solid var(--accent); border-radius: 8px; }
+
+/* ⋯ ボタン。画像の明暗に関わらず読めるよう、暗い下地に白で置く */
+.ie-thumb-more {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 13px;
+  background: rgb(0 0 0 / 0.5);
+  color: #fff;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  /* 触れているあいだと開いているあいだ以外は控えめにする */
+  opacity: 0.75;
+  transition: opacity var(--dur-quick) ease;
+}
+.ie-thumb:hover .ie-thumb-more,
+.ie-thumb-menu.open .ie-thumb-more,
+.ie-thumb-more:focus-visible { opacity: 1; }
+
+.ie-menu {
+  display: none;
+  position: absolute;
+  top: 32px;
+  right: 4px;
+  z-index: 10;
+  min-width: 132px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--shadow-floating);
+}
+.ie-thumb-menu.open .ie-menu { display: block; }
+
+.ie-menu button {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ie-menu button:hover { background: var(--nav-hover); }
 .ie-gallery-item figcaption {
   font-size: 11px;
   color: var(--muted);
