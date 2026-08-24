@@ -27,6 +27,9 @@ const JOB_POLL_DELAY_MS = 2000;
 const ALARM_OVERDUE_MS = 60 * 1000;
 const JOB_MAX_SUBMIT_ATTEMPTS = 2; // 送信自体の再試行上限（多重生成・多重課金の防止）
 
+// 画像に焼き込む「何で作ったか」。ジョブの kind から引く（既定は生成）
+const JOB_SOURCES = { edit: 'wan-vace-edit', inpaint: 'lanpaint-inpaint' };
+
 // 履歴追加時に取り込む外部画像のホスト（fal / WaveSpeed / Runware の CDN）。
 // それ以外は取り込まず URL のまま残す。プロバイダ側の URL は失効しうるので、
 // 履歴に残すものは自分の R2 に持ってくる
@@ -593,8 +596,9 @@ export class SyncState extends DurableObject {
       status: 'pending',
       payload,
       endpoint,
-      kind,        // 'generate' | 'edit'
-      endpointKey, // 'exp' | 'prod' | 'ckpt' | 'wan' | 'wan-edit'（画像に焼き込む記録用）
+      kind,        // 'generate' | 'edit' | 'inpaint'
+      // 'exp' | 'prod' | 'ckpt' | 'wan' | 'wan-edit' | 'lanpaint'（画像に焼き込む記録用）
+      endpointKey,
       pollUrl: null,
       attempts: 0,
       created: Date.now(),
@@ -871,7 +875,7 @@ export class SyncState extends DurableObject {
       const { image: _img, mask: _mask, hf_token: _tok, ...params } = job.payload;
       const meta = {
         app: 'fal playground',
-        source: job.kind === 'edit' ? 'wan-vace-edit' : 'krea2-modal',
+        source: JOB_SOURCES[job.kind] ?? 'krea2-modal',
         endpoint: job.endpointKey ?? (job.endpoint.includes('-exp-') ? 'exp'
           : job.endpoint.includes('-gpusnap-') ? 'gpusnap'
             : job.endpoint.includes('-ckpt-') ? 'ckpt' : 'prod'),
@@ -2258,17 +2262,25 @@ export default {
         // どちらかが動いていればもう一方もウォームになる
         wan: env.WAN_ENDPOINT_GENERATE
           || 'https://rabitteru--wan-vace-api-comfyapi-generate.modal.run',
+        // LanPaint 版（lanpaint_app）。画像編集の LanPaint インペイントと
+        // コンテナを共有するので、生成もこちらに寄せれば 1 コンテナで済む
+        lanpaint: env.LANPAINT_ENDPOINT_GENERATE
+          || 'https://rabitteru--lanpaint-api-comfyapi-generate.modal.run',
       };
-      const endpointKey = endpoints[payload.endpoint] ? payload.endpoint : 'exp';
+      // Object.hasOwn で見る（'constructor' のような継承プロパティを
+      // 許可リストの当たりと取り違えないため）
+      const endpointKey = Object.hasOwn(endpoints, payload.endpoint) ? payload.endpoint : 'exp';
       delete payload.endpoint; // Modal API には存在しないフィールドなので転送しない
 
       await stub.startKrea2Job(jobId, payload, endpoints[endpointKey], 'generate', endpointKey);
       return Response.json({ queued: true, jobId });
     }
 
-    // Wan2.2 + VACE のマスク編集（modal_comfy の /edit）。生成と同じくジョブにして
+    // マスク編集（modal_comfy の /edit・/inpaint）。生成と同じくジョブにして
     // すぐ応答する。編集は 900 秒級で 150 秒を超えると 303 が返るため、長い HTTP
-    // 接続を保持する作りにはできない（INTEGRATION.md 参照）
+    // 接続を保持する作りにはできない（INTEGRATION.md 参照）。
+    // 送るものは prompt / image / mask で共通なので、endpoint フィールドで
+    // Wan2.2 + VACE（/edit）と LanPaint（/inpaint）を切り替える
     if (url.pathname === '/api/modal/edit') {
       if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
       if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });
@@ -2297,9 +2309,29 @@ export default {
       }
       delete payload.jobId;
 
-      const endpoint = env.WAN_ENDPOINT_EDIT
-        || 'https://rabitteru--wan-vace-api-comfyapi-edit.modal.run';
-      await stub.startKrea2Job(jobId, payload, endpoint, 'edit', 'wan-edit');
+      // 生成と同じく、URL はクライアントから受け取らずここの許可リストで解決する
+      const endpoints = {
+        wan: {
+          url: env.WAN_ENDPOINT_EDIT
+            || 'https://rabitteru--wan-vace-api-comfyapi-edit.modal.run',
+          kind: 'edit',
+          key: 'wan-edit',
+        },
+        // LanPaint 版（lanpaint_app の /inpaint）。マスクの外は元画像とピクセル
+        // 一致で返り、Krea 2 の LoRA がそのまま効く。別コンテナなので、生成も
+        // 揃えたいときは生成側の endpoint に 'lanpaint' を選ぶ
+        lanpaint: {
+          url: env.LANPAINT_ENDPOINT_INPAINT
+            || 'https://rabitteru--lanpaint-api-comfyapi-inpaint.modal.run',
+          kind: 'inpaint',
+          key: 'lanpaint',
+        },
+      };
+      const target = Object.hasOwn(endpoints, payload.endpoint)
+        ? endpoints[payload.endpoint] : endpoints.wan;
+      delete payload.endpoint; // Modal API には存在しないフィールドなので転送しない
+
+      await stub.startKrea2Job(jobId, payload, target.url, target.kind, target.key);
       return Response.json({ queued: true, jobId });
     }
 

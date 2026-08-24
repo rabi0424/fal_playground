@@ -13,6 +13,10 @@ const MODAL_KREA2_CKPT_ID = 'modal/krea2-turbo-ckpt';
 // 統合版（modal_comfy の wan_vace_app）。画像編集（Wan2.2 + VACE）と同じコンテナを
 // 共有するので、どちらかが動いていればもう一方もウォームで始められる
 const MODAL_KREA2_WAN_ID = 'modal/krea2-turbo-wan';
+// LanPaint 版（modal_comfy の lanpaint_app）。画像編集の「LanPaint インペイント」と
+// 同じコンテナを共有する。統合版（wan）とは別コンテナなので、編集で LanPaint を
+// 使うならこちらで生成するとコンテナが 1 つで済む
+const MODAL_KREA2_LANPAINT_ID = 'modal/krea2-turbo-lanpaint';
 
 const MODELS = [
   { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA', sizeParam: 'image_size', lora: true, loraBase: 'krea2', maxLoras: 3 },
@@ -24,6 +28,8 @@ const MODELS = [
   // wan: 画像編集（Wan2.2 + VACE）と同居する統合版。チェックポイント指定に加え、
   // サンプラー・スケジューラ・denoise も受け付ける
   { id: MODAL_KREA2_WAN_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・編集と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'wan', ckpt: true, sampler: true },
+  // lanpaint: 画像編集の「LanPaint インペイント」と同居する版。API は統合版と同じ
+  { id: MODAL_KREA2_LANPAINT_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal LanPaint 版・インペイントと共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'lanpaint', ckpt: true, sampler: true },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },

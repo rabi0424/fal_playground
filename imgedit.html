@@ -111,6 +111,7 @@
     <label class="field">
       <span class="label">編集の指示（プロンプト）</span>
       <textarea id="prompt" rows="3" placeholder="例: 背景を夜の街に変える / 服を白いシャツにする"></textarea>
+      <span class="hint" id="promptHint" hidden></span>
     </label>
 
     <div class="field" data-only="runware">
@@ -144,7 +145,7 @@
       <p class="hint" id="rwLoraHint" hidden></p>
     </details>
 
-    <details class="field lora-accordion" data-only="fal wavespeed modal" open>
+    <details class="field lora-accordion" data-only="fal wavespeed modal lanpaint" open>
       <summary class="label" id="loraLabel">LoRA</summary>
       <div id="loraList" class="lora-list"></div>
       <div class="lora-actions">
@@ -278,6 +279,29 @@
           <input id="wanMaskGrow" type="number" min="0" max="64" step="1" value="8">
         </label>
         <p class="hint">蒸留 LoRA（lightx2v cfg_step_distill / FusionX）を強度 0.4 で常時適用します。CFG 1 と 20 ステップはこの構成が前提です。</p>
+      </div>
+
+      <div class="field" data-only="lanpaint">
+        <span class="label">生成パラメータ <em>（LanPaint）</em></span>
+        <div class="row">
+          <label class="field num-field" title="LanPaint が塗った範囲をまわりと辻褄合わせするために考え直す回数。実質ここだけを触ります。簡単な差し替えなら 2〜3、難しいものは 10。0 で無効（ただの修復になります）">
+            <span class="label">思考回数</span>
+            <input id="lpNumSteps" type="number" min="0" max="20" step="1" value="5">
+          </label>
+          <label class="field num-field" title="総サンプリングステップ数。既定は 15">
+            <span class="label">ステップ</span>
+            <input id="lpSteps" type="number" min="1" max="100" step="1" placeholder="15">
+          </label>
+          <label class="field num-field" title="サーバー側で合成するときの境界のブレンド幅（px）。奇数のみ（偶数はエラーになるので +1 して送ります）">
+            <span class="label">境界ブレンド px</span>
+            <input id="lpBlend" type="number" min="1" max="49" step="2" placeholder="9">
+          </label>
+        </div>
+        <label class="field num-field" title="モデルへ渡すマスクだけを太らせます。塗った縁に元画像が残るときに上げてください（合成に使うマスクは塗ったままの形です）">
+          <span class="label">マスクを広げる（px）</span>
+          <input id="lpMaskGrow" type="number" min="0" max="64" step="1" value="8">
+        </label>
+        <p class="hint" id="lpParamHint"></p>
       </div>
 
       <div class="field">

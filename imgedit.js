@@ -1,16 +1,17 @@
 'use strict';
 
 /* ==========================================================================
- * 画像編集（Qwen Image Edit 2511 + LoRA / FLUX.1 Fill [dev] OneReward）
+ * 画像編集（Qwen Image Edit 2511 + LoRA / FLUX.1 Fill [dev] OneReward /
+ *           Wan2.2 + VACE / LanPaint）
  *
  * 入力画像 1 枚 + 指示文で画像を編集する別画面。既存の「部分AI編集」
  * （Poe・範囲を切り抜いてはめ込む）とは別枠で、画像全体をモデルに渡す。
  *
- * - プロバイダは 4 つ。Qwen Image Edit 2511 を fal / WaveSpeed から、
+ * - プロバイダは 5 つ。Qwen Image Edit 2511 を fal / WaveSpeed から、
  *   FLUX.1 Fill [dev] OneReward（塗った範囲を描き直す修復モデル）を Runware から、
- *   Wan2.2 + VACE のマスク編集を Modal 自前ホスト（modal_comfy）から選べる。
- *   API の形がそれぞれ違うので PROVIDERS のアダプタで吸収する
- *   （送信内容の組み立て・投入・ポーリング・結果の解釈・費用の目安）
+ *   Wan2.2 + VACE のマスク編集と LanPaint のインペイントを Modal 自前ホスト
+ *   （modal_comfy）から選べる。API の形がそれぞれ違うので PROVIDERS のアダプタで
+ *   吸収する（送信内容の組み立て・投入・ポーリング・結果の解釈・費用の目安）
  * - いずれも Worker のプロキシ経由（/api/fal/proxy・/api/wavespeed/proxy・
  *   /api/runware/proxy・/api/modal/edit）で呼ぶ。API キーはブラウザに渡さない
  * - 入力画像（とマスク）は data URI として渡す。このアプリは Cloudflare Access の
@@ -132,10 +133,22 @@ const WAN_EDIT_LORAS = [
   { name: 'Wan2.1_T2V_14B_FusionX_LoRA', strength: 0.4 },
 ];
 
-// Wan は 32 の倍数の解像度しか扱えない。1 辺 4096 まで
+// Wan は 32 の倍数の解像度しか扱えない。1 辺 4096 まで。
+// LanPaint も同じく 32 の倍数へ丸められるので、刻みは共通で使う
 const WAN_DIM_STEP = 32;
 const WAN_DIM_MIN = 256;
 const WAN_DIM_MAX = 4096;
+
+// LanPaint（Modal 自前ホスト / modal_comfy の lanpaint_app の /inpaint）。
+//
+// 実質のノブは num_steps（塗った範囲をまわりと辻褄合わせするために考え直す回数）
+// だけで、レイテンシはこれにほぼ比例する。実測（832×1216 / RTX PRO 6000）は
+// X-Exec-Seconds ≒ 6.9 + 4.97 × num_steps 秒
+const LANPAINT_NUM_STEPS = 5; // 既定（0〜20）
+const LANPAINT_SEC_BASE = 6.9;
+const LANPAINT_SEC_PER_STEP = 4.97;
+// サーバー側で合成するときの境界ブレンド幅（px）。奇数しか受け付けない
+const LANPAINT_BLEND_OVERLAP = 9;
 
 // スケジューラ。既定（自動）のままが基本なので、選択肢として出すだけ
 const RUNWARE_SCHEDULERS = ['Default', 'FlowMatchEulerDiscreteScheduler', 'Euler', 'Euler a',
@@ -146,6 +159,9 @@ const RUNWARE_SCHEDULERS = ['Default', 'FlowMatchEulerDiscreteScheduler', 'Euler
   'UniPC 3M', 'UniPC 3M Karras', 'UniPC Karras', 'LCM', 'TCDScheduler'];
 
 const ACCESS_EXPIRED_MSG = 'セッションが切れました。ページを再読み込みしてください。';
+
+// 指示文の欄の既定の例。プロバイダが promptPlaceholder を持つときはそちらを出す
+const PROMPT_PLACEHOLDER = '例: 背景を夜の街に変える / 服を白いシャツにする';
 
 /* ---------- helpers ---------- */
 
@@ -175,6 +191,7 @@ const els = {
   maskFeather: $('#maskFeather'),
   maskFeatherVal: $('#maskFeatherVal'),
   prompt: $('#prompt'),
+  promptHint: $('#promptHint'),
   provider: $('#provider'),
   providerHint: $('#providerHint'),
   loraList: $('#loraList'),
@@ -194,6 +211,11 @@ const els = {
   wanCfg: $('#wanCfg'),
   wanShift: $('#wanShift'),
   wanMaskGrow: $('#wanMaskGrow'),
+  lpNumSteps: $('#lpNumSteps'),
+  lpSteps: $('#lpSteps'),
+  lpBlend: $('#lpBlend'),
+  lpMaskGrow: $('#lpMaskGrow'),
+  lpParamHint: $('#lpParamHint'),
   seed: $('#seed'),
   seedLock: $('#seedLock'),
   negativePrompt: $('#negativePrompt'),
@@ -2199,6 +2221,54 @@ async function saveHistoryRecord(record) {
 // snapSize    … プロバイダ側の刻み制約に丸める（省略可）
 // nativeMask  … マスクを API に渡せるか。渡せないものは合成だけで再現する
 // requiresMask… マスク前提のモデルか（マスク無しでは実行させない）
+// promptHint  … 指示文の書き方がモデルで大きく変わるときの補足（省略可）
+
+/* ---- Modal 自前ホスト（modal_comfy）のマスク編集で共通の部分 ---- */
+//
+// Wan2.2 + VACE（/edit）と LanPaint（/inpaint）は送る中身が違うだけで、
+// 「Worker にジョブを預けて状態をポーリングする」流れは同じ
+
+// 32 の倍数へ丸める。どちらのモデルもこの刻みの解像度しか扱えない
+function snap32(size) {
+  const clamp = (v) => Math.min(WAN_DIM_MAX,
+    Math.max(WAN_DIM_MIN, Math.round(v / WAN_DIM_STEP) * WAN_DIM_STEP));
+  return { width: clamp(size.width), height: clamp(size.height) };
+}
+
+async function modalEditSubmit(input, endpoint) {
+  // ジョブ ID はこちらで採番する。送信のリトライや再開で同じ ID を使えば、
+  // サーバー側で二重に走らない
+  const jobId = makeId();
+  const res = await fetch('/api/modal/edit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    // endpoint は URL そのものではなく Worker 側の許可リストのキー
+    body: JSON.stringify({ ...input, endpoint, jobId }),
+  });
+  if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
+  return { jobId };
+}
+
+async function modalEditPoll(handle, note) {
+  const res = await fetch(`/api/krea2/job/${handle.jobId}`).catch(() => null);
+  // 一時的な通信断は、次のポーリングで拾い直す
+  if (!res) return { done: false, text: '編集中…' };
+  if (res.status === 404) throw new Error('ジョブが見つかりませんでした（保持期間切れの可能性があります）');
+  if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
+  const job = await res.json();
+  if (job.status === 'error') throw new Error(job.error || '編集に失敗しました');
+  if (job.status !== 'done') return { done: false, text: '編集中…', note };
+  return { done: true, result: job };
+}
+
+function modalEditParse(job) {
+  return {
+    images: [{ url: job.url, width: job.width ?? undefined, height: job.height ?? undefined }],
+    seed: job.seed ?? null,
+    flagged: 0,
+  };
+}
+
 const PROVIDERS = {
   fal: {
     label: 'fal（fal-ai/qwen-image-edit-2511/lora）',
@@ -2490,11 +2560,7 @@ const PROVIDERS = {
     maskGrow: () => Number(els.wanMaskGrow.value) || 0,
     pollMs: 2500,
 
-    snapSize(size) {
-      const clamp = (v) => Math.min(WAN_DIM_MAX,
-        Math.max(WAN_DIM_MIN, Math.round(v / WAN_DIM_STEP) * WAN_DIM_STEP));
-      return { width: clamp(size.width), height: clamp(size.height) };
-    },
+    snapSize: snap32,
 
     buildInput(dataUri, size, maskUri) {
       const input = {
@@ -2528,40 +2594,15 @@ const PROVIDERS = {
       return { ...input, image: undefined, mask: undefined };
     },
 
-    async submit(input) {
-      // ジョブ ID はこちらで採番する。送信のリトライや再開で同じ ID を使えば、
-      // サーバー側で二重に走らない
-      const jobId = makeId();
-      const res = await fetch('/api/modal/edit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...input, jobId }),
-      });
-      if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
-      return { jobId };
+    submit(input) {
+      return modalEditSubmit(input, 'wan');
     },
 
-    async poll(handle) {
-      const res = await fetch(`/api/krea2/job/${handle.jobId}`).catch(() => null);
-      // 一時的な通信断は、次のポーリングで拾い直す
-      if (!res) return { done: false, text: '編集中…' };
-      if (res.status === 404) throw new Error('ジョブが見つかりませんでした（保持期間切れの可能性があります）');
-      if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
-      const job = await res.json();
-      if (job.status === 'error') throw new Error(job.error || '編集に失敗しました');
-      if (job.status !== 'done') {
-        return { done: false, text: '編集中…', note: '初回はモデルの読み込みで数分かかります' };
-      }
-      return { done: true, result: job };
+    poll(handle) {
+      return modalEditPoll(handle, '初回はモデルの読み込みで数分かかります');
     },
 
-    parse(job) {
-      return {
-        images: [{ url: job.url, width: job.width ?? undefined, height: job.height ?? undefined }],
-        seed: job.seed ?? null,
-        flagged: 0,
-      };
-    },
+    parse: modalEditParse,
 
     costHint() {
       const size = sendSize();
@@ -2570,7 +2611,107 @@ const PROVIDERS = {
         + ' ・ 自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です';
     },
   },
+
+  // LanPaint（Modal 自前ホスト / modal_comfy の lanpaint_app の /inpaint）。
+  //
+  // Krea 2 のインペイント。塗った範囲だけを描き直し、マスクの外は元画像と
+  // ピクセル一致で返る（サーバー側で合成済み）。生成で使っている Krea 2 の
+  // LoRA がそのまま効くので、キャラ LoRA を当てたまま顔や服だけ描き直せる。
+  //
+  // Wan2.2 + VACE（/edit）とは別のコンテナ。両方を使うとコンテナが 2 つ立ち
+  // 上がるので、生成側も「Modal LanPaint 版」に寄せると 1 コンテナで収まる
+  lanpaint: {
+    label: 'Modal 自前ホスト（LanPaint インペイント）',
+    model: 'modal/lanpaint-inpaint',
+    note: '塗った範囲だけを描き直します（マスク必須）。マスクの外は元画像のまま返るモデルなので、継ぎ目が出ません。生成で使っている Krea 2 の LoRA がそのまま効くので、キャラクターを保ったまま顔や服だけ描き直す用途に向きます。実質のノブは「思考回数」だけで、生成時間もこれでほぼ決まります（標準の 5 でウォーム時 30 秒ほど）。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。Wan2.2 + VACE とは別のコンテナなので、生成も「Modal LanPaint 版」にすればコンテナが 1 つで済みます。',
+    supports: { size: true, steps: true },
+    sizeKind: 'wan',
+    loraBase: 'krea2',
+    // この API の LoRA も名前 / HF の resolve URL で指定するので、ライブラリに
+    // 無いものも名前だけで足せる
+    loraByName: true,
+    maxLoras: 8,
+    nativeMask: true,
+    requiresMask: true,
+    // LanPaint は二値マスクを前提にしている（公式 README: "requires binary
+    // masks ... without opacity or smoothing"）。ぼかした縁は合成のときだけ使う
+    hardMask: true,
+    // 塗った縁の内側に元画像が残るとき用。広げたぶんは合成で捨てる
+    maskGrow: () => Number(els.lpMaskGrow.value) || 0,
+    // alignOutput は持たない。マスクの外が元画像とピクセル一致で返るので、
+    // そもそもずれようがない（「ずれを補正してから重ねる」も出さない）
+    pollMs: 2000,
+    promptHint: 'このモデルは「塗った範囲に何があってほしいか」だけを書きます（例:「赤いニット帽」）。'
+      + '「帽子をかぶった男性の写真」のような画像全体の説明を書くと結果が悪くなります。',
+    promptPlaceholder: '例: 赤いニット帽 / 白いシャツ',
+    snapSize: snap32,
+
+    buildInput(dataUri, size, maskUri) {
+      const input = {
+        prompt: els.prompt.value.trim(),
+        image: dataUri,
+        mask: maskUri,
+        width: size.width,
+        height: size.height,
+        num_steps: lanpaintNumSteps(),
+        loras: collectLoras().map((l) => ({
+          name: loraLib.modalRef(l.path),
+          strength: l.scale,
+        })),
+      };
+      if (els.seedLock.checked && els.seed.value !== '') input.seed = Number(els.seed.value);
+      // 空欄はキーごと落として API の既定に任せる
+      if (els.lpSteps.value !== '') input.steps = Number(els.lpSteps.value);
+      // 偶数は 422 になるので、打たれても通る形に直してから送る
+      if (els.lpBlend.value !== '') input.blend_overlap = oddBlendOverlap(els.lpBlend.value);
+      return input;
+    },
+
+    // 画像本体（base64）は履歴にも再開用の記録にも残さない
+    strip(input) {
+      return { ...input, image: undefined, mask: undefined };
+    },
+
+    submit(input) {
+      return modalEditSubmit(input, 'lanpaint');
+    },
+
+    poll(handle) {
+      return modalEditPoll(handle, '初回はモデルの読み込みで 1 分ほどかかります');
+    },
+
+    parse: modalEditParse,
+
+    costHint() {
+      const size = sendSize();
+      if (!size) return '';
+      return `出力 ${size.width}×${size.height} × 1 枚`
+        + ` ・ ウォーム時 約 ${lanpaintSeconds()} 秒`
+        + ' ・ 自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です';
+    },
+  },
 };
+
+// 思考回数（num_steps）。空欄・数値でないものは既定に寄せる
+// （空欄を 0 と読むと、消しただけで LanPaint が切れてしまう）
+function lanpaintNumSteps() {
+  if (els.lpNumSteps.value.trim() === '') return LANPAINT_NUM_STEPS;
+  const n = Math.round(Number(els.lpNumSteps.value));
+  if (!Number.isFinite(n)) return LANPAINT_NUM_STEPS;
+  return Math.min(20, Math.max(0, n));
+}
+
+// ウォーム時の生成時間の目安（秒）。実測がほぼ一次式なのでそのまま使う
+function lanpaintSeconds(steps = lanpaintNumSteps()) {
+  return Math.round(LANPAINT_SEC_BASE + LANPAINT_SEC_PER_STEP * steps);
+}
+
+// blend_overlap は奇数のみ（偶数は 422）。偶数を打たれたら 1 足して通す
+function oddBlendOverlap(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n < 1) return LANPAINT_BLEND_OVERLAP;
+  return n % 2 === 0 ? n + 1 : n;
+}
 
 let providerId = 'fal';
 
@@ -2634,6 +2775,10 @@ function syncProviderFields() {
   els.negativeHint.textContent = api.defaultNegative
     ? `空欄のときは「${api.defaultNegative}」を送ります（True CFG は対になる negative prompt があって初めて効くため）。`
     : '';
+  // 指示文の書き方がモデルで大きく変わるものは、欄のすぐ下で断っておく
+  els.promptHint.hidden = !api.promptHint;
+  els.promptHint.textContent = api.promptHint ?? '';
+  els.prompt.placeholder = api.promptPlaceholder ?? PROMPT_PLACEHOLDER;
   els.maskModeHint.textContent = MASK_MODE_HINTS[api.nativeMask ? 'native' : 'composite'];
   // マスク前提のモデルでは切れないようにする（切ると送るものが無くなる）
   els.maskToggle.disabled = !!api.requiresMask;
@@ -2645,6 +2790,7 @@ function syncProviderFields() {
   pruneLoraRows();
   renderSizeOptions();
   renderRunwareParamHint();
+  renderLanpaintParamHint();
   syncMaskUi();
   renderSizeHint();
   syncRunBtn(); // 費用の目安もここで出し直す
@@ -2701,6 +2847,20 @@ function renderRunwareParamHint() {
     ? `${notes.join('。')}。「推奨値に戻す」で公式の作例どおりになります。`
     : `公式の作例と同じ設定です。${base}`;
   els.rwParamHint.classList.toggle('warn', notes.length > 0);
+}
+
+// 思考回数と生成時間はほぼ比例するので、いま何秒くらいかかるかをその場で出す
+function renderLanpaintParamHint() {
+  if (providerId !== 'lanpaint') return;
+  const steps = lanpaintNumSteps();
+  const notes = [`思考回数 ${steps} で、ウォーム時 約 ${lanpaintSeconds(steps)} 秒です`
+    + `（速い ${lanpaintSeconds(2)} 秒 / 標準 ${lanpaintSeconds(5)} 秒 / 丁寧 ${lanpaintSeconds(10)} 秒）`];
+  if (steps === 0) notes.push('0 は LanPaint を切った状態（ただの修復）になります');
+  const blend = els.lpBlend.value;
+  if (blend !== '' && Math.round(Number(blend)) % 2 === 0) {
+    notes.push(`境界ブレンドは奇数のみなので ${oddBlendOverlap(blend)} で送ります`);
+  }
+  els.lpParamHint.textContent = `${notes.join('。')}。`;
 }
 
 /* ---------- 実行（順番待ちつき） ---------- */
@@ -3264,6 +3424,10 @@ function saveForm() {
     wanCfg: els.wanCfg.value,
     wanShift: els.wanShift.value,
     wanMaskGrow: els.wanMaskGrow.value,
+    lpNumSteps: els.lpNumSteps.value,
+    lpSteps: els.lpSteps.value,
+    lpBlend: els.lpBlend.value,
+    lpMaskGrow: els.lpMaskGrow.value,
     outputFormat: els.outputFormat.value,
     seed: els.seed.value,
     seedLock: els.seedLock.checked,
@@ -3319,6 +3483,12 @@ async function restoreForm() {
   els.wanShift.value = s.wanShift ?? '';
   // 広げる px だけは既定値がある（0 だと縁に元画像が残りやすい）
   if (s.wanMaskGrow !== undefined && s.wanMaskGrow !== '') els.wanMaskGrow.value = s.wanMaskGrow;
+  els.lpSteps.value = s.lpSteps ?? '';
+  els.lpBlend.value = s.lpBlend ?? '';
+  // 思考回数と広げる px には既定値があるので、値があるときだけ戻す
+  // （空欄で保存されていたら、欄の既定に任せる）
+  if (s.lpNumSteps !== undefined && s.lpNumSteps !== '') els.lpNumSteps.value = s.lpNumSteps;
+  if (s.lpMaskGrow !== undefined && s.lpMaskGrow !== '') els.lpMaskGrow.value = s.lpMaskGrow;
   if (s.outputFormat) els.outputFormat.value = s.outputFormat;
   els.seed.value = s.seed || '';
   els.seedLock.checked = !!s.seedLock;
@@ -3443,8 +3613,16 @@ for (const el of [els.sizeSelect, els.numImages, els.steps, els.guidance,
   els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength, els.rwMaskMargin,
   els.rwMaskGrow, els.rwPadEdges, els.rwScheduler, els.rwOutputQuality,
   els.rwPromptWeighting,
-  els.wanSteps, els.wanCfg, els.wanShift, els.wanMaskGrow]) {
+  els.wanSteps, els.wanCfg, els.wanShift, els.wanMaskGrow,
+  els.lpNumSteps, els.lpSteps, els.lpBlend, els.lpMaskGrow]) {
   el.addEventListener('change', saveForm);
+}
+// 思考回数は生成時間の目安（実行バーの費用欄）にも効く
+for (const el of [els.lpNumSteps, els.lpBlend]) {
+  el.addEventListener('input', () => {
+    renderLanpaintParamHint();
+    renderCostHint();
+  });
 }
 // 推奨から外れたらその場で理由を出す
 for (const el of [els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength,
@@ -3452,7 +3630,7 @@ for (const el of [els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength,
   el.addEventListener('input', renderRunwareParamHint);
 }
 // 広げ幅と縁の余白は、何をどの大きさで送るかを変える
-for (const el of [els.rwMaskGrow, els.rwPadEdges, els.wanMaskGrow]) {
+for (const el of [els.rwMaskGrow, els.rwPadEdges, els.wanMaskGrow, els.lpMaskGrow]) {
   el.addEventListener('input', renderSizeHint);
 }
 els.rwPresetBtn.addEventListener('click', () => {

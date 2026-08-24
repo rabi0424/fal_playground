@@ -3,6 +3,7 @@
 // worker.js をそのまま Node に取り込み、Modal のエンドポイントと R2 をモックして流す。
 // 見るのは 3 点:
 //   - /api/krea2/generate と /api/modal/edit がエンドポイントを正しく解決すること
+//     （編集は Wan2.2 + VACE の /edit と LanPaint の /inpaint を振り分ける）
 //   - 303（結果ポーリングへの切り替え）を追って完了まで進むこと
 //   - ポーリング中の 202（まだ実行中）を完了と取り違えないこと
 //   - 画像以外が返ったときに、それを結果として保存しないこと
@@ -292,9 +293,58 @@ test('ルーティング: endpoint フィールドで URL を選び、未知の�
   assert.equal(seen.at(-1)[1].endpoint, undefined);
   assert.equal(seen.at(-1)[1].jobId, undefined);
 
-  await post('/api/modal/edit', { ...base, jobId: 'e'.repeat(32), image: 'AAA', mask: 'BBB' });
+  await post('/api/krea2/generate', { ...base, jobId: '1'.repeat(32), endpoint: 'lanpaint' });
+  assert.match(seen.at(-1)[2], /lanpaint-api-comfyapi-generate/);
+  assert.deepEqual(seen.at(-1).slice(3), ['generate', 'lanpaint']);
+
+  const edit = { ...base, image: 'AAA', mask: 'BBB' };
+  await post('/api/modal/edit', { ...edit, jobId: 'e'.repeat(32) });
   assert.match(seen.at(-1)[2], /wan-vace-api-comfyapi-edit/);
   assert.deepEqual(seen.at(-1).slice(3), ['edit', 'wan-edit']);
+
+  // 編集も endpoint フィールドで LanPaint（/inpaint）へ振り分ける
+  await post('/api/modal/edit', { ...edit, jobId: 'a'.repeat(32), endpoint: 'lanpaint' });
+  assert.match(seen.at(-1)[2], /lanpaint-api-comfyapi-inpaint/);
+  assert.deepEqual(seen.at(-1).slice(3), ['inpaint', 'lanpaint']);
+  assert.equal(seen.at(-1)[1].endpoint, undefined);
+
+  // 未知の値は Wan2.2 + VACE（既定）へ落とす。Object の継承プロパティ名も同じ扱い
+  for (const endpoint of ['nope', 'constructor', '__proto__']) {
+    await post('/api/modal/edit', { ...edit, jobId: 'b'.repeat(32), endpoint });
+    assert.match(seen.at(-1)[2], /wan-vace-api-comfyapi-edit/, endpoint);
+    assert.deepEqual(seen.at(-1).slice(3), ['edit', 'wan-edit'], endpoint);
+  }
+  await post('/api/krea2/generate', { ...base, jobId: '2'.repeat(32), endpoint: 'constructor' });
+  assert.match(seen.at(-1)[2], /krea2-comfy-api-exp/);
+});
+
+test('インペイント: 結果は LanPaint として記録する', async () => {
+  const mod = await loadWorker();
+  const { stub, storage, env } = makeDo(mod);
+  globalThis.fetch = makeModal({ headers: { 'X-Width': '832', 'X-Height': '1216' } }).fetch;
+
+  const id = 'c'.repeat(32);
+  await stub.startKrea2Job(id, {
+    prompt: 'a red knitted beanie hat',
+    image: 'data:image/png;base64,AAAA',
+    mask: 'data:image/png;base64,BBBB',
+    width: 832,
+    height: 1216,
+    num_steps: 5,
+  }, 'https://x--y.modal.run/inpaint', 'inpaint', 'lanpaint');
+  await runAlarms(stub, storage);
+
+  const job = await stub.getKrea2Job(id);
+  assert.equal(job.status, 'done', job.error ?? '');
+  assert.equal(job.width, 832);
+  assert.equal(job.height, 1216);
+
+  const meta = readEmbeddedMeta(await storedBytes(env, job.url));
+  assert.equal(meta.source, 'lanpaint-inpaint');
+  assert.equal(meta.endpoint, 'lanpaint');
+  assert.equal(meta.num_steps, 5);
+  assert.equal(meta.image, undefined);
+  assert.equal(meta.mask, undefined);
 });
 
 test('編集: 画像とマスクが無ければ 422 で弾く', async () => {
