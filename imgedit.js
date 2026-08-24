@@ -677,17 +677,42 @@ function loadImageForCanvas(src) {
   return isSameOrigin(src) ? loadImageEl(src) : loadImageEl(src, 'anonymous');
 }
 
+// data URI の中身のおおよそのバイト数（base64 は 4 文字で 3 バイト）
+function dataUriBytes(uri) {
+  const at = uri.indexOf(',');
+  return at < 0 ? 0 : Math.floor((uri.length - at - 1) * 3 / 4);
+}
+
+// JSON を POST する。大きな本文は端末や回線によって一度で通らないことがあり、
+// Safari では fetch そのものが落ちて "Load failed" だけが返ってくる。
+// 一度だけ間を置いて送り直し、それでも駄目なら何が起きたか分かる文言にする
+async function postJson(path, body, { retries = 1 } = {}) {
+  const payload = JSON.stringify(body);
+  let last = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) await sleep(800);
+    try {
+      return await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+      });
+    } catch (err) {
+      last = err; // 通信そのものが失敗（オフライン・接続断・本文が大きすぎる）
+    }
+  }
+  const mb = (payload.length / 1024 / 1024).toFixed(1);
+  throw new Error(`サーバーに送れませんでした（送信 ${mb}MB・${last?.message || '通信エラー'}）`);
+}
+
 // 別サイトにある画像を R2 へ取り込んで、同一オリジンの URL にして返す。
 // プロバイダによっては履歴保存時の取り込み対象から外れて外部 URL のまま残り、
 // そのままでは合成できないうえ、CDN の URL が失効すると開き直せなくなる
 async function captureImage(url) {
   if (isSameOrigin(url)) return url;
-  const res = await fetch('/api/capture', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url }),
-  });
-  if (!res.ok || isHtmlResponse(res)) return url; // 取り込めなければ元の URL のまま試す
+  // 取り込めなければ元の URL のまま試す（別オリジンでも CORS が通れば読める）
+  const res = await postJson('/api/capture', { url }).catch(() => null);
+  if (!res || !res.ok || isHtmlResponse(res)) return url;
   return (await res.json()).url;
 }
 
@@ -784,12 +809,12 @@ function storedImageUrl(src) {
 // replace に既存の /api/image/... を渡すと、新しく作らずその画像を差し替える
 // （マスクの塗り直しのたびに合成画像が増えて置き去りになるのを防ぐ）
 async function uploadDataUri(dataUri, meta, replace = null) {
-  const res = await fetch('/api/upload', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ image: dataUri, meta, ...(replace ? { replace } : {}) }),
-  });
-  if (!res.ok || isHtmlResponse(res)) throw new Error('画像の保存に失敗しました');
+  const res = await postJson('/api/upload', { image: dataUri, meta, ...(replace ? { replace } : {}) });
+  if (isHtmlResponse(res)) throw new Error('画像の保存に失敗しました（ログインし直してください）');
+  if (!res.ok) {
+    const mb = (dataUriBytes(dataUri) / 1024 / 1024).toFixed(1);
+    throw new Error(`画像の保存に失敗しました（${mb}MB・HTTP ${res.status}）`);
+  }
   return (await res.json()).url;
 }
 
@@ -1878,12 +1903,35 @@ function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = n
   return out;
 }
 
+// 合成画像を data URI にするときの目安。合成は入力と同じ解像度で行うので、
+// そのまま PNG にすると 4000px 級の写真で 30〜45MB になる。Worker の受け取り
+// 上限（40MB）を超えるうえ、その大きさの POST は端末によっては通らない
+//（Safari は fetch ごと落ちて "Load failed" になる）。同じ絵を img.src に
+// 置くだけでもメモリを食うので、表示にも同じ上限をかける
+const COMPOSITE_MAX_BYTES = 12 * 1024 * 1024;
+
+// 上限に収まる形式で書き出す。可逆の PNG を第一候補にし、収まらないときだけ
+// 落としていく（写真は PNG が極端に大きく、WebP / JPEG なら 5 分の 1 以下になる）
+function encodeWithin(canvas, limit = COMPOSITE_MAX_BYTES) {
+  const png = canvas.toDataURL('image/png');
+  if (dataUriBytes(png) <= limit) return png;
+  let best = png;
+  for (const [mime, quality] of [['image/webp', 0.95], ['image/jpeg', 0.95], ['image/jpeg', 0.85]]) {
+    const uri = canvas.toDataURL(mime, quality);
+    // 対応していない形式を渡すと PNG が返る（Safari 17 より前の WebP など）
+    if (!uri.startsWith(`data:${mime}`)) continue;
+    if (dataUriBytes(uri) <= limit) return uri;
+    if (dataUriBytes(uri) < dataUriBytes(best)) best = uri;
+  }
+  return best; // 上限に届かなくても、いちばん小さいもので送る
+}
+
 // URL から合成した data URI を作る。画像は同一オリジン（R2）である必要がある
 // （別ドメインのままだと canvas が汚染されて取り出せない）
 // offset に 'auto' を渡すと、その場でずれを測る。測った結果も返すので、
 // 塗り直しのたびに測り直さずに済む
 async function compositeFromUrls(baseUrl, editedUrl, maskData, crop = null, offset = null,
-  { mime = 'image/png', colorMatch = false } = {}) {
+  { colorMatch = false } = {}) {
   const [baseImg, editedImg] = await Promise.all([
     loadImageForCanvas(baseUrl), loadImageForCanvas(editedUrl),
   ]);
@@ -1891,7 +1939,7 @@ async function compositeFromUrls(baseUrl, editedUrl, maskData, crop = null, offs
   const canvas = compositeWithMask(baseImg, editedImg, maskData, crop, shift, colorMatch);
   try {
     return {
-      dataUri: canvas.toDataURL(mime, 0.95),
+      dataUri: encodeWithin(canvas),
       width: canvas.width,
       height: canvas.height,
       offset: shift,
