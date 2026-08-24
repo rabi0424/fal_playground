@@ -4,6 +4,9 @@
 // 見るのは 3 点:
 //   - /api/krea2/generate と /api/modal/edit がエンドポイントを正しく解決すること
 //   - 303（結果ポーリングへの切り替え）を追って完了まで進むこと
+//   - ポーリング中の 202（まだ実行中）を完了と取り違えないこと
+//   - 画像以外が返ったときに、それを結果として保存しないこと
+//   - いつまでも終わらないジョブを打ち切ること
 //   - 編集の結果から seed と実際の解像度（X-Width / X-Height）を拾うこと
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import assert from 'node:assert/strict';
@@ -132,6 +135,110 @@ test('編集: 303 を追って完了し、seed と実際の解像度を拾う', 
   assert.equal(meta.image, undefined);
   assert.equal(meta.mask, undefined);
   assert.deepEqual(meta.loras, [{ name: 'distill', strength: 0.4 }]);
+});
+
+// Modal は結果 URL のポーリングに対して、関数が終わるまで 202 を返す。
+// res.ok は 202 でも true なので、分けずに扱うと空の本文を画像として保存し、
+// 壊れた結果が「完了」になってしまう
+test('編集: ポーリング中の 202 は完了扱いにしない', async () => {
+  const mod = await loadWorker();
+  const { stub, storage, env } = makeDo(mod);
+
+  let polls = 0;
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    calls.push(u);
+    if (!u.includes('/poll/')) {
+      return new Response(null, { status: 303, headers: { Location: 'https://x--y.modal.run/poll/1' } });
+    }
+    polls += 1;
+    if (polls <= 2) return new Response(null, { status: 202 }); // まだ実行中
+    return new Response(PNG_1X1, { status: 200, headers: { 'Content-Type': 'image/png', 'X-Seed': '9' } });
+  };
+
+  const id = 'f'.repeat(32);
+  await stub.startKrea2Job(id, { prompt: 'remove', image: 'A', mask: 'B' },
+    'https://x--y.modal.run/edit', 'edit', 'wan-edit');
+
+  // 202 を返している間は pending のまま
+  await storage.deleteAlarm();
+  await stub.alarm(); // POST → 303
+  await storage.deleteAlarm();
+  await stub.alarm(); // 1 回目のポーリング（202）
+  assert.equal((await stub.getKrea2Job(id)).status, 'pending');
+  assert.equal((await stub.getKrea2Job(id)).url, null);
+
+  await runAlarms(stub, storage);
+  const job = await stub.getKrea2Job(id);
+  assert.equal(job.status, 'done', job.error ?? '');
+  assert.equal(job.seed, 9);
+  // 202 のぶんは保存に進まないので、R2 に入る画像は 1 枚だけ
+  const obj = await env.IMAGES.get(`${job.url.split('/').pop()}.png`);
+  assert.ok(obj, '完了した画像が R2 にある');
+  assert.equal(polls, 3);
+});
+
+test('編集: 画像以外が返ったら、結果にせずエラーにする', async () => {
+  const mod = await loadWorker();
+  const { stub, storage } = makeDo(mod);
+  globalThis.fetch = async (url) => (String(url).includes('/poll/')
+    ? new Response('{"detail":"oops"}', { status: 200, headers: { 'Content-Type': 'application/json' } })
+    : new Response(null, { status: 303, headers: { Location: 'https://x--y.modal.run/poll/1' } }));
+
+  const id = '9'.repeat(32);
+  await stub.startKrea2Job(id, { prompt: 'remove', image: 'A', mask: 'B' },
+    'https://x--y.modal.run/edit', 'edit', 'wan-edit');
+  await runAlarms(stub, storage);
+
+  const job = await stub.getKrea2Job(id);
+  assert.equal(job.status, 'error');
+  assert.match(job.error, /画像が返りませんでした/);
+  assert.equal(job.url, null);
+});
+
+test('いつまでも終わらないジョブは打ち切る（「編集中…」で止まったままにしない）', async () => {
+  const mod = await loadWorker();
+  const { stub, storage } = makeDo(mod);
+  // ずっと 202（実行中）を返し続ける Modal
+  globalThis.fetch = async (url) => (String(url).includes('/poll/')
+    ? new Response(null, { status: 202 })
+    : new Response(null, { status: 303, headers: { Location: 'https://x--y.modal.run/poll/1' } }));
+
+  const id = '8'.repeat(32);
+  await stub.startKrea2Job(id, { prompt: 'remove', image: 'A', mask: 'B' },
+    'https://x--y.modal.run/edit', 'edit', 'wan-edit');
+  await storage.deleteAlarm();
+  await stub.alarm();
+  assert.equal((await stub.getKrea2Job(id)).status, 'pending');
+
+  // 上限を過ぎるまで走ったことにする
+  const key = `krea2:job:${id}`;
+  const stored = await storage.get(key);
+  stored.created = Date.now() - 31 * 60 * 1000;
+  await storage.put(key, stored);
+  await storage.deleteAlarm();
+  await stub.alarm();
+
+  const job = await stub.getKrea2Job(id);
+  assert.equal(job.status, 'error');
+  assert.match(job.error, /分以内に完了しませんでした/);
+});
+
+// ポーリングの連鎖がどこかで切れると、クライアントは「編集中…」のまま待ち続ける
+test('走っているジョブを問い合わせたら、alarm が落ちていても張り直す', async () => {
+  const mod = await loadWorker();
+  const { stub, storage } = makeDo(mod);
+  globalThis.fetch = async () => new Response(null, { status: 202 });
+
+  const id = '7'.repeat(32);
+  await stub.startKrea2Job(id, { prompt: 'remove', image: 'A', mask: 'B' },
+    'https://x--y.modal.run/edit', 'edit', 'wan-edit');
+  await storage.deleteAlarm(); // alarm が落ちた状態
+  assert.equal(await storage.getAlarm(), null);
+
+  assert.equal((await stub.getKrea2Job(id)).status, 'pending');
+  assert.notEqual(await storage.getAlarm(), null);
 });
 
 test('生成: X-Width が無くても完了し、記録は生成として残る', async () => {

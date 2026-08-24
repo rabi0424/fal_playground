@@ -15,6 +15,10 @@ const HISTORY_KEEP = 1000; // 履歴レコードの上限。超過分は画像�
 // Modal 生成ジョブの設定。ジョブは Durable Object の alarm でサーバー側完結で
 // 処理する（クライアントとの接続が切れても結果を取りこぼさないため）
 const JOB_TTL_MS = 60 * 60 * 1000; // 完了・失敗ジョブの保持期間
+// 走り続けているジョブを打ち切る上限。Wan2.2 + VACE の編集が 900 秒級なので
+// その倍以上を取る。ここが無いと、ポーリングが何かの理由で終わらないときに
+// クライアントが「編集中…」のまま止まり続ける
+const JOB_MAX_RUN_MS = 30 * 60 * 1000;
 const JOB_POLL_DELAY_MS = 2000;
 // これ以上「予定時刻を過ぎているのに実行されていない」alarm は、配信されないまま
 // 残っているものとみなして張り直す。Durable Object の alarm は実行が繰り返し
@@ -373,6 +377,13 @@ function crc32(bytes) {
 }
 
 // PNG でなければそのまま返す（fal は JPEG を返すモデルもある）
+// 先頭が PNG のシグネチャか。Modal が画像以外（202 の空応答・エラー JSON）を
+// 返したときに、それを画像として保存してしまわないための番人
+function looksLikePng(buf) {
+  const src = new Uint8Array(buf);
+  return src.length >= 33 && PNG_SIGNATURE.every((b, i) => src[i] === b);
+}
+
 function embedPngMetadata(buf, text) {
   const src = new Uint8Array(buf);
   if (src.length < 33 || !PNG_SIGNATURE.every((b, i) => src[i] === b)) return buf;
@@ -594,6 +605,9 @@ export class SyncState extends DurableObject {
   async getKrea2Job(id) {
     const job = await this.ctx.storage.get(`krea2:job:${id}`);
     if (!job) return null;
+    // まだ走っているなら、alarm が生きているか確かめる。ポーリングの連鎖が
+    // どこかで切れると、クライアントは「編集中…」のまま待ち続けてしまう
+    if (job.status === 'pending') await this.ensureAlarm();
     return {
       status: job.status,
       url: job.url ?? null,
@@ -787,6 +801,14 @@ export class SyncState extends DurableObject {
   // 1 ジョブを進める。Modal が 303（処理継続中）を返したらポーリング URL を保存して
   // pending のまま戻り、次の alarm で続きを確認する
   async runKrea2Job(key, job) {
+    // いつまでも「編集中…」のままにしない。打ち切った理由も添える
+    if (Date.now() - job.created > JOB_MAX_RUN_MS) {
+      job.status = 'error';
+      job.error = `${Math.round(JOB_MAX_RUN_MS / 60000)} 分以内に完了しませんでした`
+        + `（Modal ダッシュボードで状態を確認してください${job.lastError ? `。最後のエラー: ${job.lastError}` : ''}）`;
+      await this.ctx.storage.put(key, job);
+      return;
+    }
     try {
       let res;
       if (job.pollUrl) {
@@ -815,6 +837,11 @@ export class SyncState extends DurableObject {
           redirect: 'manual',
         });
       }
+
+      // 202 は「まだ実行中」。Modal は結果 URL のポーリングに対して、関数が
+      // 終わるまで 202 を返す。res.ok は 202 でも true なので、ここで分けないと
+      // 空の本文を画像として保存し、壊れた結果を done にしてしまう
+      if (res.status === 202) return; // pending のまま次の alarm で確認する
 
       if (res.status >= 300 && res.status < 400) {
         const loc = res.headers.get('Location');
@@ -852,7 +879,17 @@ export class SyncState extends DurableObject {
         seed: seed ?? job.payload.seed ?? null,
         created: new Date(job.created).toISOString(),
       };
-      const png = embedPngMetadata(await res.arrayBuffer(), JSON.stringify(meta));
+      const body = await res.arrayBuffer();
+      // 画像以外が返ったら、そのまま保存して「完了」にしない（表示できない
+      // 結果が履歴に残るより、理由の分かるエラーで止めたほうがいい）
+      if (!looksLikePng(body)) {
+        job.status = 'error';
+        job.error = `Modal から画像が返りませんでした（${res.status} `
+          + `${res.headers.get('Content-Type') || 'Content-Type 不明'}・${body.byteLength} バイト）`;
+        await this.ctx.storage.put(key, job);
+        return;
+      }
+      const png = embedPngMetadata(body, JSON.stringify(meta));
       const imageId = randomId();
       await this.env.IMAGES.put(`${imageId}.png`, png, {
         httpMetadata: { contentType: 'image/png' },
@@ -864,9 +901,16 @@ export class SyncState extends DurableObject {
       if (Number.isFinite(height) && height > 0) job.height = height;
       job.elapsedMs = job.submittedAt ? Date.now() - job.submittedAt : null;
       await this.ctx.storage.put(key, job);
-    } catch {
+    } catch (err) {
       // ネットワーク断など。pending のまま次の alarm で再試行する
-      //（送信済みで pollUrl 未取得の場合は attempts 上限で打ち切られる）
+      //（送信済みで pollUrl 未取得の場合は attempts 上限で打ち切られる）。
+      // 何度も続くときのために、最後の理由だけ控えて上限到達時の文言に載せる
+      job.lastError = String(err?.message ?? err).slice(0, 200);
+      try {
+        await this.ctx.storage.put(key, job);
+      } catch {
+        // 控えられなくても再試行は続く
+      }
     }
   }
 
