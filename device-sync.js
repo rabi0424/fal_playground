@@ -49,14 +49,14 @@ function isHtmlResponse(res) {
 
 function loadTs() {
   try {
-    return JSON.parse(localStorage.getItem(LS_SYNC_TS)) || {};
+    return JSON.parse(falStore.get(LS_SYNC_TS)) || {};
   } catch {
     return {};
   }
 }
 
 function saveTs(ts) {
-  localStorage.setItem(LS_SYNC_TS, JSON.stringify(ts));
+  falStore.set(LS_SYNC_TS, JSON.stringify(ts));
 }
 
 function request(method, body) {
@@ -85,8 +85,8 @@ async function pull() {
     const remote = doc?.[section];
     const localTs = ts[section] || 0;
     if (remote && remote.ts > localTs) {
-      if (remote.value) localStorage.setItem(lsKey, remote.value);
-      else localStorage.removeItem(lsKey);
+      if (remote.value) falStore.set(lsKey, remote.value);
+      else falStore.remove(lsKey);
       ts[section] = remote.ts;
       changed = true;
     } else if (localTs > (remote?.ts ?? 0)) {
@@ -108,7 +108,7 @@ async function push() {
   const ts = loadTs();
   const doc = {};
   for (const [section, lsKey] of Object.entries(SECTIONS)) {
-    doc[section] = { value: localStorage.getItem(lsKey) ?? '', ts: ts[section] || 0 };
+    doc[section] = { value: falStore.get(lsKey) ?? '', ts: ts[section] || 0 };
   }
   try {
     await request('PUT', JSON.stringify(doc));

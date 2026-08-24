@@ -162,14 +162,15 @@ let arena = loadArena();
 
 function loadArena() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(LS_ARENA));
+    const parsed = JSON.parse(falStore.get(LS_ARENA));
     if (parsed && Array.isArray(parsed.sessions)) return parsed;
   } catch { /* 壊れていたら初期化 */ }
   return { sessions: [] };
 }
 
 function saveArena() {
-  localStorage.setItem(LS_ARENA, JSON.stringify(arena));
+  // 対戦結果は端末間同期にも載るので、書けなくてもここでは止めない
+  falStore.set(LS_ARENA, JSON.stringify(arena));
   deviceSync.markDirty('arena');
 }
 

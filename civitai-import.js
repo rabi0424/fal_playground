@@ -129,7 +129,7 @@ function civitaiSetError(text) {
 function civitaiActiveJob() {
   let active = null;
   try {
-    active = JSON.parse(localStorage.getItem(LS_CIVITAI_JOB));
+    active = JSON.parse(falStore.get(LS_CIVITAI_JOB));
   } catch {
     active = null;
   }
@@ -138,7 +138,7 @@ function civitaiActiveJob() {
   // 取り込みボタンが永久に押せないままになるのを防ぐ
   const ts = Number(active.ts);
   if (!Number.isFinite(ts) || Date.now() - ts > CIVITAI_JOB_MAX_AGE_MS) {
-    localStorage.removeItem(LS_CIVITAI_JOB);
+    falStore.remove(LS_CIVITAI_JOB);
     return null;
   }
   return active;
@@ -370,7 +370,7 @@ async function civitaiStartImport() {
     civitaiSyncStartBtn();
     return;
   }
-  localStorage.setItem(LS_CIVITAI_JOB, JSON.stringify({
+  falStore.set(LS_CIVITAI_JOB, JSON.stringify({
     jobId, ts: Date.now(), kind: civitaiMode, meta: civitaiEntryMeta(civitaiResolved),
   }));
   civitaiPollJob();
@@ -379,7 +379,7 @@ async function civitaiStartImport() {
 // 取り込みの中止。サーバー側のジョブも止めてから記録を捨てる
 async function civitaiCancelImport() {
   const active = civitaiActiveJob();
-  localStorage.removeItem(LS_CIVITAI_JOB); // 先に消してポーリングを止める
+  falStore.remove(LS_CIVITAI_JOB); // 先に消してポーリングを止める
   civitaiSetStatus('取り込みを中止しました', true);
   civitaiSetProgress(null, null);
   civitaiSyncStartBtn();
@@ -416,7 +416,7 @@ async function civitaiPollJob() {
       }
       if (res.status === 404) {
         // ジョブ保持期間（1 時間）切れなど。結果は分からないので静かに諦める
-        localStorage.removeItem(LS_CIVITAI_JOB);
+        falStore.remove(LS_CIVITAI_JOB);
         civitaiSetStatus('');
         civitaiSetProgress(null, null);
         break;
@@ -427,7 +427,7 @@ async function civitaiPollJob() {
       }
       const job = await res.json();
       if (job.status === 'done') {
-        localStorage.removeItem(LS_CIVITAI_JOB);
+        falStore.remove(LS_CIVITAI_JOB);
         civitaiSetProgress(null, null);
         const registered = civitaiRegisterTo(active.kind === 'ckpt' ? 'ckpt' : 'lora', job.hfUrl, active.meta);
         civitaiSetStatus(job.skipped
@@ -436,7 +436,7 @@ async function civitaiPollJob() {
         break;
       }
       if (job.status === 'error') {
-        localStorage.removeItem(LS_CIVITAI_JOB);
+        falStore.remove(LS_CIVITAI_JOB);
         civitaiSetStatus('');
         civitaiSetProgress(null, null);
         civitaiSetError(job.error || '取り込みに失敗しました');

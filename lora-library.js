@@ -24,14 +24,19 @@ let onChange = null;
 
 function load() {
   try {
-    return JSON.parse(localStorage.getItem(LS_LORAS)) || [];
+    return JSON.parse(falStore.get(LS_LORAS)) || [];
   } catch {
     return [];
   }
 }
 
-function save(items) {
-  localStorage.setItem(LS_LORAS, JSON.stringify(items));
+// 利用者が起こした登録・削除は、書けなかったことを黙って飲み込まない
+// （消えたと気づけないまま使い続けることになる）。
+// 自動移行のように諦めてよい書き込みだけ quiet で通す
+function save(items, { quiet = false } = {}) {
+  const json = JSON.stringify(items);
+  if (quiet) falStore.set(LS_LORAS, json);
+  else falStore.setOrThrow(LS_LORAS, json);
   onChange?.();
 }
 
@@ -157,17 +162,17 @@ function migrate() {
   // 一度だけ印を付ける（あとからライブラリ画面で直せる）。
   // 空のときは印を付けない。別端末から同期でデータが流れてくる前に印だけ消費すると、
   // 届いた LoRA がベースモデル無しのまま候補から消えてしまう
-  if (items.length > 0 && !localStorage.getItem(LS_BASE_MIGRATED)) {
+  if (items.length > 0 && !falStore.get(LS_BASE_MIGRATED)) {
     for (const item of items) {
       if (!item.base) {
         item.base = 'Krea 2';
         changed = true;
       }
     }
-    localStorage.setItem(LS_BASE_MIGRATED, String(Date.now()));
+    falStore.set(LS_BASE_MIGRATED, String(Date.now()));
   }
 
-  if (changed) save(items);
+  if (changed) save(items, { quiet: true }); // 移行は起動時に走る。ここで止めない
 }
 
 window.loraLib = {

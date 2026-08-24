@@ -161,6 +161,7 @@ const els = {
   sourceInfo: $('#sourceInfo'),
   clearSourceBtn: $('#clearSourceBtn'),
   maskCanvas: $('#maskCanvas'),
+  maskCursor: $('#maskCursor'),
   maskToggle: $('#maskToggle'),
   maskModeHint: $('#maskModeHint'),
   alignToggle: $('#alignToggle'),
@@ -207,6 +208,9 @@ const els = {
   resultImages: $('#resultImages'),
   gallery: $('#gallery'),
   galleryEmpty: $('#galleryEmpty'),
+  lightbox: $('#lightbox'),
+  lightboxClose: $('#lightboxClose'),
+  lightboxCounter: $('#lightboxCounter'),
   historyDialog: $('#historyDialog'),
   historyPicker: $('#historyPicker'),
   historyEmpty: $('#historyEmpty'),
@@ -673,17 +677,42 @@ function loadImageForCanvas(src) {
   return isSameOrigin(src) ? loadImageEl(src) : loadImageEl(src, 'anonymous');
 }
 
+// data URI の中身のおおよそのバイト数（base64 は 4 文字で 3 バイト）
+function dataUriBytes(uri) {
+  const at = uri.indexOf(',');
+  return at < 0 ? 0 : Math.floor((uri.length - at - 1) * 3 / 4);
+}
+
+// JSON を POST する。大きな本文は端末や回線によって一度で通らないことがあり、
+// Safari では fetch そのものが落ちて "Load failed" だけが返ってくる。
+// 一度だけ間を置いて送り直し、それでも駄目なら何が起きたか分かる文言にする
+async function postJson(path, body, { retries = 1 } = {}) {
+  const payload = JSON.stringify(body);
+  let last = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) await sleep(800);
+    try {
+      return await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+      });
+    } catch (err) {
+      last = err; // 通信そのものが失敗（オフライン・接続断・本文が大きすぎる）
+    }
+  }
+  const mb = (payload.length / 1024 / 1024).toFixed(1);
+  throw new Error(`サーバーに送れませんでした（送信 ${mb}MB・${last?.message || '通信エラー'}）`);
+}
+
 // 別サイトにある画像を R2 へ取り込んで、同一オリジンの URL にして返す。
 // プロバイダによっては履歴保存時の取り込み対象から外れて外部 URL のまま残り、
 // そのままでは合成できないうえ、CDN の URL が失効すると開き直せなくなる
 async function captureImage(url) {
   if (isSameOrigin(url)) return url;
-  const res = await fetch('/api/capture', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url }),
-  });
-  if (!res.ok || isHtmlResponse(res)) return url; // 取り込めなければ元の URL のまま試す
+  // 取り込めなければ元の URL のまま試す（別オリジンでも CORS が通れば読める）
+  const res = await postJson('/api/capture', { url }).catch(() => null);
+  if (!res || !res.ok || isHtmlResponse(res)) return url;
   return (await res.json()).url;
 }
 
@@ -780,12 +809,12 @@ function storedImageUrl(src) {
 // replace に既存の /api/image/... を渡すと、新しく作らずその画像を差し替える
 // （マスクの塗り直しのたびに合成画像が増えて置き去りになるのを防ぐ）
 async function uploadDataUri(dataUri, meta, replace = null) {
-  const res = await fetch('/api/upload', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ image: dataUri, meta, ...(replace ? { replace } : {}) }),
-  });
-  if (!res.ok || isHtmlResponse(res)) throw new Error('画像の保存に失敗しました');
+  const res = await postJson('/api/upload', { image: dataUri, meta, ...(replace ? { replace } : {}) });
+  if (isHtmlResponse(res)) throw new Error('画像の保存に失敗しました（ログインし直してください）');
+  if (!res.ok) {
+    const mb = (dataUriBytes(dataUri) / 1024 / 1024).toFixed(1);
+    throw new Error(`画像の保存に失敗しました（${mb}MB・HTTP ${res.status}）`);
+  }
   return (await res.json()).url;
 }
 
@@ -936,6 +965,7 @@ function syncMaskUi() {
   const on = maskOn() && !!source;
   els.maskTools.hidden = !on;
   els.maskCanvas.hidden = !on;
+  els.maskCursor.hidden = !on;
   els.sourcePreview.classList.toggle('masking', on);
   els.maskSizeVal.textContent = `${els.maskSize.value}`;
   els.maskFeatherVal.textContent = els.maskFeather.value === '0'
@@ -1113,10 +1143,15 @@ function boostMaskAlpha(src) {
 //
 // grow は輪郭を外へ広げる px 数（モデルへ渡すマスク用）。塗り足す側は太く、
 // 消しゴム側は細くすることで、出来上がりの形だけを膨らませる
-function rasterizeMask(w, h, strokes = mask.strokes, feather = mask.feather, grow = 0) {
+//
+// box を渡すと w×h の中のその矩形ぶんだけを描く（輪郭線の計算を塗った周りに
+// 絞るため）。ぼかしは矩形の外を透明として混ぜてしまうので、feather が 0 の
+// ときにだけ使うこと
+function rasterizeMask(w, h, strokes = mask.strokes, feather = mask.feather, grow = 0, box = null) {
   const long = Math.max(w, h);
-  const c = makeCanvas(w, h);
+  const c = makeCanvas(box ? box.width : w, box ? box.height : h);
   const ctx = c.getContext('2d');
+  if (box) ctx.translate(-box.x, -box.y);
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.strokeStyle = '#fff';
@@ -1293,9 +1328,81 @@ function drawExtended(ctx, src, inner, outer) {
   if (right > 0 && bottom > 0) ctx.drawImage(src, sw - 1, sh - 1, 1, 1, x + w, y + h, right, bottom);
 }
 
-// 入力画像の上に重ねる表示。差し替わる側を明るいまま残し、外側を暗くする
-//（部分AI編集の選択範囲と同じ見せ方）。ぼかしはそのまま濃淡として出るので、
-// どのくらい滑らかに混ざるかが塗りながら分かる
+/* ---------- 重ね描き（塗っている範囲の見せ方） ---------- */
+//
+// 外側を暗くし、塗った側は元の絵が見えるまま薄く色を乗せる。そのうえで
+// 「完全に差し替わる範囲（＝アルファ 100%）」の境目に実線を引く。
+// ぼかしを強くすると veil の濃淡だけではどこからが 100% なのか分からず、
+// 塗ったつもりの縁に元画像が残る原因になっていた
+
+const MASK_VEIL = 0.55; // 外側を暗くする濃さ
+const MASK_TINT = 0.18; // 塗った側に乗せるアクセントの濃さ（薄いほど元の絵が見える）
+const OUTLINE_PX = 1.5; // 100% の輪郭線の太さ（CSS px）
+const OUTLINE_HALO_PX = 3.5; // 明るい画像でも見えるよう、その外側に敷く暗い縁取り
+const FEATHER_LINE_PX = 1; // ぼかしが届く先を示す細線
+// ぼかしはガウス（σ = ぼかし半径）なので、輪郭から 1.4σ 付近でほぼ 0 になる
+const FEATHER_REACH = 1.4;
+
+// shape を d px ぶん外へ広げた形。8 方向へずらして重ねた和で近似する。
+// getImageData を使わないので、塗っている間に毎フレーム呼んでも重くならない
+function dilateShape(shape, d) {
+  const out = makeCanvas(shape.width, shape.height);
+  const ctx = out.getContext('2d');
+  const r = d * Math.SQRT1_2;
+  for (const [dx, dy] of [[d, 0], [-d, 0], [0, d], [0, -d],
+    [r, r], [r, -r], [-r, r], [-r, -r]]) {
+    ctx.drawImage(shape, dx, dy);
+  }
+  return out;
+}
+
+// shape の輪郭のすぐ外側に残る幅 d px の帯（＝輪郭線）を color で描く。
+// 広げた形から元の形を抜くと、ちょうど輪郭に沿った帯になる。
+// shape は box の大きさで渡し、box の位置へ戻して重ねる
+function strokeOutline(ctx, shape, box, d, color, alpha) {
+  const ring = dilateShape(shape, d);
+  const rctx = ring.getContext('2d');
+  rctx.globalCompositeOperation = 'destination-out';
+  rctx.drawImage(shape, 0, 0);
+  // source-in はアルファを掛け合わせるので、帯の形のまま色だけが変わる
+  rctx.globalCompositeOperation = 'source-in';
+  rctx.fillStyle = color;
+  rctx.fillRect(0, 0, ring.width, ring.height);
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(ring, box.x, box.y);
+  ctx.globalAlpha = 1;
+}
+
+// 輪郭線が出るのは塗った範囲の周りだけ。その外接矩形を先に出しておけば、
+// 画像全体を何度も広げ直さずに済む（大きな画像でも塗り心地が落ちない）
+function outlineBox(strokes, w, h, padPx) {
+  const long = Math.max(w, h);
+  let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity;
+  for (const stroke of strokes) {
+    if (stroke.rect) { // 「全面」は画像いっぱい
+      minX = 0; minY = 0; maxX = w; maxY = h;
+      continue;
+    }
+    const r = stroke.r * long + padPx;
+    for (const [x, y] of stroke.pts) {
+      minX = Math.min(minX, x * w - r);
+      maxX = Math.max(maxX, x * w + r);
+      minY = Math.min(minY, y * h - r);
+      maxY = Math.max(maxY, y * h + r);
+    }
+  }
+  if (!Number.isFinite(minX)) return null;
+  const x = Math.max(0, Math.floor(minX));
+  const y = Math.max(0, Math.floor(minY));
+  const box = {
+    x,
+    y,
+    width: Math.min(w, Math.ceil(maxX)) - x,
+    height: Math.min(h, Math.ceil(maxY)) - y,
+  };
+  return box.width > 0 && box.height > 0 ? box : null;
+}
+
 function drawMaskOverlay() {
   const img = els.sourceImg;
   const box = img.getBoundingClientRect();
@@ -1303,10 +1410,13 @@ function drawMaskOverlay() {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   const w = Math.round(box.width * dpr);
   const h = Math.round(box.height * dpr);
-  if (els.maskCanvas.width !== w || els.maskCanvas.height !== h) {
-    els.maskCanvas.width = w;
-    els.maskCanvas.height = h;
+  for (const canvas of [els.maskCanvas, els.maskCursor]) {
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
   }
+  drawMaskCursor(); // 大きさが変わっていれば下見の円も描き直す
   const ctx = els.maskCanvas.getContext('2d');
   ctx.globalCompositeOperation = 'source-over';
   ctx.globalAlpha = 1;
@@ -1317,7 +1427,7 @@ function drawMaskOverlay() {
   const shape = rasterizeMask(w, h, strokes, mask.feather);
 
   // 外側を暗くする（塗った側だけが元の明るさで残る）
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+  ctx.fillStyle = `rgba(0, 0, 0, ${MASK_VEIL})`;
   ctx.fillRect(0, 0, w, h);
   ctx.globalCompositeOperation = 'destination-out';
   ctx.drawImage(shape, 0, 0);
@@ -1331,9 +1441,59 @@ function drawMaskOverlay() {
     .getPropertyValue('--accent').trim() || '#2563eb';
   tctx.fillRect(0, 0, w, h);
   ctx.globalCompositeOperation = 'source-over';
-  ctx.globalAlpha = 0.28;
+  ctx.globalAlpha = MASK_TINT;
   ctx.drawImage(tint, 0, 0);
   ctx.globalAlpha = 1;
+
+  // ぼかしが届く先（うっすら混ざる範囲の外側）。ぼかし無しのときは出さない。
+  // rasterizeMask の grow は塗りを外へ・消しゴムを内へ広げるので、
+  // ぼかし半径ぶん広げた形がそのまま「にじみの先」の目安になる
+  const long = Math.max(w, h);
+  const reachPx = mask.feather * long * FEATHER_REACH;
+  const outline = outlineBox(strokes, w, h, reachPx + (OUTLINE_HALO_PX + FEATHER_LINE_PX) * dpr);
+  if (!outline) return;
+  if (reachPx >= 2 * dpr) {
+    const reach = rasterizeMask(w, h, strokes, 0, reachPx, outline);
+    strokeOutline(ctx, reach, outline, FEATHER_LINE_PX * dpr, '#fff', 0.35);
+  }
+
+  // 100% の輪郭。ぼかしても、塗った形そのものが 100% の境目になる
+  //（rasterizeMask がぼかした後にアルファを 2 倍するので、輪郭上が 255 になり、
+  //  内側は振り切る。ぼけ足は輪郭の外側にだけ残る）
+  const solid = rasterizeMask(w, h, strokes, 0, 0, outline);
+  strokeOutline(ctx, solid, outline, OUTLINE_HALO_PX * dpr, '#000', 0.45);
+  strokeOutline(ctx, solid, outline, OUTLINE_PX * dpr, '#fff', 0.95);
+}
+
+/* ---------- ブラシの下見 ---------- */
+//
+// どのくらいの太さで塗られるかが、置く前に分かるようにする。マスク本体とは
+// 別の canvas に描いて、カーソルを動かしただけでマスクを描き直さないようにする
+
+let maskCursor = null; // 画像内の位置（0..1）。画像の外にいる間は null
+
+function drawMaskCursor() {
+  const canvas = els.maskCursor;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!maskCursor || !maskOn() || !source) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const long = Math.max(canvas.width, canvas.height);
+  const r = Math.max(2, maskSizeRatio() * long);
+  const x = maskCursor[0] * canvas.width;
+  const y = maskCursor[1] * canvas.height;
+  const line = 1.5 * dpr;
+  ctx.lineWidth = line;
+  // 消しゴムは破線にして、塗りと取り違えないようにする
+  ctx.setLineDash(maskTool === 'erase' ? [5 * dpr, 4 * dpr] : []);
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.beginPath();
+  ctx.arc(x, y, r + line, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.stroke();
 }
 
 /* ---------- 塗る操作 ---------- */
@@ -1350,23 +1510,44 @@ function onMaskDown(e) {
   if (!maskOn() || !source) return;
   e.preventDefault();
   els.maskCanvas.setPointerCapture(e.pointerId);
-  maskStroke = { mode: maskTool, r: maskSizeRatio(), pts: [maskPoint(e)] };
+  maskCursor = maskPoint(e); // タップで置いたときも、下見の円を同じ場所に出す
+  maskStroke = { mode: maskTool, r: maskSizeRatio(), pts: [maskCursor] };
   drawMaskOverlay();
 }
 
 function onMaskMove(e) {
-  if (!maskStroke) return;
+  maskCursor = maskPoint(e);
+  if (!maskStroke) {
+    // 塗っていないときは下見の円だけを描き直す（マスクは作り直さない）
+    drawMaskCursor();
+    return;
+  }
   e.preventDefault();
-  const p = maskPoint(e);
   const last = maskStroke.pts.at(-1);
   // 細かすぎる点は捨てる（保存が膨らむだけで見た目は変わらない）
-  if (Math.hypot(p[0] - last[0], p[1] - last[1]) < 0.004) return;
-  maskStroke.pts.push(p);
+  if (Math.hypot(maskCursor[0] - last[0], maskCursor[1] - last[1]) < 0.004) {
+    drawMaskCursor();
+    return;
+  }
+  maskStroke.pts.push(maskCursor);
   drawMaskOverlay();
 }
 
+// 画像から出たら下見の円を消す（残っていると、そこに置けるように見える）
+function onMaskLeave() {
+  maskCursor = null;
+  drawMaskCursor();
+}
+
+// 塗りは下書き（localStorage）と履歴レコードにそのまま載る。座標を丸めずに
+// 持つと 1 本で数十 KB になり、保存領域を食い潰して「生成中のジョブの控えが
+// 書けない」といった巻き添えを起こす。長辺 2048px でも 0.2px の差なので、
+// 4 桁に丸めても塗った形は変わらない
+const roundPoint = ([x, y]) => [Math.round(x * 1e4) / 1e4, Math.round(y * 1e4) / 1e4];
+
 function onMaskUp() {
   if (!maskStroke) return;
+  maskStroke.pts = maskStroke.pts.map(roundPoint);
   mask.strokes.push(maskStroke);
   maskStroke = null;
   commitMaskChange();
@@ -1722,12 +1903,35 @@ function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = n
   return out;
 }
 
+// 合成画像を data URI にするときの目安。合成は入力と同じ解像度で行うので、
+// そのまま PNG にすると 4000px 級の写真で 30〜45MB になる。Worker の受け取り
+// 上限（40MB）を超えるうえ、その大きさの POST は端末によっては通らない
+//（Safari は fetch ごと落ちて "Load failed" になる）。同じ絵を img.src に
+// 置くだけでもメモリを食うので、表示にも同じ上限をかける
+const COMPOSITE_MAX_BYTES = 12 * 1024 * 1024;
+
+// 上限に収まる形式で書き出す。可逆の PNG を第一候補にし、収まらないときだけ
+// 落としていく（写真は PNG が極端に大きく、WebP / JPEG なら 5 分の 1 以下になる）
+function encodeWithin(canvas, limit = COMPOSITE_MAX_BYTES) {
+  const png = canvas.toDataURL('image/png');
+  if (dataUriBytes(png) <= limit) return png;
+  let best = png;
+  for (const [mime, quality] of [['image/webp', 0.95], ['image/jpeg', 0.95], ['image/jpeg', 0.85]]) {
+    const uri = canvas.toDataURL(mime, quality);
+    // 対応していない形式を渡すと PNG が返る（Safari 17 より前の WebP など）
+    if (!uri.startsWith(`data:${mime}`)) continue;
+    if (dataUriBytes(uri) <= limit) return uri;
+    if (dataUriBytes(uri) < dataUriBytes(best)) best = uri;
+  }
+  return best; // 上限に届かなくても、いちばん小さいもので送る
+}
+
 // URL から合成した data URI を作る。画像は同一オリジン（R2）である必要がある
 // （別ドメインのままだと canvas が汚染されて取り出せない）
 // offset に 'auto' を渡すと、その場でずれを測る。測った結果も返すので、
 // 塗り直しのたびに測り直さずに済む
 async function compositeFromUrls(baseUrl, editedUrl, maskData, crop = null, offset = null,
-  { mime = 'image/png', colorMatch = false } = {}) {
+  { colorMatch = false } = {}) {
   const [baseImg, editedImg] = await Promise.all([
     loadImageForCanvas(baseUrl), loadImageForCanvas(editedUrl),
   ]);
@@ -1735,7 +1939,7 @@ async function compositeFromUrls(baseUrl, editedUrl, maskData, crop = null, offs
   const canvas = compositeWithMask(baseImg, editedImg, maskData, crop, shift, colorMatch);
   try {
     return {
-      dataUri: canvas.toDataURL(mime, 0.95),
+      dataUri: encodeWithin(canvas),
       width: canvas.width,
       height: canvas.height,
       offset: shift,
@@ -1785,35 +1989,148 @@ function recordThumb(record) {
 // この画面で作ったレコードだけを下部のギャラリーに並べる
 function renderGallery() {
   const mine = historyItems.filter((r) => r.type === 'imgedit');
+  closeThumbMenu(); // 並べ直すと、開いていたメニューの DOM ごと消える
   els.gallery.innerHTML = '';
   els.galleryEmpty.hidden = mine.length > 0;
   for (const record of mine.slice(0, 24)) {
-    const item = document.createElement('figure');
-    item.className = 'ie-gallery-item';
-
-    const img = document.createElement('img');
-    img.loading = 'lazy';
-    img.alt = record.prompt || '編集結果';
-    img.src = recordThumb(record);
-    img.addEventListener('click', () => setSourceFromSrc(img.src, 'history'));
-    item.appendChild(img);
-
-    const cap = document.createElement('figcaption');
-    cap.textContent = record.prompt || '';
-    item.appendChild(cap);
-
-    // マスクで合成したものは、あとからでも範囲を変えられる
-    if (record.masked) {
-      const adjust = document.createElement('button');
-      adjust.type = 'button';
-      adjust.className = 'ghost-btn small ie-gallery-adjust';
-      adjust.textContent = 'マスクを調整';
-      adjust.addEventListener('click', () => reopenMaskedResult(record));
-      item.appendChild(adjust);
-    }
-
-    els.gallery.appendChild(item);
+    els.gallery.appendChild(galleryItem(record));
   }
+}
+
+// サムネイル 1 枚ぶん。押すと拡大表示、右上の ⋯ から入力画像への転用を選ぶ。
+// 押しただけで入力画像が入れ替わると、見比べたいだけのときに戻せなくなる
+function galleryItem(record) {
+  const item = document.createElement('figure');
+  item.className = 'ie-gallery-item';
+
+  const thumb = document.createElement('div');
+  thumb.className = 'ie-thumb';
+
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'ie-thumb-open';
+  open.title = '拡大して見る';
+  const img = document.createElement('img');
+  img.loading = 'lazy';
+  img.alt = record.prompt || '編集結果';
+  img.src = recordThumb(record);
+  open.appendChild(img);
+  open.addEventListener('click', () => openRecordLightbox(record));
+  thumb.appendChild(open);
+
+  const actions = [
+    { label: '入力画像にする', run: () => setSourceFromSrc(recordThumb(record), 'history') },
+  ];
+  // マスクで合成したものは、あとからでも範囲を変えられる
+  if (record.masked) {
+    actions.push({ label: 'マスクを調整', run: () => reopenMaskedResult(record) });
+  }
+  thumb.appendChild(thumbMenu(actions));
+  item.appendChild(thumb);
+
+  const cap = document.createElement('figcaption');
+  cap.textContent = record.prompt || '';
+  item.appendChild(cap);
+  return item;
+}
+
+/* ---------- サムネイルの ⋯ メニュー ---------- */
+
+let openMenu = null; // 開いているメニュー。同時に開くのは 1 つだけ
+
+function closeThumbMenu() {
+  openMenu?.classList.remove('open');
+  openMenu?.querySelector('.ie-thumb-more')?.setAttribute('aria-expanded', 'false');
+  openMenu = null;
+}
+
+function thumbMenu(actions) {
+  const wrap = document.createElement('div');
+  wrap.className = 'ie-thumb-menu';
+
+  const list = document.createElement('div');
+  list.className = 'ie-menu';
+  list.setAttribute('role', 'menu');
+  for (const { label, run } of actions) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.setAttribute('role', 'menuitem');
+    btn.textContent = label;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeThumbMenu();
+      run();
+    });
+    list.appendChild(btn);
+  }
+
+  const more = document.createElement('button');
+  more.type = 'button';
+  more.className = 'ie-thumb-more';
+  more.textContent = '⋯';
+  more.title = 'この画像の操作';
+  more.setAttribute('aria-label', 'この画像の操作');
+  more.setAttribute('aria-haspopup', 'menu');
+  more.setAttribute('aria-expanded', 'false');
+  more.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const wasOpen = openMenu === wrap;
+    closeThumbMenu();
+    if (wasOpen) return;
+    wrap.classList.add('open');
+    more.setAttribute('aria-expanded', 'true');
+    openMenu = wrap;
+    // メニューはサムネイルより広いので、左端の列では画面からはみ出す。
+    // その場合だけ右寄せをやめて、サムネイルの左端から開く
+    list.style.left = '';
+    list.style.right = '';
+    if (list.getBoundingClientRect().left < 8) {
+      list.style.left = '0';
+      list.style.right = 'auto';
+    }
+  });
+
+  wrap.append(more, list);
+  return wrap;
+}
+
+/* ---------- 拡大表示 ---------- */
+
+let lightboxItems = []; // [{ url, label }]
+let lightboxIndex = 0;
+
+// 1 レコードぶんを「合成結果 → 生成結果そのまま → 入力画像」の順で見せる
+function openRecordLightbox(record) {
+  lightboxItems = resultRoles(record)
+    .filter(({ img }) => img?.url)
+    .map(({ img, role, index }) => ({
+      url: img.url,
+      label: ROLE_LABELS[role](index, record.masked),
+    }));
+  if (lightboxItems.length === 0) return;
+  lightboxIndex = 0;
+  showLightboxImage();
+  els.lightbox.hidden = false;
+}
+
+function showLightboxImage() {
+  const item = lightboxItems[lightboxIndex];
+  els.lightbox.querySelector('img').src = item?.url ?? '';
+  els.lightboxCounter.hidden = !item;
+  els.lightboxCounter.textContent = lightboxItems.length > 1
+    ? `${item.label} ・ ${lightboxIndex + 1} / ${lightboxItems.length}`
+    : (item?.label ?? '');
+}
+
+function lightboxNav(dir) {
+  if (lightboxItems.length < 2) return;
+  lightboxIndex = (lightboxIndex + dir + lightboxItems.length) % lightboxItems.length;
+  showLightboxImage();
+}
+
+function closeLightbox() {
+  els.lightbox.hidden = true;
+  els.lightbox.querySelector('img').src = '';
 }
 
 // 過去の合成結果を開き直して、マスクだけを塗り替えられるようにする。
@@ -2232,7 +2549,9 @@ const PROVIDERS = {
       if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
       const job = await res.json();
       if (job.status === 'error') throw new Error(job.error || '編集に失敗しました');
-      if (job.status !== 'done') return { done: false, text: '編集中…（初回はモデルの読み込みで数分かかります）' };
+      if (job.status !== 'done') {
+        return { done: false, text: '編集中…', note: '初回はモデルの読み込みで数分かかります' };
+      }
       return { done: true, result: job };
     },
 
@@ -2408,14 +2727,16 @@ function queuedCount() {
 }
 
 function saveJobs() {
-  // 行の DOM は持たない。handle と組み立て済みの情報だけを残す
-  localStorage.setItem(LS_JOB, JSON.stringify(activeJobs));
+  // 行の DOM は持たない。handle と組み立て済みの情報だけを残す。
+  // 控えを書けなくても、走っているジョブは落とさない（開き直したときに
+  // 拾えなくなるだけで、このタブでは最後まで受け取れる）
+  falStore.set(LS_JOB, JSON.stringify(activeJobs));
 }
 
 function loadJobs() {
   let saved;
   try {
-    saved = JSON.parse(localStorage.getItem(LS_JOB));
+    saved = JSON.parse(falStore.get(LS_JOB));
   } catch {
     return [];
   }
@@ -2432,6 +2753,35 @@ function dropJob(job) {
 }
 
 /* ---------- 順番待ちの行 ---------- */
+//
+// 1 件 = 1 行。状態・プロンプト・経過秒・取り消しを横に並べ、折り返さない。
+// 長い文言は行の title に逃がし、プロンプトは押したときだけ全文を出す
+
+// 経過秒はポーリング間隔（プロバイダごとに 1〜3 秒）とは独立に 1 秒ごとに
+// 数え直す。止まっていないことが、待っているあいだも分かるようにする
+let elapsedTimer = null;
+
+function elapsedText(job) {
+  const sec = Math.max(0, Math.round((Date.now() - job.startedAt) / 1000));
+  if (sec < 60) return `${sec}s`;
+  return `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s`;
+}
+
+function syncElapsedTimer() {
+  if (jobUI.size > 0 && !elapsedTimer) {
+    elapsedTimer = setInterval(() => {
+      for (const ui of jobUI.values()) ui.elapsed.textContent = elapsedText(ui.job);
+    }, 1000);
+  } else if (jobUI.size === 0 && elapsedTimer) {
+    clearInterval(elapsedTimer);
+    elapsedTimer = null;
+  }
+}
+
+// 省略表示を押したら全文を出す（1 行に収めているぶん、読みたいときのため）
+function makeExpandable(el) {
+  el.addEventListener('click', () => el.classList.toggle('expanded'));
+}
 
 function startJobRow(job) {
   const row = document.createElement('div');
@@ -2439,14 +2789,21 @@ function startJobRow(job) {
 
   const status = document.createElement('div');
   status.className = 'status';
-  status.textContent = 'リクエストを送信中…';
+  status.textContent = '送信中…';
   row.appendChild(status);
 
   const prompt = document.createElement('div');
   prompt.className = 'job-prompt';
   prompt.textContent = job.prompt || '';
   prompt.title = job.prompt || '';
+  makeExpandable(prompt);
   row.appendChild(prompt);
+
+  const elapsed = document.createElement('div');
+  elapsed.className = 'job-elapsed';
+  elapsed.title = '送信してからの経過時間';
+  elapsed.textContent = elapsedText(job);
+  row.appendChild(elapsed);
 
   const x = document.createElement('button');
   x.type = 'button';
@@ -2455,24 +2812,30 @@ function startJobRow(job) {
   x.title = 'この編集の結果を受け取るのをやめます（モデル側の処理は止まりません）';
   x.addEventListener('click', () => {
     cancelledJobs.add(job.id);
-    setJobStatus(job, 'キャンセルしています…');
+    setJobStatus(job, 'キャンセル中…');
   });
   row.appendChild(x);
 
   els.jobList.appendChild(row);
   row.scrollIntoView({ block: 'nearest' });
-  jobUI.set(job.id, { row, status });
+  jobUI.set(job.id, { row, status, elapsed, job });
+  syncElapsedTimer();
   syncRunBtn();
 }
 
-function setJobStatus(job, text) {
+// note は 1 行に収まらない補足。行のツールチップに逃がす
+function setJobStatus(job, text, note = '') {
   const ui = jobUI.get(job.id);
-  if (ui) ui.status.textContent = text;
+  if (!ui) return;
+  ui.status.textContent = text;
+  if (note) ui.row.title = note;
+  else ui.row.removeAttribute('title');
 }
 
 function endJobRow(job) {
   jobUI.get(job.id)?.row.remove();
   jobUI.delete(job.id);
+  syncElapsedTimer();
 }
 
 // 失敗した行はエラー表示に切り替えて、閉じるまで残す
@@ -2483,14 +2846,18 @@ function failJobRow(job, message) {
   const err = document.createElement('div');
   err.className = 'error';
   err.textContent = message;
+  err.title = message;
+  makeExpandable(err);
   ui.row.appendChild(err);
   const x = document.createElement('button');
   x.type = 'button';
   x.className = 'job-x ghost-btn small';
   x.textContent = '✕';
-  x.addEventListener('click', () => endJobRow(job));
+  x.addEventListener('click', () => ui.row.remove());
   ui.row.appendChild(x);
+  ui.row.removeAttribute('title');
   jobUI.delete(job.id);
+  syncElapsedTimer();
 }
 
 async function run() {
@@ -2572,11 +2939,14 @@ async function run() {
     submitting -= 1;
   }
   activeJobs.push(job);
+  // 受け取りを真っ先に始める。この後の控えの保存や再描画で何かあっても、
+  // 送信済みのジョブを取りこぼさない（待ち受けが始まらないと、モデル側が
+  // 終わっていても画面は「編集中…」のまま止まる）。
+  // 完了はここで待たない。待っているあいだも次を送れるようにする
+  track(job);
   setJobStatus(job, '編集中…');
   saveJobs();
   syncRunBtn();
-  // 完了はここで待たない。待っているあいだも次を送れるようにする
-  track(job);
 }
 
 // 1 件ぶんの完了待ち。結果の保存・合成までやって、行を片付ける
@@ -2610,7 +2980,7 @@ async function waitAndFinish(job) {
     await sleep(api.pollMs);
     if (cancelledJobs.has(job.id)) throw new Error('キャンセルしました');
     poll = await api.poll(job.handle);
-    if (!poll.done) setJobStatus(job, poll.text);
+    if (!poll.done) setJobStatus(job, poll.text, poll.note);
   } while (!poll.done);
 
   const { images, seed, flagged, cost } = api.parse(poll.result);
@@ -2645,7 +3015,7 @@ async function waitAndFinish(job) {
   let saved = await saveHistoryRecord(record);
 
   if (job.mask) {
-    setJobStatus(job, 'マスクの内側だけを合成中…');
+    setJobStatus(job, '合成中…', 'マスクの内側だけを元画像に重ねています');
     try {
       saved = await buildMaskedRecord(saved, job.mask, (text) => setJobStatus(job, text));
       saved = await saveHistoryRecord(saved);
@@ -2861,7 +3231,7 @@ function resumeJobs() {
   saveJobs();
   for (const job of saved) {
     startJobRow(job);
-    setJobStatus(job, '前回の編集の結果を確認中…');
+    setJobStatus(job, '結果を確認中…', '前回の編集の結果を確認しています');
     track(job);
   }
 }
@@ -2907,13 +3277,13 @@ function saveForm() {
     maskFeather: els.maskFeather.value,
     mask, // ストロークなので軽い（画像として持つと保存に収まらない）
   };
-  localStorage.setItem(LS_FORM, JSON.stringify(state));
+  falStore.set(LS_FORM, JSON.stringify(state));
 }
 
 async function restoreForm() {
   let s;
   try {
-    s = JSON.parse(localStorage.getItem(LS_FORM));
+    s = JSON.parse(falStore.get(LS_FORM));
   } catch {
     s = null;
   }
@@ -3120,6 +3490,7 @@ for (const btn of els.maskTools.querySelectorAll('.seg-btn')) {
     for (const other of els.maskTools.querySelectorAll('.seg-btn')) {
       other.classList.toggle('active', other === btn);
     }
+    drawMaskCursor();
   });
 }
 
@@ -3135,7 +3506,7 @@ els.colorToggle.addEventListener('change', () => {
 els.maskUndoBtn.addEventListener('click', maskUndo);
 els.maskClearBtn.addEventListener('click', maskClear);
 els.maskAllBtn.addEventListener('click', maskAll);
-els.maskSize.addEventListener('input', syncMaskUi);
+els.maskSize.addEventListener('input', () => { syncMaskUi(); drawMaskCursor(); });
 els.maskFeather.addEventListener('input', () => {
   mask.feather = maskFeatherRatio();
   syncMaskUi();
@@ -3145,6 +3516,7 @@ els.maskFeather.addEventListener('change', commitMaskChange);
 
 els.maskCanvas.addEventListener('pointerdown', onMaskDown);
 els.maskCanvas.addEventListener('pointermove', onMaskMove);
+els.maskCanvas.addEventListener('pointerleave', onMaskLeave);
 for (const type of ['pointerup', 'pointercancel']) {
   els.maskCanvas.addEventListener(type, onMaskUp);
 }
@@ -3154,6 +3526,47 @@ window.addEventListener('resize', () => { if (maskOn()) drawMaskOverlay(); });
 els.sourceImg.addEventListener('load', () => { if (maskOn()) drawMaskOverlay(); });
 
 els.runBtn.addEventListener('click', run);
+
+/* ---------- 拡大表示・サムネイルのメニュー ---------- */
+
+let lightboxTouchX = 0;
+let lightboxTouchY = 0;
+let lightboxSwiped = false;
+
+els.lightbox.addEventListener('click', () => {
+  // スワイプで送った直後は閉じない（指を離した位置で click も飛ぶため）
+  if (lightboxSwiped) { lightboxSwiped = false; return; }
+  closeLightbox();
+});
+els.lightboxClose.addEventListener('click', closeLightbox);
+
+els.lightbox.addEventListener('touchstart', (e) => {
+  lightboxTouchX = e.touches[0].clientX;
+  lightboxTouchY = e.touches[0].clientY;
+}, { passive: true });
+
+els.lightbox.addEventListener('touchend', (e) => {
+  const dx = e.changedTouches[0].clientX - lightboxTouchX;
+  const dy = e.changedTouches[0].clientY - lightboxTouchY;
+  if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
+    lightboxSwiped = true;
+    lightboxNav(dx < 0 ? 1 : -1);
+  }
+}, { passive: true });
+
+// メニューは、どこか別の場所を押したら閉じる
+document.addEventListener('click', closeThumbMenu);
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (!els.lightbox.hidden) { closeLightbox(); return; }
+    closeThumbMenu();
+    return;
+  }
+  if (els.lightbox.hidden) return;
+  if (e.key === 'ArrowRight') lightboxNav(1);
+  if (e.key === 'ArrowLeft') lightboxNav(-1);
+});
 
 for (const name of RUNWARE_SCHEDULERS) {
   const opt = document.createElement('option');

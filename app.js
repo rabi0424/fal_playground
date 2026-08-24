@@ -149,12 +149,27 @@ function loadHistory() {
   return historyCache;
 }
 
+// 表示キャッシュに残す件数。全部入れると localStorage の 5MB に届き、
+// ほかの保存（生成中のジョブの控えなど）まで巻き添えで書けなくなる。
+// 正はサーバーなので、開いた直後にギャラリーを描ける分だけあればいい
+const HISTORY_CACHE_MAX = 60;
+
+// キャッシュ用に軽くしたレコード。マスクのストロークは 1 件で数十 KB になる
+// ことがあり、塗り直しに使うのはサーバー側のレコードなので落とす
+function historyCacheEntry(record) {
+  if (!record.mask) return record;
+  const { mask, ...rest } = record;
+  return rest;
+}
+
+// サーバーから取り直せると分かっているか。移行前（サーバーへ送れていない
+// ローカル履歴しかない）状態で間引くと、その記録が失われる
+let historyIsServerBacked = !!falStore.get(LS_HISTORY_MIGRATED);
+
 function persistHistoryCache() {
-  try {
-    localStorage.setItem(LS_HISTORY, JSON.stringify(historyCache));
-  } catch {
-    // 容量超過などは無視（サーバー側が正なので失っても支障ない）
-  }
+  const keep = historyIsServerBacked ? historyCache.slice(0, HISTORY_CACHE_MAX) : historyCache;
+  // 容量超過などは無視（サーバー側が正なので失っても支障ない）
+  falStore.set(LS_HISTORY, JSON.stringify(keep.map(historyCacheEntry)));
 }
 
 async function fetchHistoryFromServer() {
@@ -170,8 +185,8 @@ async function fetchHistoryFromServer() {
   if (!Array.isArray(server)) return;
 
   // 旧バージョンのローカル履歴が残っていてサーバーが空なら、一度だけ取り込む
-  if (server.length === 0 && historyCache.length > 0 && !localStorage.getItem(LS_HISTORY_MIGRATED)) {
-    localStorage.setItem(LS_HISTORY_MIGRATED, '1');
+  if (server.length === 0 && historyCache.length > 0 && !falStore.get(LS_HISTORY_MIGRATED)) {
+    falStore.set(LS_HISTORY_MIGRATED, '1');
     for (const record of [...historyCache].reverse()) {
       try {
         await fetch('/api/history', {
@@ -199,6 +214,7 @@ async function fetchHistoryFromServer() {
       !server.some((s) => s.id === r.id),
   );
   historyCache = [...keep, ...server];
+  historyIsServerBacked = true; // ここから先は、消してもサーバーから戻せる
   persistHistoryCache();
   renderGallery();
 }
@@ -614,14 +630,15 @@ function collectLoras() {
 
 function loadCkptLibrary() {
   try {
-    return JSON.parse(localStorage.getItem(LS_CKPTS)) || [];
+    return JSON.parse(falStore.get(LS_CKPTS)) || [];
   } catch {
     return [];
   }
 }
 
 function saveCkptLibrary(items) {
-  localStorage.setItem(LS_CKPTS, JSON.stringify(items));
+  // 登録は失うと困るので、書けなかったことは黙って飲み込まない
+  falStore.setOrThrow(LS_CKPTS, JSON.stringify(items));
   deviceSync.markDirty('ckpts');
 }
 
@@ -1193,13 +1210,13 @@ async function falFetch(url, options = {}) {
 let activeJobs = [];
 
 function persistActiveJobs() {
-  if (activeJobs.length === 0) localStorage.removeItem(LS_JOB);
-  else localStorage.setItem(LS_JOB, JSON.stringify(activeJobs));
+  if (activeJobs.length === 0) falStore.remove(LS_JOB);
+  else falStore.set(LS_JOB, JSON.stringify(activeJobs));
 }
 
 function loadActiveJobs() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(LS_JOB));
+    const parsed = JSON.parse(falStore.get(LS_JOB));
     if (Array.isArray(parsed)) return parsed;
     if (parsed && parsed.kind) return [parsed]; // 旧形式（単一ジョブ）からの移行
     return [];
@@ -2115,12 +2132,12 @@ function saveFormState() {
     variants: [...els.variantList.querySelectorAll('.variant')]
       .map((b) => serializeLoraList(b.querySelector('.variant-lora-list'))),
   };
-  localStorage.setItem(LS_FORM, JSON.stringify(state));
+  falStore.set(LS_FORM, JSON.stringify(state));
 }
 
 function restoreFormState() {
   let s;
-  try { s = JSON.parse(localStorage.getItem(LS_FORM)); } catch { s = null; }
+  try { s = JSON.parse(falStore.get(LS_FORM)); } catch { s = null; }
   if (!s) return;
 
   if (s.model) els.modelSelect.value = s.model;
@@ -2200,7 +2217,7 @@ restoreFormState();
 
 // 履歴: まずローカルキャッシュで即描画し、サーバーの内容で置き換える
 try {
-  historyCache = JSON.parse(localStorage.getItem(LS_HISTORY)) || [];
+  historyCache = JSON.parse(falStore.get(LS_HISTORY)) || [];
 } catch {
   historyCache = [];
 }
