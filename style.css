@@ -1101,6 +1101,12 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
   padding: 2px;
 }
 
+/* 分割描画の番人（gallery-pager.js）。グリッドの 1 マスを食わないよう全幅 1px */
+.gallery-sentinel {
+  grid-column: 1 / -1;
+  height: 1px;
+}
+
 .gallery-item {
   position: relative;
   border: 1px solid var(--border);

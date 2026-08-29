@@ -469,6 +469,19 @@ function recordImageLists(record) {
   return [{ images: record?.images ?? [], loras: record?.loras ?? null }];
 }
 
+// 一覧で返すときに落とすフィールド。
+//
+// 画像編集のマスクは塗った線の座標をそのまま持つので、1 レコードで数十 KB になる。
+// 履歴は 1000 件まで貯まり、生成・部分AI編集・画像編集の 3 画面がページを開くたびに
+// 全件を取りに来るため、ここがそのまま毎回の転送量とパース時間になっていた。
+// マスクが要るのは「マスクを調整」で 1 件開くときだけなので、
+// 一覧からは外して GET /api/history/<id> で渡す
+function historyListEntry(record) {
+  if (!record?.mask) return record;
+  const { mask, ...rest } = record;
+  return rest;
+}
+
 // このアプリが配信している画像 URL から id を取り出す（/api/krea2/image/ は旧 URL 互換）
 // 末尾の ?v=... は差し替え時のキャッシュ避け（/api/upload の replace）。
 // 同じキーを指すので、削除対象の判定では無視する
@@ -2038,7 +2051,7 @@ export default {
     // ローカル URL に差し替えたうえで、生成設定を PNG に焼き込む
     if (url.pathname === '/api/history') {
       if (request.method === 'GET') {
-        return Response.json(await stub.listHistory());
+        return Response.json((await stub.listHistory()).map(historyListEntry));
       }
       if (request.method === 'POST') {
         if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });
@@ -2095,9 +2108,14 @@ export default {
       return new Response('Method not allowed', { status: 405 });
     }
 
-    // 履歴 1 件の削除（保存済み画像も一緒に消す）
+    // 履歴 1 件の取得（マスクを含む丸ごと）と削除（保存済み画像も一緒に消す）
     const historyMatch = url.pathname.match(/^\/api\/history\/([\w.-]{1,100})$/);
     if (historyMatch) {
+      if (request.method === 'GET') {
+        const record = (await stub.listHistory()).find((r) => r.id === historyMatch[1]);
+        if (!record) return new Response('Not found', { status: 404 });
+        return Response.json(record);
+      }
       if (request.method !== 'DELETE') return new Response('Method not allowed', { status: 405 });
       await stub.deleteHistory(historyMatch[1]);
       return Response.json({ ok: true });

@@ -2561,9 +2561,27 @@ function closeLightbox() {
   els.lightbox.querySelector('img').src = '';
 }
 
+// 履歴の一覧はマスク（塗った線の座標）を載せていない。1 レコードで数十 KB あり、
+// 画面を開くたびの全件取得がそのぶん重くなるため。塗り直すときだけ取り直す
+async function fetchHistoryRecord(id) {
+  try {
+    const res = await fetch(`/api/history/${encodeURIComponent(id)}`);
+    if (!res.ok || isHtmlResponse(res)) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
 // 過去の合成結果を開き直して、マスクだけを塗り替えられるようにする。
 // 入力画像はそのレコードのものに戻す（合成の相手が変わらないように）
-async function reopenMaskedResult(record) {
+async function reopenMaskedResult(listRecord) {
+  // 取り直せないまま開くと、今の塗りで上書き保存したときに元のマスクを失う
+  const record = await fetchHistoryRecord(listRecord.id);
+  if (!record) {
+    setError('この履歴を読み込めませんでした。時間をおいてもう一度お試しください');
+    return;
+  }
   const inputUrl = record.images.at(-1)?.url;
   if (!inputUrl) return;
   els.maskToggle.checked = true;

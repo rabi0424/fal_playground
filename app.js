@@ -1967,15 +1967,23 @@ function gallerySearchText(record) {
   return `${record.prompt ?? ''} ${record.model ?? ''} ${loraText}`.toLowerCase();
 }
 
+// 絞り込んだあとの一覧。キー操作での前後移動もこれをたどる
+let galleryItems = [];
+
+function galleryEmpty(text) {
+  galleryPager.clear();
+  const empty = document.createElement('div');
+  empty.className = 'gallery-empty';
+  empty.textContent = text;
+  els.gallery.appendChild(empty);
+}
+
 function renderGallery() {
   const allItems = loadHistory();
-  els.gallery.innerHTML = '';
 
   if (allItems.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'gallery-empty';
-    empty.textContent = 'まだ履歴はありません';
-    els.gallery.appendChild(empty);
+    galleryItems = [];
+    galleryEmpty('まだ履歴はありません');
     return;
   }
 
@@ -1988,78 +1996,84 @@ function renderGallery() {
       })
     : allItems;
 
+  galleryItems = items;
+
   if (items.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'gallery-empty';
-    empty.textContent = '一致する履歴がありません';
-    els.gallery.appendChild(empty);
+    galleryEmpty('一致する履歴がありません');
     return;
   }
 
-  for (const record of items) {
-    const item = document.createElement('div');
-    item.className = 'gallery-item';
-    if (record.id === selectedId) item.classList.add('selected');
-
-    const thumb = document.createElement('img');
-    thumb.className = 'thumb';
-    thumb.alt = record.prompt;
-    thumb.loading = 'lazy';
-    loadImage(thumb, galleryThumbUrl(record));
-    thumb.addEventListener('click', () => renderDetail(record));
-    item.appendChild(thumb);
-
-    if (record.type === 'compare') {
-      const badge = document.createElement('span');
-      badge.className = 'compare-badge';
-      badge.textContent = `比較 ×${record.variants.length}`;
-      item.appendChild(badge);
-    }
-
-    const body = document.createElement('div');
-    body.className = 'body';
-
-    const promptText = document.createElement('div');
-    promptText.className = 'prompt-text';
-    promptText.textContent = record.prompt;
-    promptText.title = record.prompt;
-    body.appendChild(promptText);
-
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    meta.textContent = record.model.replace(/^fal-ai\//, '');
-    body.appendChild(meta);
-
-    const actions = document.createElement('div');
-    actions.className = 'actions';
-
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'ghost-btn small';
-    deleteBtn.textContent = '削除';
-    deleteBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      deleteHistoryRecord(record.id);
-      if (record.id === selectedId) {
-        clearDetail();
-      }
-      renderGallery();
-    });
-    actions.appendChild(deleteBtn);
-
-    body.appendChild(actions);
-    item.appendChild(body);
-    els.gallery.appendChild(item);
-  }
+  galleryPager.render(items);
 }
+
+// 履歴 1 件ぶんのカード
+function galleryItemEl(record) {
+  const item = document.createElement('div');
+  item.className = 'gallery-item';
+  if (record.id === selectedId) item.classList.add('selected');
+
+  const thumb = document.createElement('img');
+  thumb.className = 'thumb';
+  thumb.alt = record.prompt;
+  thumb.loading = 'lazy';
+  loadImage(thumb, galleryThumbUrl(record));
+  thumb.addEventListener('click', () => renderDetail(record));
+  item.appendChild(thumb);
+
+  if (record.type === 'compare') {
+    const badge = document.createElement('span');
+    badge.className = 'compare-badge';
+    badge.textContent = `比較 ×${record.variants.length}`;
+    item.appendChild(badge);
+  }
+
+  const body = document.createElement('div');
+  body.className = 'body';
+
+  const promptText = document.createElement('div');
+  promptText.className = 'prompt-text';
+  promptText.textContent = record.prompt;
+  promptText.title = record.prompt;
+  body.appendChild(promptText);
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = record.model.replace(/^fal-ai\//, '');
+  body.appendChild(meta);
+
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'ghost-btn small';
+  deleteBtn.textContent = '削除';
+  deleteBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    deleteHistoryRecord(record.id);
+    if (record.id === selectedId) {
+      clearDetail();
+    }
+    renderGallery();
+  });
+  actions.appendChild(deleteBtn);
+
+  body.appendChild(actions);
+  item.appendChild(body);
+  return item;
+}
+
+const galleryPager = falGallery.create(els.gallery, galleryItemEl);
 
 // 詳細表示中に前後の履歴（ギャラリー）へ移動する。dir=+1 で右、-1 で左
 function navigateGallery(dir) {
-  const items = loadHistory();
+  const items = galleryItems;
   if (items.length === 0 || selectedId == null) return;
   const idx = items.findIndex((r) => r.id === selectedId);
   if (idx === -1) return;
   const next = idx + dir;
   if (next < 0 || next >= items.length) return;
+  // ギャラリーは末尾が見えたぶんだけ足しているので、飛び先が未描画のことがある
+  galleryPager.ensure(next);
   renderDetail(items[next]);
   const selEl = els.gallery.querySelector('.gallery-item.selected');
   if (selEl) selEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -2335,6 +2349,7 @@ function syncGallerySearchSize() {
 }
 els.gallerySearch.addEventListener('input', () => {
   syncGallerySearchSize();
+  galleryPager.reset(); // 絞り込みが変われば、また先頭から
   renderGallery();
 });
 syncGallerySearchSize();

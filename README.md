@@ -298,11 +298,13 @@ LoRA 欄の「ライブラリを管理」（`library.html`）で、登録済み 
 ```
 node test/import.test.mjs        # Civitai 取り込みパイプライン
 node test/modal.test.mjs         # Modal（modal_comfy）ジョブ・ポーリングの扱い
+node test/history.test.mjs       # 履歴 API（一覧の軽量化と 1 件取得）
 node test/lora-library.test.mjs  # LoRA ライブラリ（Modal へ渡す識別子など）
 node test/store.test.mjs         # localStorage のラッパー（容量あふれの扱い）
+node test/gallery-pager.test.mjs # ギャラリーの分割描画
 ```
 
-前の 2 つは `worker.js` をそのまま Node に読み込み、Civitai / Hugging Face / R2 / Modal をモックして流します。取り込みのテストはサイズ関連の定数を小さくパッチするので、1 MB のダミーファイルでも「複数回の alarm 実行に分割される」実際の経路を確認できます。`DEBUG_ERRORS=1` を付けると、再試行のために握りつぶしている例外を表示します。後ろの 2 つはブラウザ用の `lora-library.js` / `store.js` を `node:vm` で読み込み、`localStorage` だけ差し替えて確かめます。
+前の 3 つは `worker.js` をそのまま Node に読み込み、Civitai / Hugging Face / R2 / Modal をモックして流します。取り込みのテストはサイズ関連の定数を小さくパッチするので、1 MB のダミーファイルでも「複数回の alarm 実行に分割される」実際の経路を確認できます。`DEBUG_ERRORS=1` を付けると、再試行のために握りつぶしている例外を表示します。後ろの 3 つはブラウザ用の `lora-library.js` / `store.js` / `gallery-pager.js` を `node:vm` や最小の DOM スタブで読み込み、`localStorage` や `IntersectionObserver` だけ差し替えて確かめます。
 
 ## LoRA 比較アリーナ
 
@@ -339,7 +341,7 @@ node test/store.test.mjs         # localStorage のラッパー（容量あふ�
 | データ | 保管先 | 備考 |
 |---|---|---|
 | fal API キー / Modal トークン | Worker の Secret | ブラウザには一切渡らない |
-| 生成履歴（プロンプト・設定・結果） | サーバー（Durable Object） | 直近 1000 件。超過分は画像ごと古い順に自動削除。全端末で共通 |
+| 生成履歴（プロンプト・設定・結果） | サーバー（Durable Object） | 直近 1000 件。超過分は画像ごと古い順に自動削除。全端末で共通。一覧（`GET /api/history`）はマスクを外した形で返し、マスクが要るときだけ `GET /api/history/<id>` で 1 件取る |
 | 生成画像 | サーバー（R2 バケット `fal-playground-images`） | fal / WaveSpeed / Runware の CDN からも取り込むため**失効しない**。履歴の削除と連動して削除。R2 移行前の画像は旧 Durable Object から後方互換で配信 |
 | LoRA ライブラリ | サーバー（自動同期） + localStorage | 全端末で共通。どの画面から登録しても同期されます（生成 / 画像編集 / ライブラリ / 比較アリーナ） |
 | Runware の LoRA（AIR）の控え | localStorage | 端末ごと。実体は Runware 側にあるので、「Runware から取り込み」で再取得できる |
@@ -405,6 +407,15 @@ LanPaint 版は、画像編集の「Modal 自前ホスト（LanPaint インペ�
 - 生成はサーバー側（Worker のジョブ）で完結します。生成中にタブを閉じたり通信が切れたりしても結果は失われず、ページを開き直せば途中から再開されます
 - 「キャンセル」は結果の受け取りをやめるだけで、Modal 側で開始済みの生成処理は止まりません
 - 比較モードは fal のキュー API 専用のため、Modal 版では使えません
+
+## 表示の軽さ（履歴まわり）
+
+履歴は 1000 件まで貯まり、生成・部分AI編集・画像編集の 3 画面がページを開くたびに全件を取りに来ます。ここが重いと、スマホではメニューを移るたびに固まって見えます。手当ては 2 つです。
+
+- **一覧はマスクを外して返す**（`GET /api/history`）。画像編集のマスクは塗った線の座標をそのまま持つので、1 レコードで数十 KB になります。一覧に必要なのはサムネとプロンプトだけなので落とし、`masked` の印だけ残します。マスクが要るのは「マスクを調整」で開き直すときだけなので、そのとき `GET /api/history/<id>` で 1 件を丸ごと取り直します（保存時の `POST` の応答は今までどおりマスク込み）
+- **ギャラリーは見えたぶんだけ並べる**（`gallery-pager.js`）。最初は 30 件、末尾が近づくたびに 30 件ずつ足します。並べた件数は描き直しをまたいで保つので、下までスクロールしてからサムネを選んでも先頭には戻りません。`IntersectionObserver` が無い環境では全件並べます（従来どおり）
+
+履歴サムネイルは**縮小版を作らず原寸のまま**です。サムネのつもりで保存した画像が縮小版だった、という取り違えを避けるためで、表示の軽さより優先しています。
 
 ## 開発メモ
 

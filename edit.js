@@ -1042,9 +1042,8 @@ async function fetchHistory() {
 }
 
 function renderGallery() {
-  els.gallery.innerHTML = '';
-
   if (historyItems.length === 0) {
+    galleryPager.clear();
     const empty = document.createElement('div');
     empty.className = 'gallery-empty';
     empty.textContent = 'まだ履歴はありません';
@@ -1052,50 +1051,55 @@ function renderGallery() {
     return;
   }
 
-  for (const record of historyItems) {
-    const item = document.createElement('div');
-    item.className = 'gallery-item';
-
-    const thumb = document.createElement('img');
-    thumb.className = 'thumb';
-    thumb.alt = record.prompt ?? '';
-    thumb.loading = 'lazy';
-    loadThumb(thumb, galleryThumbUrl(record));
-    thumb.addEventListener('click', () => openLightbox(galleryImageUrls(record)));
-    item.appendChild(thumb);
-
-    const body = document.createElement('div');
-    body.className = 'body';
-
-    const promptText = document.createElement('div');
-    promptText.className = 'prompt-text';
-    promptText.textContent = record.prompt ?? '';
-    promptText.title = record.prompt ?? '';
-    body.appendChild(promptText);
-
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    meta.textContent = (record.model ?? '').replace(/^fal-ai\//, '');
-    body.appendChild(meta);
-
-    const actions = document.createElement('div');
-    actions.className = 'actions';
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'ghost-btn small';
-    deleteBtn.textContent = '削除';
-    deleteBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      historyItems = historyItems.filter((r) => r.id !== record.id);
-      fetch(`/api/history/${encodeURIComponent(record.id)}`, { method: 'DELETE' }).catch(() => {});
-      renderGallery();
-    });
-    actions.appendChild(deleteBtn);
-    body.appendChild(actions);
-
-    item.appendChild(body);
-    els.gallery.appendChild(item);
-  }
+  galleryPager.render(historyItems);
 }
+
+// 履歴 1 件ぶんのカード
+function galleryItemEl(record) {
+  const item = document.createElement('div');
+  item.className = 'gallery-item';
+
+  const thumb = document.createElement('img');
+  thumb.className = 'thumb';
+  thumb.alt = record.prompt ?? '';
+  thumb.loading = 'lazy';
+  loadThumb(thumb, galleryThumbUrl(record));
+  thumb.addEventListener('click', () => openLightbox(galleryImageUrls(record)));
+  item.appendChild(thumb);
+
+  const body = document.createElement('div');
+  body.className = 'body';
+
+  const promptText = document.createElement('div');
+  promptText.className = 'prompt-text';
+  promptText.textContent = record.prompt ?? '';
+  promptText.title = record.prompt ?? '';
+  body.appendChild(promptText);
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = (record.model ?? '').replace(/^fal-ai\//, '');
+  body.appendChild(meta);
+
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'ghost-btn small';
+  deleteBtn.textContent = '削除';
+  deleteBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    historyItems = historyItems.filter((r) => r.id !== record.id);
+    fetch(`/api/history/${encodeURIComponent(record.id)}`, { method: 'DELETE' }).catch(() => {});
+    renderGallery();
+  });
+  actions.appendChild(deleteBtn);
+  body.appendChild(actions);
+
+  item.appendChild(body);
+  return item;
+}
+
+const galleryPager = falGallery.create(els.gallery, galleryItemEl);
 
 /* ---------- lightbox（app.js の簡略版） ---------- */
 
