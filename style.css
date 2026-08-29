@@ -2624,8 +2624,28 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
   color: var(--text);
 }
 
+/* 切り抜き（LanPaint）。マスクの操作列と同じ並びに寄せる */
+.ie-crop {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ie-crop-num {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ie-crop-num .label { margin: 0; }
+
+.ie-crop-num input { width: 6em; }
+
 /* 送信サイズの説明。引き伸ばしが大きいときだけ色を変える */
 #sizeHint.warn { color: var(--danger); }
+
+/* 切り抜きの説明。マスクがはみ出しているときだけ色を変える */
+#cropHint.warn { color: var(--danger); }
 
 /* Runware の生成パラメータ */
 

@@ -1,20 +1,23 @@
 'use strict';
 
 /* ==========================================================================
- * 画像編集（Qwen Image Edit 2511 + LoRA / FLUX.1 Fill [dev] OneReward）
+ * 画像編集（Qwen Image Edit 2511 + LoRA / FLUX.1 Fill [dev] OneReward /
+ *           Wan2.2 + VACE / LanPaint）
  *
  * 入力画像 1 枚 + 指示文で画像を編集する別画面。既存の「部分AI編集」
  * （Poe・範囲を切り抜いてはめ込む）とは別枠で、画像全体をモデルに渡す。
  *
- * - プロバイダは 4 つ。Qwen Image Edit 2511 を fal / WaveSpeed から、
+ * - プロバイダは 5 つ。Qwen Image Edit 2511 を fal / WaveSpeed から、
  *   FLUX.1 Fill [dev] OneReward（塗った範囲を描き直す修復モデル）を Runware から、
- *   Wan2.2 + VACE のマスク編集を Modal 自前ホスト（modal_comfy）から選べる。
- *   API の形がそれぞれ違うので PROVIDERS のアダプタで吸収する
- *   （送信内容の組み立て・投入・ポーリング・結果の解釈・費用の目安）
+ *   Wan2.2 + VACE のマスク編集と LanPaint のインペイントを Modal 自前ホスト
+ *   （modal_comfy）から選べる。API の形がそれぞれ違うので PROVIDERS のアダプタで
+ *   吸収する（送信内容の組み立て・投入・ポーリング・結果の解釈・費用の目安）
  * - いずれも Worker のプロキシ経由（/api/fal/proxy・/api/wavespeed/proxy・
  *   /api/runware/proxy・/api/modal/edit）で呼ぶ。API キーはブラウザに渡さない
  * - 入力画像（とマスク）は data URI として渡す。このアプリは Cloudflare Access の
  *   内側に置く前提で、/api/image/... をプロバイダ側から取りに行けるとは限らないため
+ * - 対応しているプロバイダ（LanPaint）では、塗った範囲のまわりだけを切り抜いて
+ *   送れる。返ってきた画像は合成のときに元の位置へ戻す（下記「切り抜き」）
  * - 同じ画像は R2 にも保存し（/api/upload）、履歴レコードと再開用に使う。
  *   data URI は localStorage に置くには大きすぎるので保存しない
  * - 結果は type: 'imgedit' の履歴レコードとして /api/history に保存するので、
@@ -132,10 +135,22 @@ const WAN_EDIT_LORAS = [
   { name: 'Wan2.1_T2V_14B_FusionX_LoRA', strength: 0.4 },
 ];
 
-// Wan は 32 の倍数の解像度しか扱えない。1 辺 4096 まで
+// Wan は 32 の倍数の解像度しか扱えない。1 辺 4096 まで。
+// LanPaint も同じく 32 の倍数へ丸められるので、刻みは共通で使う
 const WAN_DIM_STEP = 32;
 const WAN_DIM_MIN = 256;
 const WAN_DIM_MAX = 4096;
+
+// LanPaint（Modal 自前ホスト / modal_comfy の lanpaint_app の /inpaint）。
+//
+// 実質のノブは num_steps（塗った範囲をまわりと辻褄合わせするために考え直す回数）
+// だけで、レイテンシはこれにほぼ比例する。実測（832×1216 / RTX PRO 6000）は
+// X-Exec-Seconds ≒ 6.9 + 4.97 × num_steps 秒
+const LANPAINT_NUM_STEPS = 5; // 既定（0〜20）
+const LANPAINT_SEC_BASE = 6.9;
+const LANPAINT_SEC_PER_STEP = 4.97;
+// サーバー側で合成するときの境界ブレンド幅（px）。奇数しか受け付けない
+const LANPAINT_BLEND_OVERLAP = 9;
 
 // スケジューラ。既定（自動）のままが基本なので、選択肢として出すだけ
 const RUNWARE_SCHEDULERS = ['Default', 'FlowMatchEulerDiscreteScheduler', 'Euler', 'Euler a',
@@ -146,6 +161,9 @@ const RUNWARE_SCHEDULERS = ['Default', 'FlowMatchEulerDiscreteScheduler', 'Euler
   'UniPC 3M', 'UniPC 3M Karras', 'UniPC Karras', 'LCM', 'TCDScheduler'];
 
 const ACCESS_EXPIRED_MSG = 'セッションが切れました。ページを再読み込みしてください。';
+
+// 指示文の欄の既定の例。プロバイダが promptPlaceholder を持つときはそちらを出す
+const PROMPT_PLACEHOLDER = '例: 背景を夜の街に変える / 服を白いシャツにする';
 
 /* ---------- helpers ---------- */
 
@@ -166,6 +184,11 @@ const els = {
   maskModeHint: $('#maskModeHint'),
   alignToggle: $('#alignToggle'),
   colorToggle: $('#colorToggle'),
+  cropToggle: $('#cropToggle'),
+  cropTools: $('#cropTools'),
+  cropMargin: $('#cropMargin'),
+  cropResetBtn: $('#cropResetBtn'),
+  cropHint: $('#cropHint'),
   maskTools: $('#maskTools'),
   maskUndoBtn: $('#maskUndoBtn'),
   maskAllBtn: $('#maskAllBtn'),
@@ -175,6 +198,7 @@ const els = {
   maskFeather: $('#maskFeather'),
   maskFeatherVal: $('#maskFeatherVal'),
   prompt: $('#prompt'),
+  promptHint: $('#promptHint'),
   provider: $('#provider'),
   providerHint: $('#providerHint'),
   loraList: $('#loraList'),
@@ -194,6 +218,11 @@ const els = {
   wanCfg: $('#wanCfg'),
   wanShift: $('#wanShift'),
   wanMaskGrow: $('#wanMaskGrow'),
+  lpNumSteps: $('#lpNumSteps'),
+  lpSteps: $('#lpSteps'),
+  lpBlend: $('#lpBlend'),
+  lpMaskGrow: $('#lpMaskGrow'),
+  lpParamHint: $('#lpParamHint'),
   seed: $('#seed'),
   seedLock: $('#seedLock'),
   negativePrompt: $('#negativePrompt'),
@@ -762,6 +791,13 @@ function nearestPresetSize(width, height, presets = sizePresets()) {
 // プロバイダ側に刻みの制約があれば最後に丸める（Runware は 64 の倍数）
 function sendSize(width = source?.width, height = source?.height) {
   if (!width || !height) return null;
+  // 切り抜いて送るときに送るのは切り抜いた範囲なので、比も大きさもそちらで測る
+  // （cropTightPx は送信サイズを見ないので、ここで呼んでも堂々巡りにならない）
+  const tight = cropActive() ? cropTightPx() : null;
+  if (tight) {
+    width = Math.max(1, tight.width);
+    height = Math.max(1, tight.height);
+  }
   const presets = sizePresets();
   const choice = els.sizeSelect.value;
   const size = choice === 'none' ? fitWithin({ width, height }, MAX_INPUT_PX)
@@ -789,11 +825,11 @@ function renderSizeOptions() {
   els.sizeSelect.value = options.some((o) => o.value === keep) ? keep : 'auto';
 }
 
-// 元画像と送信サイズで縦横比がどれだけ違うか（1.0 = 同じ）。
-// 離れているほど引き伸ばされて送られる
-function aspectStretch(size) {
-  if (!source || !size) return 1;
-  return (size.width / size.height) / (source.width / source.height);
+// 送るもの（元画像、または切り抜いた範囲）と送信サイズで縦横比がどれだけ違うか
+//（1.0 = 同じ）。離れているほど引き伸ばされて送られる
+function aspectStretch(size, from = source) {
+  if (!from || !size) return 1;
+  return (size.width / size.height) / (from.width / from.height);
 }
 
 // 既に R2 にある画像か（同一オリジンの /api/image/... なら保存済み）。
@@ -841,6 +877,8 @@ async function setSourceFromSrc(src, from, { keepMask = false } = {}) {
     // 塗った範囲を、関係のない画像へそのまま当ててしまわないようにする
     const dropMask = !keepMask && url !== source?.url && mask.strokes.length > 0;
     if (dropMask) resetMask();
+    // 手で決めた切り抜き枠は、その画像に合わせて置いたもの。画像が変われば捨てる
+    if (!keepMask && url !== source?.url) cropManual = null;
 
     sourceImage = img;
     source = { url, width, height, from };
@@ -890,14 +928,23 @@ function renderSizeHint() {
     els.sizeHint.hidden = true;
     return;
   }
-  const stretch = aspectStretch(size);
+  // 切り抜いて送るときに送るのは、元画像ぜんぶではなく切り抜いた範囲
+  const region = cropRegion(size);
+  const from = region
+    ? {
+      width: Math.round(region.width * source.width),
+      height: Math.round(region.height * source.height),
+    }
+    : { width: source.width, height: source.height };
+  const stretch = aspectStretch(size, from);
   const off = Math.abs(1 - stretch) * 100;
   // 引き伸ばして送った場合、元の比率に戻るのはマスク合成のときだけ
   //（マスク無しはモデルの出力がそのまま結果になる）
   const stretched = `${stretch > 1 ? '横' : '縦'}に ${off.toFixed(0)}% 引き伸ばして送り、`
     + (maskOn() ? '合成で元の比率へ戻します' : '結果もその比率になります');
   els.sizeHint.hidden = false;
-  els.sizeHint.textContent = `${source.width}×${source.height} → ${size.width}×${size.height} で送信`
+  els.sizeHint.textContent = `${region ? '切り抜き ' : ''}${from.width}×${from.height}`
+    + ` → ${size.width}×${size.height} で送信`
     + (off < 0.5 ? '（比率そのまま）' : `（${stretched}）`)
     + padHintText(size);
   els.sizeHint.classList.toggle('warn', off > 12);
@@ -972,6 +1019,7 @@ function syncMaskUi() {
     ? 'なし' : `${els.maskFeather.value}`;
   els.maskUndoBtn.disabled = mask.strokes.length === 0;
   els.maskClearBtn.disabled = mask.strokes.length === 0;
+  syncCropUi(); // 切り抜き枠はマスクの上に描くので、マスクを切れば一緒に消える
   if (on) drawMaskOverlay();
 }
 
@@ -1328,6 +1376,326 @@ function drawExtended(ctx, src, inner, outer) {
   if (right > 0 && bottom > 0) ctx.drawImage(src, sw - 1, sh - 1, 1, 1, x + w, y + h, right, bottom);
 }
 
+/* ---------- 切り抜き（送る前に、塗った範囲のまわりだけを取り出す） ---------- */
+//
+// 縁の余白（padFrame）が「足りない周りを足す」のに対して、こちらは「要らない
+// 周りを捨てる」。塗った範囲が画像の一部でしかないとき、画像ぜんぶを送ると
+// モデルの解像度がその一部にはほとんど回らない。塗った範囲のまわりだけを
+// 切り出して送信サイズいっぱいに使えば、同じ秒数でそこに使える画素が増える。
+//
+// 返ってくる画像は切り抜いた範囲そのものなので、合成のときに元の位置へ戻す
+// （compositeWithMask の region）。切り抜く範囲は元画像を 0..1 とした矩形で
+// 持ち、履歴レコードにも同じ形で残す
+
+// 余白の既定（元画像の px）は #cropMargin の value に持たせてある。
+// 自動で決めた枠を、送信サイズの何分の 1 まで小さくしてよいか。狭く塗ったときに
+// 小さすぎる範囲を送信サイズまで引き伸ばすと、ぼやけた画像を見せることになる
+const CROP_MAX_ZOOM = 4;
+const CROP_HANDLE_PX = 8; // 四隅のつまみの半径（CSS px）
+// つまみをつかめる距離（CSS px）。指でも押せる広さにしつつ、塗りを奪わない程度に
+// 留める（枠は塗った範囲から余白ぶん離れているので、この距離なら重ならない）
+const CROP_GRAB_PX = 18;
+// これだけ動かして初めて「手で決めた枠」にする。つまみを押しただけで自動追従が
+// 止まると、触ったつもりのない操作で枠が固まってしまう
+const CROP_DRAG_SLOP_PX = 4;
+const CROP_MIN_SIDE = 0.02; // 手で潰しきれない下限（0..1）
+
+/** 四隅を動かして決めた枠（0..1）。null なら塗った範囲から自動で決める */
+let cropManual = null;
+/** ドラッグ中のつまみ。{ fixed: [x, y], start: [x, y], moved }（対角は動かさない） */
+let cropDrag = null;
+
+// 描いている途中のひと塗りも含めた、いまの塗り
+function activeStrokes() {
+  return maskStroke ? [...mask.strokes, maskStroke] : mask.strokes;
+}
+
+function cropOn() {
+  return !!provider().cropSend && els.cropToggle.checked;
+}
+
+// いま実際に切り抜くか。塗りが無ければ切り抜く場所も決まらない
+function cropActive() {
+  return cropOn() && maskOn() && !!source && activeStrokes().length > 0;
+}
+
+const cropMarginPx = () => Math.max(0, Number(els.cropMargin.value) || 0);
+
+// 塗った範囲（ぼかしの届く先まで）の外接矩形。元画像を 0..1 とした値。
+// 消しゴムは形を小さくするだけなので数えない（消した先まで枠が広がらない）
+function maskBoundsNorm(strokes, feather, src) {
+  const long = Math.max(src.width, src.height);
+  // 半径もぼかしも長辺に対する比なので、0..1 の座標では軸ごとに伸び方が違う
+  const kx = long / src.width;
+  const ky = long / src.height;
+  const reach = feather * FEATHER_REACH;
+  let x0 = Infinity; let y0 = Infinity; let x1 = -Infinity; let y1 = -Infinity;
+  for (const stroke of strokes) {
+    if (stroke.mode === 'erase') continue;
+    if (stroke.rect) return { x: 0, y: 0, width: 1, height: 1 }; // 「全面」
+    const r = stroke.r + reach;
+    for (const [x, y] of stroke.pts) {
+      x0 = Math.min(x0, x - r * kx);
+      x1 = Math.max(x1, x + r * kx);
+      y0 = Math.min(y0, y - r * ky);
+      y1 = Math.max(y1, y + r * ky);
+    }
+  }
+  if (!Number.isFinite(x0)) return null;
+  // 画像からはみ出したままで返す（画像の中へ詰めるのは比を合わせた後）
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+}
+
+// 塗った範囲の外接矩形を画像の中へ収めたもの（0..1）。画像の外へはみ出した
+// ぶんはそもそも描きようがないので、枠に入っているかどうかの判定には数えない
+function maskBoundsClamped(src) {
+  const b = maskBoundsNorm(activeStrokes(), mask.feather, src);
+  if (!b) return null;
+  const x = Math.max(0, b.x);
+  const y = Math.max(0, b.y);
+  return {
+    x,
+    y,
+    width: Math.max(0, Math.min(1, b.x + b.width) - x),
+    height: Math.max(0, Math.min(1, b.y + b.height) - y),
+  };
+}
+
+// 切り抜きの土台。四隅を動かしていればその枠、でなければ塗った範囲 + 余白。
+// 元画像の px で返す（画像からはみ出していることもある）
+function cropTightPx() {
+  if (!source) return null;
+  const src = { width: source.width, height: source.height };
+  if (cropManual) {
+    return {
+      x: cropManual.x * src.width,
+      y: cropManual.y * src.height,
+      width: cropManual.width * src.width,
+      height: cropManual.height * src.height,
+    };
+  }
+  const bounds = maskBoundsNorm(activeStrokes(), mask.feather, src);
+  if (!bounds) return null;
+  const m = cropMarginPx();
+  return {
+    x: bounds.x * src.width - m,
+    y: bounds.y * src.height - m,
+    width: bounds.width * src.width + m * 2,
+    height: bounds.height * src.height + m * 2,
+  };
+}
+
+// 実際に切り抜く範囲（元画像の px）。送信サイズの比に合わせて広げ、
+// 画像の中へ詰める。引き伸ばさずに送るために比を合わせる
+function cropRegionPx(size) {
+  const tight = cropTightPx();
+  if (!tight) return null;
+  const src = { width: source.width, height: source.height };
+  const aspect = size.width / size.height;
+  let { width, height } = tight;
+  // 自動で決めた枠だけ、拡大しすぎない下限を置く（手で決めた枠は指示どおりに）
+  if (!cropManual) {
+    width = Math.max(width, size.width / CROP_MAX_ZOOM);
+    height = Math.max(height, size.height / CROP_MAX_ZOOM);
+  }
+  if (width / height < aspect) width = height * aspect;
+  else height = width / aspect;
+  // 画像より大きくなった軸は画像いっぱいで打ち止め（それ以上は取れない）
+  width = Math.min(width, src.width);
+  height = Math.min(height, src.height);
+  // 打ち止めで比が崩れたぶんは、もう一方を詰めて取り戻す。譲るのは余白だけで、
+  // 塗った範囲そのものは必ず枠へ入れる（枠から出たぶんは描き直されないため）。
+  // それでも入りきらなければ比を諦める（引き伸ばしとして送信サイズの説明に出る）
+  const keep = maskBoundsClamped(src);
+  const keepW = keep ? keep.width * src.width : 0;
+  const keepH = keep ? keep.height * src.height : 0;
+  if (width / height > aspect) width = Math.min(width, Math.max(keepW, height * aspect));
+  else height = Math.min(height, Math.max(keepH, width / aspect));
+  // 中心を保ったまま画像の中へ寄せる
+  const cx = tight.x + tight.width / 2;
+  const cy = tight.y + tight.height / 2;
+  return {
+    x: Math.min(src.width - width, Math.max(0, cx - width / 2)),
+    y: Math.min(src.height - height, Math.max(0, cy - height / 2)),
+    width,
+    height,
+  };
+}
+
+// 送る前に切り抜く範囲（0..1）。切り抜く必要が無ければ null
+function cropRegion(size = sendSize()) {
+  if (!cropActive() || !size) return null;
+  const px = cropRegionPx(size);
+  if (!px) return null;
+  const src = { width: source.width, height: source.height };
+  // 画像ぜんぶが入るなら、切り抜かないのと同じ（送るものも今までどおりになる）
+  if (px.width >= src.width - 1 && px.height >= src.height - 1) return null;
+  return {
+    x: px.x / src.width,
+    y: px.y / src.height,
+    width: px.width / src.width,
+    height: px.height / src.height,
+  };
+}
+
+// マスクを切り抜き範囲の中の座標系へ移す。筆の太さもぼかしも長辺に対する比なので、
+// 切り抜きで見かけが大きくなるぶんだけ倍率を掛ける
+function remapMask(maskData, region, src) {
+  const k = Math.max(src.width, src.height)
+    / Math.max(region.width * src.width, region.height * src.height);
+  return {
+    feather: maskData.feather * k,
+    strokes: maskData.strokes.map((stroke) => (stroke.rect ? stroke : {
+      ...stroke,
+      r: stroke.r * k,
+      pts: stroke.pts.map(([x, y]) => [
+        (x - region.x) / region.width,
+        (y - region.y) / region.height,
+      ]),
+    })),
+  };
+}
+
+// 送信用の画像。切り抜いた範囲を送信サイズいっぱいに描く
+function croppedDataUri(img, region, size) {
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  const canvas = makeCanvas(size.width, size.height);
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, region.x * w, region.y * h, region.width * w, region.height * h,
+    0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', INPUT_QUALITY);
+}
+
+/* ---------- 切り抜き枠の表示と操作 ---------- */
+
+// 枠は線だけ描く（塗った範囲の見せ方を邪魔しない）。四隅にはつまみを置いて、
+// 指でもつかめるようにする。描く先は下見の円と同じ軽いほうの canvas なので、
+// 引きずっている間もマスクを描き直さずに済む
+function drawCropRect(ctx, dpr) {
+  const region = cropRegion();
+  if (!region) return;
+  const w = ctx.canvas.width;
+  const h = ctx.canvas.height;
+  const x = region.x * w;
+  const y = region.y * h;
+  const rw = region.width * w;
+  const rh = region.height * h;
+  ctx.save();
+  ctx.setLineDash([7 * dpr, 5 * dpr]);
+  ctx.lineWidth = 3 * dpr;
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+  ctx.strokeRect(x, y, rw, rh);
+  ctx.lineWidth = 1.5 * dpr;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+  ctx.strokeRect(x, y, rw, rh);
+  ctx.setLineDash([]);
+  for (const [cx, cy] of [[x, y], [x + rw, y], [x, y + rh], [x + rw, y + rh]]) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, CROP_HANDLE_PX * dpr, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+    ctx.fill();
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)';
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// 押した場所が四隅のつまみなら、そのドラッグを始めるための控えを返す。
+// 動かさないのは対角の角なので、それを覚えておく
+function cropCornerAt(pt) {
+  const region = cropRegion();
+  if (!region) return null;
+  const box = els.sourceImg.getBoundingClientRect();
+  if (box.width === 0 || box.height === 0) return null;
+  const xs = [region.x, region.x + region.width];
+  const ys = [region.y, region.y + region.height];
+  for (let i = 0; i < 2; i++) {
+    for (let j = 0; j < 2; j++) {
+      const dx = (pt[0] - xs[i]) * box.width;
+      const dy = (pt[1] - ys[j]) * box.height;
+      // 丸いつまみに合わせて距離で見る（角の外側だけが広く取られないように）
+      if (Math.hypot(dx, dy) <= CROP_GRAB_PX) {
+        return { fixed: [xs[1 - i], ys[1 - j]], start: pt, moved: false };
+      }
+    }
+  }
+  return null;
+}
+
+// つまんだ角を pt へ動かす。対角は固定したままなので、枠は角を追う。
+// 少し動かすまでは自動のままにしておく（押しただけで枠を固定しない）
+function dragCropTo(pt) {
+  if (!cropDrag.moved) {
+    const box = els.sourceImg.getBoundingClientRect();
+    const dx = (pt[0] - cropDrag.start[0]) * box.width;
+    const dy = (pt[1] - cropDrag.start[1]) * box.height;
+    if (Math.hypot(dx, dy) < CROP_DRAG_SLOP_PX) return;
+    cropDrag.moved = true;
+  }
+  const [fx, fy] = cropDrag.fixed;
+  cropManual = {
+    x: Math.min(fx, pt[0]),
+    y: Math.min(fy, pt[1]),
+    width: Math.max(CROP_MIN_SIDE, Math.abs(fx - pt[0])),
+    height: Math.max(CROP_MIN_SIDE, Math.abs(fy - pt[1])),
+  };
+  drawMaskCursor();
+}
+
+function resetCrop() {
+  cropManual = null;
+  commitCropChange();
+}
+
+// 枠が変わったら、送信サイズの説明・費用の目安・下書きを更新する
+function commitCropChange() {
+  drawMaskCursor();
+  syncCropUi();
+  renderSizeHint();
+  renderCostHint();
+  saveForm();
+}
+
+// 枠まわりの欄は、切り抜きが効くプロバイダで有効にしているときだけ出す
+// （data-only では「チェックを外したら畳む」までは表せないのでここで持つ）
+function syncCropUi() {
+  els.cropTools.hidden = !cropOn();
+  if (els.cropTools.hidden) return;
+  els.cropResetBtn.disabled = !cropManual;
+  els.cropHint.textContent = cropHintText();
+  els.cropHint.classList.toggle('warn', maskOutsideCrop());
+}
+
+// マスクが枠からはみ出しているか（はみ出したぶんは描き直されない）
+function maskOutsideCrop() {
+  const region = cropRegion();
+  if (!region || !source) return false;
+  const b = maskBoundsClamped({ width: source.width, height: source.height });
+  if (!b) return false;
+  const e = 0.002; // 丸めのぶんは見逃す
+  return b.x < region.x - e || b.y < region.y - e
+    || b.x + b.width > region.x + region.width + e
+    || b.y + b.height > region.y + region.height + e;
+}
+
+function cropHintText() {
+  if (!source) return '入力画像を読み込むと、切り抜く範囲がここに出ます。';
+  if (!cropActive()) return '塗ると、その範囲のまわりだけを切り抜いて送ります。';
+  const size = sendSize();
+  const region = cropRegion(size);
+  if (!region) return 'いまは画像ぜんぶが枠に入るので、切り抜かずに送ります。';
+  const w = Math.round(region.width * source.width);
+  const h = Math.round(region.height * source.height);
+  const zoom = size.width / w;
+  const how = cropManual ? '手で決めた枠' : '塗った範囲から自動';
+  return `切り抜き ${w}×${h}（${how}）を ${size.width}×${size.height} で送ります`
+    + `（${zoom.toFixed(1)} 倍）。四隅をドラッグすると枠を変えられます。`
+    + (maskOutsideCrop() ? ' マスクが枠からはみ出しています（はみ出したぶんは描き直されません）。' : '');
+}
+
 /* ---------- 重ね描き（塗っている範囲の見せ方） ---------- */
 //
 // 外側を暗くし、塗った側は元の絵が見えるまま薄く色を乗せる。そのうえで
@@ -1422,7 +1790,7 @@ function drawMaskOverlay() {
   ctx.globalAlpha = 1;
   ctx.clearRect(0, 0, w, h);
 
-  const strokes = maskStroke ? [...mask.strokes, maskStroke] : mask.strokes;
+  const strokes = activeStrokes();
   if (strokes.length === 0) return;
   const shape = rasterizeMask(w, h, strokes, mask.feather);
 
@@ -1476,8 +1844,11 @@ function drawMaskCursor() {
   const canvas = els.maskCursor;
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (!maskCursor || !maskOn() || !source) return;
+  if (!maskOn() || !source) return;
   const dpr = Math.min(2, window.devicePixelRatio || 1);
+  // 切り抜き枠は塗った範囲に追従するので、ひと塗りごとにここで描き直る
+  drawCropRect(ctx, dpr);
+  if (!maskCursor) return;
   const long = Math.max(canvas.width, canvas.height);
   const r = Math.max(2, maskSizeRatio() * long);
   const x = maskCursor[0] * canvas.width;
@@ -1510,12 +1881,26 @@ function onMaskDown(e) {
   if (!maskOn() || !source) return;
   e.preventDefault();
   els.maskCanvas.setPointerCapture(e.pointerId);
-  maskCursor = maskPoint(e); // タップで置いたときも、下見の円を同じ場所に出す
+  const pt = maskPoint(e);
+  // 四隅のつまみを押したときは塗らずに枠を動かす（塗りの邪魔にならないよう、
+  // つかめるのはつまみの近くだけ）
+  const grab = cropCornerAt(pt);
+  if (grab) {
+    cropDrag = grab;
+    maskCursor = null; // 枠を動かしている間は筆の下見を出さない
+    drawMaskCursor();
+    return;
+  }
+  maskCursor = pt; // タップで置いたときも、下見の円を同じ場所に出す
   maskStroke = { mode: maskTool, r: maskSizeRatio(), pts: [maskCursor] };
   drawMaskOverlay();
 }
 
 function onMaskMove(e) {
+  if (cropDrag) {
+    dragCropTo(maskPoint(e));
+    return;
+  }
   maskCursor = maskPoint(e);
   if (!maskStroke) {
     // 塗っていないときは下見の円だけを描き直す（マスクは作り直さない）
@@ -1535,6 +1920,7 @@ function onMaskMove(e) {
 
 // 画像から出たら下見の円を消す（残っていると、そこに置けるように見える）
 function onMaskLeave() {
+  if (cropDrag) return;
   maskCursor = null;
   drawMaskCursor();
 }
@@ -1546,6 +1932,14 @@ function onMaskLeave() {
 const roundPoint = ([x, y]) => [Math.round(x * 1e4) / 1e4, Math.round(y * 1e4) / 1e4];
 
 function onMaskUp() {
+  if (cropDrag) {
+    const moved = cropDrag.moved;
+    cropDrag = null;
+    // 動かさずに離したときは何も変えない（つまみに触れただけ）
+    if (moved) commitCropChange();
+    else drawMaskCursor();
+    return;
+  }
   if (!maskStroke) return;
   maskStroke.pts = maskStroke.pts.map(roundPoint);
   mask.strokes.push(maskStroke);
@@ -1556,15 +1950,18 @@ function onMaskUp() {
 // 塗り終わり・ぼかし変更のたびに呼ぶ。表示中の結果があればその場で合成し直す
 function commitMaskChange() {
   syncMaskUi();
+  syncCropUi(); // 塗った範囲が変われば、切り抜く範囲も変わる
   syncRunBtn();
   renderSizeHint(); // 塗りの位置で、縁の余白が要るかどうかが変わる
   saveForm();
   refreshResultComposite();
 }
 
-// 塗りだけを捨てる。ぼかしはスライダーの設定なので今の値を引き継ぐ
+// 塗りだけを捨てる。ぼかしはスライダーの設定なので今の値を引き継ぐ。
+// 手で決めた切り抜き枠は塗りに合わせて置いたものなので、一緒に捨てる
 function resetMask() {
   mask = { ...structuredClone(EMPTY_MASK), feather: maskFeatherRatio() };
+  cropManual = null;
 }
 
 function maskUndo() {
@@ -1574,6 +1971,7 @@ function maskUndo() {
 
 function maskClear() {
   mask.strokes = [];
+  cropManual = null; // 塗りが無くなったら枠も引っ込める
   commitMaskChange();
 }
 
@@ -1695,12 +2093,31 @@ function subpixelPeak(best, scores) {
   };
 }
 
+// 切り抜いた範囲を元画像の px の矩形にする（切り抜いていなければ null）
+function regionRect(region, w, h) {
+  if (!region) return null;
+  return {
+    x: region.x * w,
+    y: region.y * h,
+    width: region.width * w,
+    height: region.height * h,
+  };
+}
+
+// 切り抜いた範囲を土俵にして比べるときのマスク。土俵が変わるので座標も移す
+function localMask(maskData, region, w, h) {
+  return region ? remapMask(maskData, region, { width: w, height: h }) : maskData;
+}
+
 // 元画像に対する編集結果のずれ。合成時に引く量（元画像の解像度）を返す。
-// 判断できなければ null（ずらさない）
-function alignOffset(baseImg, editedImg, maskData, crop = null) {
+// 判断できなければ null（ずらさない）。
+// region があるときは、比べる土俵を「元画像の切り抜いた範囲」に揃える
+function alignOffset(baseImg, editedImg, maskData, crop = null, region = null) {
   const baseW = baseImg.naturalWidth || baseImg.width;
   const baseH = baseImg.naturalHeight || baseImg.height;
-  const aspect = baseW / baseH;
+  const view = regionRect(region, baseW, baseH);
+  const local = localMask(maskData, region, baseW, baseH);
+  const aspect = view ? view.width / view.height : baseW / baseH;
 
   const fit = (target) => (aspect >= 1
     ? { w: target, h: Math.max(16, Math.round(target / aspect)) }
@@ -1708,11 +2125,11 @@ function alignOffset(baseImg, editedImg, maskData, crop = null) {
 
   // 粗く探す
   const c = fit(ALIGN_COARSE_PX);
-  const cw = alignWeights(maskData, c.w, c.h);
+  const cw = alignWeights(local, c.w, c.h);
   if (cw.count < ALIGN_MIN_SAMPLES) return null; // 比べられる場所がほとんど無い
   const range = Math.max(2, Math.round(Math.max(c.w, c.h) * ALIGN_RANGE_RATIO));
   const coarse = bestShift(
-    gradientField(baseImg, c.w, c.h),
+    gradientField(baseImg, c.w, c.h, view),
     gradientField(editedImg, c.w, c.h, crop),
     cw.weights, c.w, c.h, range,
   );
@@ -1721,11 +2138,11 @@ function alignOffset(baseImg, editedImg, maskData, crop = null) {
   // 作業解像度を上げて詰める
   const f = fit(ALIGN_FINE_PX);
   const scale = f.w / c.w;
-  const fw = alignWeights(maskData, f.w, f.h);
+  const fw = alignWeights(local, f.w, f.h);
   const start = { dx: Math.round(coarse.dx * scale), dy: Math.round(coarse.dy * scale) };
   const fine = fw.count >= ALIGN_MIN_SAMPLES
     ? bestShift(
-      gradientField(baseImg, f.w, f.h),
+      gradientField(baseImg, f.w, f.h, view),
       gradientField(editedImg, f.w, f.h, crop),
       fw.weights, f.w, f.h, Math.ceil(scale) + 1, start,
     )
@@ -1734,7 +2151,9 @@ function alignOffset(baseImg, editedImg, maskData, crop = null) {
   // 編集結果が (dx, dy) ずれているので、重ねるときは逆へ動かす。
   // drawImage は小数の座標を受け取れるので、副画素のぶんも活かせる
   const peak = fine.scores ? subpixelPeak(fine, fine.scores) : fine;
-  const k = baseW / f.w;
+  // 作業解像度から元画像の px へ戻す倍率。切り抜いて比べたときは、
+  // 作業 canvas が受け持っているのは切り抜いた範囲のぶんだけ
+  const k = (view ? view.width : baseW) / f.w;
   const round2 = (v) => Math.round(v * 100) / 100;
   const offset = { dx: round2(-peak.dx * k), dy: round2(-peak.dy * k), score: fine.score };
   // 4 分の 1 画素に満たないずれは、動かすほうが害になる
@@ -1806,19 +2225,22 @@ function channelPercentiles(data, weights, qs) {
 
 // 編集結果を元画像の色味へ寄せる、チャンネルごとの変換表。
 // 合わせられない（参照が少ない・効果がほぼ無い）ときは null
-function colorMatchLuts(baseImg, editedImg, maskData, crop) {
+function colorMatchLuts(baseImg, editedImg, maskData, crop, region = null) {
   const baseW = baseImg.naturalWidth || baseImg.width;
   const baseH = baseImg.naturalHeight || baseImg.height;
-  const aspect = baseW / baseH;
+  // 切り抜いて送ったときは、返ってきた画像に写っているのもその範囲だけ。
+  // 比べる土俵を「元画像の切り抜いた範囲」に揃える
+  const view = regionRect(region, baseW, baseH);
+  const aspect = view ? view.width / view.height : baseW / baseH;
   const w = aspect >= 1 ? COLOR_WORK_PX : Math.max(16, Math.round(COLOR_WORK_PX * aspect));
   const h = aspect >= 1 ? Math.max(16, Math.round(COLOR_WORK_PX / aspect)) : COLOR_WORK_PX;
 
   // マスクの外側だけ（境目の guard 込み）。全面を塗った場合はここで空になる
-  const { weights, count } = alignWeights(maskData, w, h);
+  const { weights, count } = alignWeights(localMask(maskData, region, baseW, baseH), w, h);
   if (count < COLOR_MIN_SAMPLES) return null;
 
   const QS = [0.1, 0.5, 0.9];
-  const target = channelPercentiles(pixelsForStats(baseImg, w, h, null), weights, QS);
+  const target = channelPercentiles(pixelsForStats(baseImg, w, h, view), weights, QS);
   const source = channelPercentiles(pixelsForStats(editedImg, w, h, crop), weights, QS);
 
   const luts = [];
@@ -1862,7 +2284,8 @@ function applyColorLuts(ctx, w, h, luts) {
 // 合成は「元画像の解像度・縦横比」で行い、出力をそこへ引き伸ばす。モデルへは
 // Qwen の解像度に合わせて縮めた（必要なら比を変えた）画像を送っているので、
 // ここで戻すことで、マスクの外側は元の画素のまま・内側だけが差し替わる
-function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = null, colorMatch = false) {
+function compositeWithMask(baseImg, editedImg, maskData,
+  { crop = null, region = null, offset = null, colorMatch = false } = {}) {
   const w = baseImg.naturalWidth || baseImg.width;
   const h = baseImg.naturalHeight || baseImg.height;
   const out = makeCanvas(w, h);
@@ -1873,16 +2296,19 @@ function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = n
   const layer = makeCanvas(w, h);
   const lctx = layer.getContext('2d', { willReadFrequently: colorMatch });
   lctx.imageSmoothingQuality = 'high';
+  // 切り抜いて送った場合、返ってきた画像はその範囲ぶんなので、元の位置へ戻す。
+  // 枠の外は透明のまま残り、マスクで抜くときにそのまま元画像が残る
+  const dest = regionRect(region, w, h) ?? { x: 0, y: 0, width: w, height: h };
   // 縁の余白を付けて送った場合は、元画像が入っていた範囲だけを取り出す。
   // 半画素ぶん内側から取るのは、拡大の補間が余白側の画素を拾わないようにするため
   // （そのままだと切り出した縁に余白の色が 1px にじむ）
   const put = (dx, dy) => {
     if (crop) {
       const i = 0.5;
-      lctx.drawImage(editedImg,
-        crop.x + i, crop.y + i, crop.width - i * 2, crop.height - i * 2, dx, dy, w, h);
+      lctx.drawImage(editedImg, crop.x + i, crop.y + i, crop.width - i * 2, crop.height - i * 2,
+        dest.x + dx, dest.y + dy, dest.width, dest.height);
     } else {
-      lctx.drawImage(editedImg, dx, dy, w, h);
+      lctx.drawImage(editedImg, dest.x + dx, dest.y + dy, dest.width, dest.height);
     }
   };
   // ずらすと端が空くので、先に素のまま敷いてから重ねる
@@ -1892,7 +2318,7 @@ function compositeWithMask(baseImg, editedImg, maskData, crop = null, offset = n
   // 抜く前に、画面全体を元画像の色味へ寄せる（参照はマスクの外側だけ）。
   // 抜いたあとだと、比べたい外側が消えていて合わせられない
   if (colorMatch) {
-    const luts = colorMatchLuts(baseImg, editedImg, maskData, crop);
+    const luts = colorMatchLuts(baseImg, editedImg, maskData, crop, region);
     if (luts) applyColorLuts(lctx, w, h, luts);
   }
 
@@ -1930,13 +2356,15 @@ function encodeWithin(canvas, limit = COMPOSITE_MAX_BYTES) {
 // （別ドメインのままだと canvas が汚染されて取り出せない）
 // offset に 'auto' を渡すと、その場でずれを測る。測った結果も返すので、
 // 塗り直しのたびに測り直さずに済む
-async function compositeFromUrls(baseUrl, editedUrl, maskData, crop = null, offset = null,
-  { colorMatch = false } = {}) {
+async function compositeFromUrls(baseUrl, editedUrl, maskData,
+  { crop = null, region = null, offset = null, colorMatch = false } = {}) {
   const [baseImg, editedImg] = await Promise.all([
     loadImageForCanvas(baseUrl), loadImageForCanvas(editedUrl),
   ]);
-  const shift = offset === 'auto' ? alignOffset(baseImg, editedImg, maskData, crop) : offset;
-  const canvas = compositeWithMask(baseImg, editedImg, maskData, crop, shift, colorMatch);
+  const shift = offset === 'auto'
+    ? alignOffset(baseImg, editedImg, maskData, crop, region) : offset;
+  const canvas = compositeWithMask(baseImg, editedImg, maskData,
+    { crop, region, offset: shift, colorMatch });
   try {
     return {
       dataUri: encodeWithin(canvas),
@@ -2199,6 +2627,55 @@ async function saveHistoryRecord(record) {
 // snapSize    … プロバイダ側の刻み制約に丸める（省略可）
 // nativeMask  … マスクを API に渡せるか。渡せないものは合成だけで再現する
 // requiresMask… マスク前提のモデルか（マスク無しでは実行させない）
+// promptHint  … 指示文の書き方がモデルで大きく変わるときの補足（省略可）
+// cropSend    … 塗った範囲のまわりだけを切り抜いて送れるか（下記「切り抜き」）
+
+/* ---- Modal 自前ホスト（modal_comfy）のマスク編集で共通の部分 ---- */
+//
+// Wan2.2 + VACE（/edit）と LanPaint（/inpaint）は送る中身が違うだけで、
+// 「Worker にジョブを預けて状態をポーリングする」流れは同じ
+
+// 32 の倍数へ丸める。どちらのモデルもこの刻みの解像度しか扱えない
+function snap32(size) {
+  const clamp = (v) => Math.min(WAN_DIM_MAX,
+    Math.max(WAN_DIM_MIN, Math.round(v / WAN_DIM_STEP) * WAN_DIM_STEP));
+  return { width: clamp(size.width), height: clamp(size.height) };
+}
+
+async function modalEditSubmit(input, endpoint) {
+  // ジョブ ID はこちらで採番する。送信のリトライや再開で同じ ID を使えば、
+  // サーバー側で二重に走らない
+  const jobId = makeId();
+  const res = await fetch('/api/modal/edit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    // endpoint は URL そのものではなく Worker 側の許可リストのキー
+    body: JSON.stringify({ ...input, endpoint, jobId }),
+  });
+  if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
+  return { jobId };
+}
+
+async function modalEditPoll(handle, note) {
+  const res = await fetch(`/api/krea2/job/${handle.jobId}`).catch(() => null);
+  // 一時的な通信断は、次のポーリングで拾い直す
+  if (!res) return { done: false, text: '編集中…' };
+  if (res.status === 404) throw new Error('ジョブが見つかりませんでした（保持期間切れの可能性があります）');
+  if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
+  const job = await res.json();
+  if (job.status === 'error') throw new Error(job.error || '編集に失敗しました');
+  if (job.status !== 'done') return { done: false, text: '編集中…', note };
+  return { done: true, result: job };
+}
+
+function modalEditParse(job) {
+  return {
+    images: [{ url: job.url, width: job.width ?? undefined, height: job.height ?? undefined }],
+    seed: job.seed ?? null,
+    flagged: 0,
+  };
+}
+
 const PROVIDERS = {
   fal: {
     label: 'fal（fal-ai/qwen-image-edit-2511/lora）',
@@ -2490,11 +2967,7 @@ const PROVIDERS = {
     maskGrow: () => Number(els.wanMaskGrow.value) || 0,
     pollMs: 2500,
 
-    snapSize(size) {
-      const clamp = (v) => Math.min(WAN_DIM_MAX,
-        Math.max(WAN_DIM_MIN, Math.round(v / WAN_DIM_STEP) * WAN_DIM_STEP));
-      return { width: clamp(size.width), height: clamp(size.height) };
-    },
+    snapSize: snap32,
 
     buildInput(dataUri, size, maskUri) {
       const input = {
@@ -2528,40 +3001,15 @@ const PROVIDERS = {
       return { ...input, image: undefined, mask: undefined };
     },
 
-    async submit(input) {
-      // ジョブ ID はこちらで採番する。送信のリトライや再開で同じ ID を使えば、
-      // サーバー側で二重に走らない
-      const jobId = makeId();
-      const res = await fetch('/api/modal/edit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...input, jobId }),
-      });
-      if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
-      return { jobId };
+    submit(input) {
+      return modalEditSubmit(input, 'wan');
     },
 
-    async poll(handle) {
-      const res = await fetch(`/api/krea2/job/${handle.jobId}`).catch(() => null);
-      // 一時的な通信断は、次のポーリングで拾い直す
-      if (!res) return { done: false, text: '編集中…' };
-      if (res.status === 404) throw new Error('ジョブが見つかりませんでした（保持期間切れの可能性があります）');
-      if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
-      const job = await res.json();
-      if (job.status === 'error') throw new Error(job.error || '編集に失敗しました');
-      if (job.status !== 'done') {
-        return { done: false, text: '編集中…', note: '初回はモデルの読み込みで数分かかります' };
-      }
-      return { done: true, result: job };
+    poll(handle) {
+      return modalEditPoll(handle, '初回はモデルの読み込みで数分かかります');
     },
 
-    parse(job) {
-      return {
-        images: [{ url: job.url, width: job.width ?? undefined, height: job.height ?? undefined }],
-        seed: job.seed ?? null,
-        flagged: 0,
-      };
-    },
+    parse: modalEditParse,
 
     costHint() {
       const size = sendSize();
@@ -2570,7 +3018,109 @@ const PROVIDERS = {
         + ' ・ 自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です';
     },
   },
+
+  // LanPaint（Modal 自前ホスト / modal_comfy の lanpaint_app の /inpaint）。
+  //
+  // Krea 2 のインペイント。塗った範囲だけを描き直し、マスクの外は元画像と
+  // ピクセル一致で返る（サーバー側で合成済み）。生成で使っている Krea 2 の
+  // LoRA がそのまま効くので、キャラ LoRA を当てたまま顔や服だけ描き直せる。
+  //
+  // Wan2.2 + VACE（/edit）とは別のコンテナ。両方を使うとコンテナが 2 つ立ち
+  // 上がるので、生成側も「Modal LanPaint 版」に寄せると 1 コンテナで収まる
+  lanpaint: {
+    label: 'Modal 自前ホスト（LanPaint インペイント）',
+    model: 'modal/lanpaint-inpaint',
+    note: '塗った範囲だけを描き直します（マスク必須）。マスクの外は元画像のまま返るモデルなので、継ぎ目が出ません。生成で使っている Krea 2 の LoRA がそのまま効くので、キャラクターを保ったまま顔や服だけ描き直す用途に向きます。実質のノブは「思考回数」だけで、生成時間もこれでほぼ決まります（標準の 5 でウォーム時 30 秒ほど）。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。Wan2.2 + VACE とは別のコンテナなので、生成も「Modal LanPaint 版」にすればコンテナが 1 つで済みます。',
+    supports: { size: true, steps: true },
+    sizeKind: 'wan',
+    loraBase: 'krea2',
+    // この API の LoRA も名前 / HF の resolve URL で指定するので、ライブラリに
+    // 無いものも名前だけで足せる
+    loraByName: true,
+    maxLoras: 8,
+    nativeMask: true,
+    requiresMask: true,
+    // LanPaint は二値マスクを前提にしている（公式 README: "requires binary
+    // masks ... without opacity or smoothing"）。ぼかした縁は合成のときだけ使う
+    hardMask: true,
+    // 塗った縁の内側に元画像が残るとき用。広げたぶんは合成で捨てる
+    maskGrow: () => Number(els.lpMaskGrow.value) || 0,
+    // alignOutput は持たない。マスクの外が元画像とピクセル一致で返るので、
+    // そもそもずれようがない（「ずれを補正してから重ねる」も出さない）。
+    // 逆に、切り抜いて送っても位置がずれないので切り抜きとは相性がいい
+    cropSend: true,
+    pollMs: 2000,
+    promptHint: 'このモデルは「塗った範囲に何があってほしいか」だけを書きます（例:「赤いニット帽」）。'
+      + '「帽子をかぶった男性の写真」のような画像全体の説明を書くと結果が悪くなります。',
+    promptPlaceholder: '例: 赤いニット帽 / 白いシャツ',
+    snapSize: snap32,
+
+    buildInput(dataUri, size, maskUri) {
+      const input = {
+        prompt: els.prompt.value.trim(),
+        image: dataUri,
+        mask: maskUri,
+        width: size.width,
+        height: size.height,
+        num_steps: lanpaintNumSteps(),
+        loras: collectLoras().map((l) => ({
+          name: loraLib.modalRef(l.path),
+          strength: l.scale,
+        })),
+      };
+      if (els.seedLock.checked && els.seed.value !== '') input.seed = Number(els.seed.value);
+      // 空欄はキーごと落として API の既定に任せる
+      if (els.lpSteps.value !== '') input.steps = Number(els.lpSteps.value);
+      // 偶数は 422 になるので、打たれても通る形に直してから送る
+      if (els.lpBlend.value !== '') input.blend_overlap = oddBlendOverlap(els.lpBlend.value);
+      return input;
+    },
+
+    // 画像本体（base64）は履歴にも再開用の記録にも残さない
+    strip(input) {
+      return { ...input, image: undefined, mask: undefined };
+    },
+
+    submit(input) {
+      return modalEditSubmit(input, 'lanpaint');
+    },
+
+    poll(handle) {
+      return modalEditPoll(handle, '初回はモデルの読み込みで 1 分ほどかかります');
+    },
+
+    parse: modalEditParse,
+
+    costHint() {
+      const size = sendSize();
+      if (!size) return '';
+      return `出力 ${size.width}×${size.height} × 1 枚`
+        + ` ・ ウォーム時 約 ${lanpaintSeconds()} 秒`
+        + ' ・ 自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です';
+    },
+  },
 };
+
+// 思考回数（num_steps）。空欄・数値でないものは既定に寄せる
+// （空欄を 0 と読むと、消しただけで LanPaint が切れてしまう）
+function lanpaintNumSteps() {
+  if (els.lpNumSteps.value.trim() === '') return LANPAINT_NUM_STEPS;
+  const n = Math.round(Number(els.lpNumSteps.value));
+  if (!Number.isFinite(n)) return LANPAINT_NUM_STEPS;
+  return Math.min(20, Math.max(0, n));
+}
+
+// ウォーム時の生成時間の目安（秒）。実測がほぼ一次式なのでそのまま使う
+function lanpaintSeconds(steps = lanpaintNumSteps()) {
+  return Math.round(LANPAINT_SEC_BASE + LANPAINT_SEC_PER_STEP * steps);
+}
+
+// blend_overlap は奇数のみ（偶数は 422）。偶数を打たれたら 1 足して通す
+function oddBlendOverlap(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n < 1) return LANPAINT_BLEND_OVERLAP;
+  return n % 2 === 0 ? n + 1 : n;
+}
 
 let providerId = 'fal';
 
@@ -2634,6 +3184,10 @@ function syncProviderFields() {
   els.negativeHint.textContent = api.defaultNegative
     ? `空欄のときは「${api.defaultNegative}」を送ります（True CFG は対になる negative prompt があって初めて効くため）。`
     : '';
+  // 指示文の書き方がモデルで大きく変わるものは、欄のすぐ下で断っておく
+  els.promptHint.hidden = !api.promptHint;
+  els.promptHint.textContent = api.promptHint ?? '';
+  els.prompt.placeholder = api.promptPlaceholder ?? PROMPT_PLACEHOLDER;
   els.maskModeHint.textContent = MASK_MODE_HINTS[api.nativeMask ? 'native' : 'composite'];
   // マスク前提のモデルでは切れないようにする（切ると送るものが無くなる）
   els.maskToggle.disabled = !!api.requiresMask;
@@ -2645,7 +3199,8 @@ function syncProviderFields() {
   pruneLoraRows();
   renderSizeOptions();
   renderRunwareParamHint();
-  syncMaskUi();
+  renderLanpaintParamHint();
+  syncMaskUi(); // 切り抜きの欄もここから追従する
   renderSizeHint();
   syncRunBtn(); // 費用の目安もここで出し直す
 }
@@ -2701,6 +3256,20 @@ function renderRunwareParamHint() {
     ? `${notes.join('。')}。「推奨値に戻す」で公式の作例どおりになります。`
     : `公式の作例と同じ設定です。${base}`;
   els.rwParamHint.classList.toggle('warn', notes.length > 0);
+}
+
+// 思考回数と生成時間はほぼ比例するので、いま何秒くらいかかるかをその場で出す
+function renderLanpaintParamHint() {
+  if (providerId !== 'lanpaint') return;
+  const steps = lanpaintNumSteps();
+  const notes = [`思考回数 ${steps} で、ウォーム時 約 ${lanpaintSeconds(steps)} 秒です`
+    + `（速い ${lanpaintSeconds(2)} 秒 / 標準 ${lanpaintSeconds(5)} 秒 / 丁寧 ${lanpaintSeconds(10)} 秒）`];
+  if (steps === 0) notes.push('0 は LanPaint を切った状態（ただの修復）になります');
+  const blend = els.lpBlend.value;
+  if (blend !== '' && Math.round(Number(blend)) % 2 === 0) {
+    notes.push(`境界ブレンドは奇数のみなので ${oddBlendOverlap(blend)} で送ります`);
+  }
+  els.lpParamHint.textContent = `${notes.join('。')}。`;
 }
 
 /* ---------- 実行（順番待ちつき） ---------- */
@@ -2876,9 +3445,14 @@ async function run() {
   const useMask = maskOn() && mask.strokes.length > 0;
   const grow = api.maskGrow ? api.maskGrow() : 0;
 
+  // 塗った範囲のまわりだけを切り抜いて送る（要らない周りを捨てる）。
+  // 切り抜かないときは null で、これまで通り画像ぜんぶを送る
+  const region = useMask ? cropRegion(size) : null;
+
   // マスクが画像の縁に近い辺は、単色で広げてから送る（返ってきたら切り出す）。
-  // 広げる必要が無ければ frame は null で、これまで通り素の枠で送る
-  const frame = useMask && api.nativeMask && api.padEdges
+  // 広げる必要が無ければ frame は null で、これまで通り素の枠で送る。
+  // 切り抜いたなら周りは元画像で埋まっているので、余白を足す必要はない
+  const frame = useMask && api.nativeMask && api.padEdges && !region
     ? padFrame(size, mask, grow, api.padEdges()) : null;
   const outer = frame ? frame.outer : size;
   const inner = frame ? frame.inner : { x: 0, y: 0, width: size.width, height: size.height };
@@ -2886,7 +3460,8 @@ async function run() {
   let dataUri;
   try {
     const img = await sourceImageEl();
-    dataUri = frame ? framedDataUri(img, outer, inner) : toDataUri(img, size).dataUri;
+    if (region) dataUri = croppedDataUri(img, region, size);
+    else dataUri = frame ? framedDataUri(img, outer, inner) : toDataUri(img, size).dataUri;
   } catch (err) {
     setError(`入力画像を用意できませんでした: ${err.message}`);
     return;
@@ -2898,7 +3473,11 @@ async function run() {
   // ぼかした縁をそのまま渡すと輪郭のゴーストや暗い縁取りになるモデルがある。
   // その場合はハードエッジで送り、ぼかしは合成のときだけかける
   const sendMask = api.hardMask ? { ...mask, feather: 0 } : mask;
-  const maskUri = useMask && api.nativeMask ? maskDataUri(outer, inner, sendMask, grow) : null;
+  // 切り抜いたぶん、マスクも切り抜いた範囲の座標系へ移す
+  const outMask = region
+    ? remapMask(sendMask, region, { width: source.width, height: source.height })
+    : sendMask;
+  const maskUri = useMask && api.nativeMask ? maskDataUri(outer, inner, outMask, grow) : null;
   const input = api.buildInput(dataUri, outer, maskUri);
   const job = {
     id: makeId(),
@@ -2912,6 +3491,8 @@ async function run() {
     sentSize: outer,
     // 余白を足して送った場合の、元画像が入っている範囲。合成のときに切り出す
     crop: frame ? inner : null,
+    // 切り抜いて送った場合の、元画像のどこを送ったか（0..1）。合成で元の位置へ戻す
+    region,
     // 送信内容のうち、履歴と再開に必要な分だけ控える（画像本体は持たない）
     params: api.strip(input),
     // 履歴・ギャラリー側は { path, scale } で読むので、Runware の
@@ -3003,6 +3584,7 @@ async function waitAndFinish(job) {
     ...(cost ? { cost } : {}),
     ...(job.maskNative ? { maskNative: true } : {}),
     ...(job.crop ? { crop: job.crop } : {}),
+    ...(job.region ? { region: job.region } : {}),
     ...(job.alignEnabled ? { alignEnabled: true } : {}),
     ...(job.colorEnabled ? { colorEnabled: true } : {}),
     sourceSize: job.sourceSize ?? null,
@@ -3052,8 +3634,13 @@ async function buildMaskedRecord(record, maskData, onStatus = () => {}) {
     const want = offsets[i] === undefined && record.alignEnabled ? 'auto' : (offsets[i] ?? null);
     if (want === 'auto') onStatus('ずれを測っています…');
     const { dataUri, width, height, offset } = await compositeFromUrls(
-      inputUrl, raw.url, maskData, record.crop ?? null, want,
-      { colorMatch: !!record.colorEnabled },
+      inputUrl, raw.url, maskData,
+      {
+        crop: record.crop ?? null,
+        region: record.region ?? null,
+        offset: want,
+        colorMatch: !!record.colorEnabled,
+      },
     );
     offsets[i] = offset ?? null;
     const url = await uploadDataUri(
@@ -3099,12 +3686,23 @@ function alignMetaText(record) {
     + (found.length > 1 ? ' ほか' : '');
 }
 
+// 切り抜いて送った場合、元画像のどこを何倍で送ったか。何を見ているのか
+// 分からなくならないよう、結果の見出しにも出す
+function cropMetaText(record) {
+  const r = record.region;
+  if (!r || !record.sourceSize || !record.sentSize) return '';
+  const w = Math.round(r.width * record.sourceSize.width);
+  const h = Math.round(r.height * record.sourceSize.height);
+  return ` ・ 切り抜き ${w}×${h}（${(record.sentSize.width / w).toFixed(1)} 倍）`;
+}
+
 function renderResult(record) {
   shownResult = record;
   els.resultPanel.hidden = false;
   els.resultMeta.textContent = `${record.elapsed} 秒`
     + (record.seed !== null && record.seed !== undefined ? ` ・ seed ${record.seed}` : '')
     + (record.sentSize ? ` ・ 送信 ${record.sentSize.width}×${record.sentSize.height}` : '')
+    + cropMetaText(record)
     + (record.masked && record.sourceSize
       ? ` ・ 合成 ${record.sourceSize.width}×${record.sourceSize.height}` : '')
     + (record.cost ? ` ・ $${Number(record.cost).toFixed(4)}` : '')
@@ -3188,8 +3786,13 @@ async function refreshResultComposite() {
       const raw = record.images[n + i];
       if (!raw) continue;
       const { dataUri } = await compositeFromUrls(
-        inputUrl, raw.url, current, record.crop ?? null, record.align?.[i] ?? null,
-        { colorMatch: !!record.colorEnabled },
+        inputUrl, raw.url, current,
+        {
+          crop: record.crop ?? null,
+          region: record.region ?? null,
+          offset: record.align?.[i] ?? null,
+          colorMatch: !!record.colorEnabled,
+        },
       );
       if (run !== compositeRun || shownResult !== record) return; // 続けて塗られた
       const el = els.resultImages.querySelector(`[data-result-index="${i}"] img`);
@@ -3264,6 +3867,10 @@ function saveForm() {
     wanCfg: els.wanCfg.value,
     wanShift: els.wanShift.value,
     wanMaskGrow: els.wanMaskGrow.value,
+    lpNumSteps: els.lpNumSteps.value,
+    lpSteps: els.lpSteps.value,
+    lpBlend: els.lpBlend.value,
+    lpMaskGrow: els.lpMaskGrow.value,
     outputFormat: els.outputFormat.value,
     seed: els.seed.value,
     seedLock: els.seedLock.checked,
@@ -3273,6 +3880,9 @@ function saveForm() {
     // 画像本体は大きすぎるので保存しない。R2 の URL から読み直す
     source: source ? { url: source.url, from: source.from } : null,
     maskOn: els.maskToggle.checked,
+    crop: els.cropToggle.checked,
+    cropMargin: els.cropMargin.value,
+    cropManual, // 四隅を動かして決めた枠（自動なら null）
     maskSize: els.maskSize.value,
     maskFeather: els.maskFeather.value,
     mask, // ストロークなので軽い（画像として持つと保存に収まらない）
@@ -3319,6 +3929,12 @@ async function restoreForm() {
   els.wanShift.value = s.wanShift ?? '';
   // 広げる px だけは既定値がある（0 だと縁に元画像が残りやすい）
   if (s.wanMaskGrow !== undefined && s.wanMaskGrow !== '') els.wanMaskGrow.value = s.wanMaskGrow;
+  els.lpSteps.value = s.lpSteps ?? '';
+  els.lpBlend.value = s.lpBlend ?? '';
+  // 思考回数と広げる px には既定値があるので、値があるときだけ戻す
+  // （空欄で保存されていたら、欄の既定に任せる）
+  if (s.lpNumSteps !== undefined && s.lpNumSteps !== '') els.lpNumSteps.value = s.lpNumSteps;
+  if (s.lpMaskGrow !== undefined && s.lpMaskGrow !== '') els.lpMaskGrow.value = s.lpMaskGrow;
   if (s.outputFormat) els.outputFormat.value = s.outputFormat;
   els.seed.value = s.seed || '';
   els.seedLock.checked = !!s.seedLock;
@@ -3328,6 +3944,10 @@ async function restoreForm() {
   els.maskToggle.checked = !!s.maskOn;
   els.alignToggle.checked = s.align !== false;
   els.colorToggle.checked = s.color !== false;
+  // 切り抜きは標準で有効。下書きが古くて印が無いときも有効のままにする
+  els.cropToggle.checked = s.crop !== false;
+  if (s.cropMargin !== undefined && s.cropMargin !== '') els.cropMargin.value = s.cropMargin;
+  if (s.cropManual?.width > 0) cropManual = s.cropManual;
   if (s.maskSize) els.maskSize.value = s.maskSize;
   if (s.maskFeather) els.maskFeather.value = s.maskFeather;
   if (Array.isArray(s.mask?.strokes)) mask = s.mask;
@@ -3443,8 +4063,16 @@ for (const el of [els.sizeSelect, els.numImages, els.steps, els.guidance,
   els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength, els.rwMaskMargin,
   els.rwMaskGrow, els.rwPadEdges, els.rwScheduler, els.rwOutputQuality,
   els.rwPromptWeighting,
-  els.wanSteps, els.wanCfg, els.wanShift, els.wanMaskGrow]) {
+  els.wanSteps, els.wanCfg, els.wanShift, els.wanMaskGrow,
+  els.lpNumSteps, els.lpSteps, els.lpBlend, els.lpMaskGrow]) {
   el.addEventListener('change', saveForm);
+}
+// 思考回数は生成時間の目安（実行バーの費用欄）にも効く
+for (const el of [els.lpNumSteps, els.lpBlend]) {
+  el.addEventListener('input', () => {
+    renderLanpaintParamHint();
+    renderCostHint();
+  });
 }
 // 推奨から外れたらその場で理由を出す
 for (const el of [els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength,
@@ -3452,9 +4080,18 @@ for (const el of [els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength,
   el.addEventListener('input', renderRunwareParamHint);
 }
 // 広げ幅と縁の余白は、何をどの大きさで送るかを変える
-for (const el of [els.rwMaskGrow, els.rwPadEdges, els.wanMaskGrow]) {
+for (const el of [els.rwMaskGrow, els.rwPadEdges, els.wanMaskGrow, els.lpMaskGrow]) {
   el.addEventListener('input', renderSizeHint);
 }
+els.cropToggle.addEventListener('change', () => {
+  commitCropChange();
+  syncMaskUi(); // 枠の描き直し（切ったら消える）
+});
+// 余白は枠の大きさを変える。打っている途中から枠が追いかけるようにする
+els.cropMargin.addEventListener('input', commitCropChange);
+els.cropMargin.addEventListener('change', commitCropChange);
+els.cropResetBtn.addEventListener('click', resetCrop);
+
 els.rwPresetBtn.addEventListener('click', () => {
   applyRunwareRecommended();
   renderRunwareParamHint();
