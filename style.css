@@ -2175,6 +2175,9 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 /* 編集プロンプトの折りたたみ（サマリーに先頭を薄く表示） */
 .prompt-preview { font-weight: 400; color: var(--muted); }
 
+/* 追加プロンプトは書き足し用なので、編集プロンプトより浅く見せる */
+.extra-prompt-field textarea { min-height: 56px; }
+
 /* ---------- アクセシビリティ ---------- */
 /* 動きを減らす設定: スライドやスケールは行わず、短いフェードに置き換える
    （フィードバックそのものは残す） */

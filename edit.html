@@ -78,6 +78,10 @@
           <textarea id="editPrompt" rows="4" placeholder="選択した範囲をどう編集するか英語で記述..." spellcheck="false"></textarea>
         </div>
       </details>
+      <label class="field extra-prompt-field">
+        <span class="label">追加プロンプト <em>（入力があるときだけ、{NAME} 置換後の編集プロンプトの末尾に改行でつないで送信します）</em></span>
+        <textarea id="extraPrompt" rows="2" placeholder="毎回そのつど書き足したい指示（空欄なら何も足しません）" spellcheck="false"></textarea>
+      </label>
       <label class="field">
         <span class="label">名前 <em>（プロンプト中の {NAME} をこの名前で置換して送信します）</em></span>
         <input id="nameInput" type="text" list="namePresets" placeholder="例: Tom Holland" spellcheck="false">
