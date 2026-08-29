@@ -10,10 +10,34 @@ import { DurableObject } from 'cloudflare:workers';
 // 生成画像・履歴の保存設定
 // 画像本体は R2（env.IMAGES）に置く。履歴レコードは Durable Object の SQLite に
 // 小さな JSON（プロンプト・設定・画像への参照）として持つ。
-const HISTORY_KEEP = 1000; // 履歴レコードの上限。超過分は画像ごと古い順に自動削除
+//
+// 履歴に件数の上限は無い（消えるのは明示的に削除したときだけ）。
 const HISTORY_PREFIX = 'hist:'; // 履歴 1 件ぶん（hist:<id>）
-const HISTORY_ORDER_KEY = 'history:order'; // 新しい順に並べた id の配列
-const HISTORY_LEGACY_KEY = 'history:list'; // 旧レイアウト（全件を 1 キーに詰めていた）
+const HISTORY_INDEX_PREFIX = 'hidx:'; // 並び順の索引（hidx:<逆順の通し番号>:<id> → id）
+const HISTORY_SEQ_KEY = 'history:seq'; // 最後に振った通し番号
+const HISTORY_ORDER_KEY = 'history:order'; // 旧レイアウト（並び順を id の配列で 1 キーに）
+const HISTORY_LEGACY_KEY = 'history:list'; // さらに旧（全件を 1 キーに詰めていた）
+
+// 通し番号は「大きいほど新しい」。索引キーには (SPAN - seq) を桁揃えで入れるので、
+// キーの辞書順＝新しい順になる。Durable Object のキー一覧は辞書順に返るため、
+// list({ prefix, startAfter, limit }) がそのままページ送りになる
+const HISTORY_SEQ_DIGITS = 15;
+const HISTORY_SEQ_SPAN = 10 ** HISTORY_SEQ_DIGITS - 1; // 15 桁に収まる最大値
+
+// 一覧（GET /api/history）の 1 ページぶんの件数。件数の上限を外した以上、
+// ここを決めておかないと 1 回の応答が青天井になる
+const HISTORY_PAGE_DEFAULT = 500;
+const HISTORY_PAGE_MAX = 1000;
+
+// /api/capture が「その URL が履歴に載っているか」を確かめるときに、新しい方から
+// 何件まで見るか。踏み台にされないための確認なので全件見るのが理想だが、上限を
+// 外した以上そこは青天井になる。取り込みたくなるのは生成直後の（プロバイダの CDN が
+// まだ生きている）画像だけなので、古い方は見なくても実害が無い
+const HISTORY_CAPTURE_SCAN = 2000;
+
+// 履歴レコードの id。GET / DELETE のルートが受ける形と揃える（ここを緩くすると、
+// 保存はできるのに 1 件取得も削除もできないレコードが作れてしまう）
+const HISTORY_ID_RE = /^[\w.-]{1,100}$/;
 
 // Durable Object の一括 get / put / delete は 1 回 128 件まで
 const DO_BATCH = 128;
@@ -488,6 +512,18 @@ function recordImageLists(record) {
 // 全件を取りに来るため、ここがそのまま毎回の転送量とパース時間になっていた。
 // マスクが要るのは「マスクを調整」で 1 件開くときだけなので、
 // 一覧からは外して GET /api/history/<id> で渡す
+// 索引キー。逆順（SPAN - seq）を桁揃えして入れるので、辞書順＝新しい順になる
+function historyIndexKey(seq, id) {
+  return HISTORY_INDEX_PREFIX + String(HISTORY_SEQ_SPAN - seq).padStart(HISTORY_SEQ_DIGITS, '0') + ':' + id;
+}
+
+// 索引キーから通し番号を戻す。レコード側の seq と突き合わせて、
+// 差し替えで振り直された古い索引を見分けるのに使う
+function historyIndexSeq(key) {
+  const n = Number(key.slice(HISTORY_INDEX_PREFIX.length, HISTORY_INDEX_PREFIX.length + HISTORY_SEQ_DIGITS));
+  return Number.isFinite(n) ? HISTORY_SEQ_SPAN - n : NaN;
+}
+
 function historyListEntry(record) {
   if (!record?.mask) return record;
   const { mask, ...rest } = record;
@@ -557,21 +593,28 @@ export class SyncState extends DurableObject {
 
   /* ---- 生成履歴（サーバーが正） ---- */
   //
-  // 1 レコード 1 キー（hist:<id>）で持ち、並び順だけを別のキー（history:order）に置く。
-  // 以前は全件を history:list の 1 キーに詰めていたが、SQLite バックエンドの
-  // Durable Object はキーと値の合計で 2MB までで、マスク付きのレコード（塗った線の
-  // 座標を持つので 1 件で数十 KB）が増えると保存そのものが失敗し始める。分けておけば
-  // 上限はレコード 1 件ぶんになり、1 件の保存が全履歴の書き直しになることもない。
-  // 並びは order が正なので、そこに載っていないレコードは無いものとして扱う
+  // 1 レコード 1 キー（hist:<id>）で持ち、並び順は 1 件 1 キーの索引
+  // （hidx:<逆順の通し番号>:<id>）に置く。件数の上限は無い。
+  //
+  // 以前は並び順を history:order の 1 キー（id の配列）に持っていたが、SQLite
+  // バックエンドの Durable Object はキーと値の合計で 2MB までなので、上限を外すと
+  // この配列がいずれ収まらなくなり、保存そのものが失敗し始める（全件を
+  // history:list に詰めていた頃と同じ壊れ方）。1 件 1 キーの索引なら、
+  // 書き込み量も読み出し量も件数に依らず一定になる。
+  //
+  // 索引が正。そこに載っていないレコードは無いものとして扱う
 
-  // 旧レイアウトが残っていれば分割する。1 度だけ走ればよいので、
+  // 旧レイアウトが残っていれば作り直す。1 度だけ走ればよいので、
   // 済んだことはインスタンスに覚えておく（作り直されても、次の 1 回で分かる）
   async migrateHistory() {
     if (this.historyMigrated) return;
+
+    // 旧レイアウト 1: 全件を history:list の 1 キーに詰めていた
+    let order = null;
     const legacy = await this.ctx.storage.get(HISTORY_LEGACY_KEY);
     if (Array.isArray(legacy)) {
       const seen = new Set();
-      const order = [];
+      order = [];
       const entries = [];
       for (const record of legacy) {
         if (typeof record?.id !== 'string' || seen.has(record.id)) continue;
@@ -583,23 +626,60 @@ export class SyncState extends DurableObject {
       for (const part of chunkBatch(entries, 32)) {
         await this.ctx.storage.put(Object.fromEntries(part));
       }
-      await this.ctx.storage.put(HISTORY_ORDER_KEY, order);
       await this.ctx.storage.delete(HISTORY_LEGACY_KEY);
     }
+
+    // 旧レイアウト 2: 並び順を history:order の 1 キー（id の配列）で持っていた。
+    // 新しい方に大きい通し番号が来るよう、末尾から 1 ずつ振り直す
+    order ??= await this.ctx.storage.get(HISTORY_ORDER_KEY);
+    if (Array.isArray(order)) {
+      let seq = order.length;
+      // レコードにも seq を書くので、1 件あたり 2 キー。一括 put の上限に収まるよう刻む
+      for (const part of chunkBatch(order, DO_BATCH / 2)) {
+        const stored = await this.ctx.storage.get(part.map((id) => HISTORY_PREFIX + id));
+        const writes = {};
+        for (const id of part) {
+          const record = stored.get(HISTORY_PREFIX + id);
+          const n = seq--;
+          if (!record) continue; // 消し込みが途中で終わった残り
+          record.seq = n;
+          writes[HISTORY_PREFIX + id] = record;
+          writes[historyIndexKey(n, id)] = id;
+        }
+        if (Object.keys(writes).length > 0) await this.ctx.storage.put(writes);
+      }
+      await this.ctx.storage.put(HISTORY_SEQ_KEY, order.length);
+      await this.ctx.storage.delete(HISTORY_ORDER_KEY);
+    }
+
     this.historyMigrated = true;
   }
 
-  async historyOrder() {
-    return (await this.ctx.storage.get(HISTORY_ORDER_KEY)) ?? [];
-  }
-
-  async listHistory() {
+  // 索引を新しい順にたどって 1 ページぶん返す。
+  // cursor は前のページで最後に読んだ索引キー（空なら先頭から）
+  async pageHistory(limit, cursor) {
     await this.migrateHistory();
-    const order = await this.historyOrder();
-    if (order.length === 0) return [];
-    const stored = await this.ctx.storage.list({ prefix: HISTORY_PREFIX });
-    // order にあって実体が無いものは、消し込みが途中で終わった残り。無いものとして扱う
-    return order.map((id) => stored.get(HISTORY_PREFIX + id)).filter(Boolean);
+    const want = Math.max(1, Math.min(Math.trunc(limit) || HISTORY_PAGE_DEFAULT, HISTORY_PAGE_MAX));
+    const index = await this.ctx.storage.list({
+      prefix: HISTORY_INDEX_PREFIX,
+      limit: want,
+      ...(cursor ? { startAfter: cursor } : {}),
+    });
+    if (index.size === 0) return { records: [], cursor: null };
+
+    const keys = [...index.keys()];
+    const records = [];
+    for (const part of chunkBatch(keys)) {
+      const stored = await this.ctx.storage.get(part.map((key) => HISTORY_PREFIX + index.get(key)));
+      for (const key of part) {
+        const record = stored.get(HISTORY_PREFIX + index.get(key));
+        // 索引だけ残っているもの（消し込みが途中で終わった残り）と、差し替えで
+        // 振り直された古い索引は、無いものとして飛ばす
+        if (record && record.seq === historyIndexSeq(key)) records.push(record);
+      }
+    }
+    // 索引を want 件読み切ったなら、まだ続きがあるかもしれない
+    return { records, cursor: index.size < want ? null : keys[keys.length - 1] };
   }
 
   async getHistory(id) {
@@ -607,40 +687,76 @@ export class SyncState extends DurableObject {
     return (await this.ctx.storage.get(HISTORY_PREFIX + id)) ?? null;
   }
 
+  // その画像 URL が履歴に載っているか（/api/capture の踏み台対策）。
+  // 新しい方から HISTORY_CAPTURE_SCAN 件まで見る
+  async historyHasImage(url) {
+    let cursor = '';
+    for (let seen = 0; seen < HISTORY_CAPTURE_SCAN;) {
+      const page = await this.pageHistory(HISTORY_PAGE_MAX, cursor);
+      if (page.records.length === 0) return false;
+      seen += page.records.length;
+      const hit = page.records.some((record) => recordImageLists(record)
+        .some(({ images }) => images.some((img) => img?.url === url)));
+      if (hit) return true;
+      if (!page.cursor) return false;
+      cursor = page.cursor;
+    }
+    return false;
+  }
+
+  // 保存した（通し番号を振った）レコードを返す。同じ id の保存は差し替えで、
+  // 新しい通し番号が付くので先頭に来る
   async addHistory(record) {
     await this.migrateHistory();
-    const order = (await this.historyOrder()).filter((id) => id !== record.id); // 同 id は差し替え
-    order.unshift(record.id);
-    // 超過分は画像ごと消す。先に消しておけば、途中で止まっても
-    // 「order にあるのに実体が無い」だけで済む（消し残しの孤児を作らない）
-    await this.dropHistoryRecords(order.splice(HISTORY_KEEP));
-    await this.ctx.storage.put(HISTORY_PREFIX + record.id, record);
-    await this.ctx.storage.put(HISTORY_ORDER_KEY, order);
+    const prev = await this.ctx.storage.get(HISTORY_PREFIX + record.id);
+    const seq = ((await this.ctx.storage.get(HISTORY_SEQ_KEY)) ?? 0) + 1;
+    const saved = { ...record, seq };
+    if (Number.isFinite(prev?.seq)) {
+      await this.ctx.storage.delete(historyIndexKey(prev.seq, record.id));
+    }
+    await this.ctx.storage.put({
+      [HISTORY_PREFIX + record.id]: saved,
+      [historyIndexKey(seq, record.id)]: record.id,
+      [HISTORY_SEQ_KEY]: seq,
+    });
+    return saved;
   }
 
   async deleteHistory(id) {
     await this.migrateHistory();
-    await this.ctx.storage.put(
-      HISTORY_ORDER_KEY,
-      (await this.historyOrder()).filter((x) => x !== id),
-    );
     await this.dropHistoryRecords([id]);
   }
 
   async clearHistory() {
     await this.migrateHistory();
-    await this.ctx.storage.put(HISTORY_ORDER_KEY, []);
-    // order ではなく実体を数える。消し込みの途中で終わった残りもここで片付く
-    const keys = [...(await this.ctx.storage.list({ prefix: HISTORY_PREFIX })).keys()];
-    await this.dropHistoryRecords(keys.map((k) => k.slice(HISTORY_PREFIX.length)));
+    // 全件をいちどに読むと、件数の上限が無い以上いつか収まらなくなる。
+    // 1 ページずつ読んでは消す（消しているので、毎回先頭を読み直せばよい）
+    for (;;) {
+      const page = await this.ctx.storage.list({ prefix: HISTORY_PREFIX, limit: DO_BATCH });
+      if (page.size === 0) break;
+      await this.deleteRecordImages([...page.values()]);
+      await this.ctx.storage.delete([...page.keys()]);
+    }
+    // 実体の無い索引（消し込みが途中で終わった残り）もここで片付く
+    for (;;) {
+      const page = await this.ctx.storage.list({ prefix: HISTORY_INDEX_PREFIX, limit: DO_BATCH });
+      if (page.size === 0) break;
+      await this.ctx.storage.delete([...page.keys()]);
+    }
+    await this.ctx.storage.delete(HISTORY_SEQ_KEY);
   }
 
-  // 履歴レコードを、保存済み画像ごと消す
+  // 履歴レコードを、索引と保存済み画像ごと消す
   async dropHistoryRecords(ids) {
     for (const part of chunkBatch(ids.map((id) => HISTORY_PREFIX + id))) {
       const stored = await this.ctx.storage.get(part);
-      await this.deleteRecordImages([...stored.values()]);
+      const records = [...stored.values()];
+      await this.deleteRecordImages(records);
       await this.ctx.storage.delete(part);
+      const index = records
+        .filter((record) => Number.isFinite(record?.seq))
+        .map((record) => historyIndexKey(record.seq, record.id));
+      if (index.length > 0) await this.ctx.storage.delete(index);
     }
   }
 
@@ -2126,7 +2242,16 @@ export default {
     // ローカル URL に差し替えたうえで、生成設定を PNG に焼き込む
     if (url.pathname === '/api/history') {
       if (request.method === 'GET') {
-        return Response.json((await stub.listHistory()).map(historyListEntry));
+        const { records, cursor } = await stub.pageHistory(
+          Number(url.searchParams.get('limit')),
+          url.searchParams.get('cursor') ?? '',
+        );
+        // 続きの位置はヘッダで返し、本文は今までどおり配列のままにしておく。
+        // デプロイ直後にまだ古い JS を持っているタブでも、直近の 1 ページぶんは
+        // そのまま表示できる（読み込み直せば続きも追うようになる）
+        return Response.json(records.map(historyListEntry), {
+          headers: cursor ? { 'X-Next-Cursor': encodeURIComponent(cursor) } : {},
+        });
       }
       if (request.method === 'POST') {
         if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });
@@ -2136,7 +2261,7 @@ export default {
         } catch {
           return new Response('Invalid JSON', { status: 400 });
         }
-        if (typeof record?.id !== 'string' || record.id === '' || record.id.length > 100) {
+        if (typeof record?.id !== 'string' || !HISTORY_ID_RE.test(record.id)) {
           return new Response('Invalid record', { status: 422 });
         }
         for (const { images, loras } of recordImageLists(record)) {
@@ -2173,8 +2298,7 @@ export default {
             }
           }
         }
-        await stub.addHistory(record);
-        return Response.json(record);
+        return Response.json(await stub.addHistory(record));
       }
       if (request.method === 'DELETE') {
         await stub.clearHistory();
@@ -2220,9 +2344,9 @@ export default {
         return new Response('Invalid url', { status: 422 });
       }
       if (src.protocol !== 'https:') return new Response('https only', { status: 403 });
-      const known = (await stub.listHistory()).some((record) => recordImageLists(record)
-        .some(({ images }) => images.some((img) => img?.url === target)));
-      if (!known) return new Response('Unknown image', { status: 403 });
+      if (!(await stub.historyHasImage(target))) {
+        return new Response('Unknown image', { status: 403 });
+      }
 
       const res = await fetch(src, { signal: apiSignal() });
       if (!res.ok) return new Response('Upstream error', { status: 502 });

@@ -526,10 +526,13 @@ async function testCaptureEndpoint() {
   const mod = await loadWorker();
   const counters = { sub: 0 };
   const bucket = makeBucket(counters);
-  const history = [{
+  // 履歴は実物の Durable Object に入れる（載っているかの確認は索引をたどるので、
+  // 一覧を返すだけのモックでは経路が変わってしまう）
+  const stub = new mod.SyncState({ storage: makeStorage() }, { IMAGES: bucket });
+  await stub.addHistory({
     id: 'r1',
     images: [{ url: 'https://cdn.example.com/a.png' }, { url: '/api/image/' + 'a'.repeat(32) }],
-  }];
+  });
   const fetched = [];
   globalThis.fetch = async (u) => {
     fetched.push(String(u));
@@ -537,7 +540,7 @@ async function testCaptureEndpoint() {
   };
   const env = {
     IMAGES: bucket,
-    STATE: { idFromName: (n) => n, get: () => ({ listHistory: async () => history }) },
+    STATE: { idFromName: (n) => n, get: () => stub },
   };
   const call = (body) => mod.default.fetch(new Request('https://app.example/api/capture', {
     method: 'POST',

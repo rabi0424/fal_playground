@@ -1027,17 +1027,18 @@ function galleryImageUrls(record) {
   return (record.images ?? []).map((i) => i.url);
 }
 
+// 履歴に件数の上限は無いので、サーバーはページごとに返す。
+// 取れたぶんから順に描いて、続きは裏で追う
 async function fetchHistory() {
-  let res;
-  try {
-    res = await fetch('/api/history');
-  } catch {
-    return; // オフラインなどは表示中のまま
-  }
-  if (!res.ok || isHtmlResponse(res)) return;
-  const list = await res.json().catch(() => null);
-  if (!Array.isArray(list)) return;
-  historyItems = list;
+  const items = [];
+  const got = await falHistory.fetchAll((page) => {
+    items.push(...page);
+    if (page.length === 0) return; // 取れなかった / 空のときは表示中のまま
+    historyItems = items;
+    renderGallery();
+  });
+  if (!got.ok) return; // オフラインなどは、取れたぶんを出したままにする
+  historyItems = items; // 全消しの直後など、空になったことも反映する
   renderGallery();
 }
 

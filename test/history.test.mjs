@@ -8,9 +8,10 @@
 //   - 保存（POST）はマスクを捨てず、応答にも含めて返すこと
 //     （画像編集は応答をそのまま持って塗り直しの保存に使う）
 //
-// 保管レイアウト側では、1 レコード 1 キー（hist:<id>）+ 並び順（history:order）に
-// なっていること、1 件の保存が全履歴の書き直しにならないこと、旧レイアウト
-// （history:list に全件）からの移行が効くことを見る
+// 保管レイアウト側では、1 レコード 1 キー（hist:<id>）+ 1 件 1 キーの索引
+// （hidx:<逆順の通し番号>:<id>）になっていること、1 件の保存で書くキー数が件数に
+// 依らないこと、件数の上限が無いこと、旧レイアウト（history:list に全件 /
+// history:order に id の配列）からの移行が効くことを見る
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { makeStorage, makeBucket } from './harness.mjs';
@@ -40,6 +41,12 @@ function makeEnv(mod, storage = makeStorage()) {
   const env = { STATE: { idFromName: () => 'singleton', get: () => stub }, IMAGES: bucket };
   return Object.assign(env, { storage, stub, bucket });
 }
+
+// 索引キー（新しい順に並ぶ）から id だけ取り出す
+const indexIds = async (storage) =>
+  [...(await storage.list({ prefix: 'hidx:' })).values()];
+
+const nextCursor = (res) => res.headers.get('X-Next-Cursor');
 
 const MASK = { feather: 0.01, strokes: [{ mode: 'add', pts: [[0.1, 0.2], [0.3, 0.4]] }] };
 
@@ -88,7 +95,8 @@ test('マスクの無いレコードはそのまま返る', async () => {
 
   await postRecord(mod, env, { id: 'rec-2', prompt: 'a cat', images: [] });
   const list = await (await call(mod, env, '/api/history')).json();
-  assert.deepEqual(list[0], { id: 'rec-2', prompt: 'a cat', images: [] });
+  // seq は並び順の索引と突き合わせるためにサーバーが振る通し番号
+  assert.deepEqual(list[0], { id: 'rec-2', prompt: 'a cat', images: [], seq: 1 });
 });
 
 test('知らない id は 404、GET と DELETE 以外は 405', async () => {
@@ -111,31 +119,36 @@ test('削除しても他のレコードは残る', async () => {
   assert.deepEqual(list.map((r) => r.id), ['rec-2']);
 });
 
-test('1 レコード 1 キーで持ち、並び順は別のキーに置く', async () => {
+test('1 レコード 1 キーで持ち、並び順は 1 件 1 キーの索引に置く', async () => {
   const mod = await loadWorker();
   const env = makeEnv(mod);
 
   await postRecord(mod, env, { id: 'a', prompt: '1 番目', images: [] });
   await postRecord(mod, env, { id: 'b', prompt: '2 番目', mask: MASK, images: [] });
 
-  assert.deepEqual(await env.storage.get('history:order'), ['b', 'a'], '新しい順に並びます');
+  assert.deepEqual(await indexIds(env.storage), ['b', 'a'], '索引が新しい順に並びます');
   assert.equal((await env.storage.get('hist:a')).prompt, '1 番目');
   assert.deepEqual((await env.storage.get('hist:b')).mask, MASK);
-  // 全件を 1 キーに詰める旧レイアウトは残っていない（2MB 上限に当たる原因）
+  // 並び順や全件を 1 キーに詰める旧レイアウトは残っていない（2MB 上限に当たる原因）
   assert.equal(await env.storage.get('history:list'), undefined);
+  assert.equal(await env.storage.get('history:order'), undefined);
 });
 
-test('1 件の保存で書き直すのは、そのレコードと並び順だけ', async () => {
+test('1 件の保存で書くキーは、件数が増えても変わらない', async () => {
   const mod = await loadWorker();
   const env = makeEnv(mod);
-  await postRecord(mod, env, { id: 'a', mask: MASK, images: [] });
+  for (let i = 0; i < 50; i++) await postRecord(mod, env, { id: `x${i}`, mask: MASK, images: [] });
 
   const written = [];
   const put = env.storage.put.bind(env.storage);
-  env.storage.put = async (k, v) => { written.push(k); return put(k, v); };
+  env.storage.put = async (k, v) => { written.push(...(v === undefined ? Object.keys(k) : [k])); return put(k, v); };
   await postRecord(mod, env, { id: 'b', images: [] });
 
-  assert.deepEqual(written, ['hist:b', 'history:order'], '他のレコードまで書き直しています');
+  // レコード本体・その索引・通し番号の 3 つだけ（ほかのレコードには触れない）
+  assert.equal(written.length, 3, `書いたキー: ${written.join(', ')}`);
+  assert.ok(written.includes('hist:b'));
+  assert.ok(written.includes('history:seq'));
+  assert.ok(written.some((k) => k.startsWith('hidx:') && k.endsWith(':b')));
 });
 
 test('同じ id の保存は差し替えになり、増えない', async () => {
@@ -159,27 +172,77 @@ test('全消しはレコードの実体も消す', async () => {
   await postRecord(mod, env, { id: 'b', images: [] });
   assert.equal((await call(mod, env, '/api/history', { method: 'DELETE' })).status, 200);
 
-  assert.deepEqual(await env.storage.get('history:order'), []);
   assert.equal((await env.storage.list({ prefix: 'hist:' })).size, 0);
+  assert.equal((await env.storage.list({ prefix: 'hidx:' })).size, 0, '索引が残っています');
   assert.deepEqual(await (await call(mod, env, '/api/history')).json(), []);
 });
 
-test('上限を超えたら、古いものから画像ごと消える', async () => {
-  const mod = await loadWorker([['const HISTORY_KEEP = 1000;', 'const HISTORY_KEEP = 3;']]);
+test('件数の上限は無い（古いものが勝手に消えない）', async () => {
+  // 1 ページぶんより多く入れて、古い方が落ちていないことを見る
+  const mod = await loadWorker([['const HISTORY_PAGE_DEFAULT = 500;', 'const HISTORY_PAGE_DEFAULT = 5;']]);
   const env = makeEnv(mod);
 
-  // 保存済み画像（/api/image/<id>）を持つレコードを、上限より 1 件多く入れる
-  const imageId = (n) => String(n).repeat(32);
-  for (let i = 1; i <= 4; i++) {
+  const imageId = (n) => String(n).padStart(32, '0');
+  for (let i = 1; i <= 12; i++) {
     await env.IMAGES.put(`${imageId(i)}.png`, 'png');
     await postRecord(mod, env, { id: `r${i}`, images: [{ url: `/api/image/${imageId(i)}` }] });
   }
 
-  const list = await (await call(mod, env, '/api/history')).json();
-  assert.deepEqual(list.map((r) => r.id), ['r4', 'r3', 'r2'], '古いものから落ちていません');
-  assert.equal(await env.storage.get('hist:r1'), undefined, 'レコードの実体が残っています');
-  assert.equal(await env.bucket.get(`${imageId(1)}.png`), null, '画像が残っています');
-  assert.ok(await env.bucket.get(`${imageId(2)}.png`), '残すべき画像まで消しています');
+  // 実体も画像も 1 件残らず残っている
+  assert.equal((await env.storage.list({ prefix: 'hist:' })).size, 12);
+  assert.ok(await env.bucket.get(`${imageId(1)}.png`), '古い画像が消えています');
+  assert.deepEqual(await indexIds(env.storage), Array.from({ length: 12 }, (_, i) => `r${12 - i}`));
+
+  // 一覧はページ送りで全部たどれる
+  const seen = [];
+  let cursor = '';
+  for (let guard = 0; guard < 10; guard++) {
+    const res = await call(mod, env, `/api/history?cursor=${cursor}`);
+    seen.push(...(await res.json()).map((r) => r.id));
+    cursor = nextCursor(res);
+    if (!cursor) break;
+  }
+  assert.equal(cursor, null, '続きの位置が返り続けています');
+  assert.deepEqual(seen, Array.from({ length: 12 }, (_, i) => `r${12 - i}`));
+});
+
+test('limit と cursor でページを刻める', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  for (let i = 1; i <= 5; i++) await postRecord(mod, env, { id: `r${i}`, images: [] });
+
+  const first = await call(mod, env, '/api/history?limit=2');
+  assert.deepEqual((await first.json()).map((r) => r.id), ['r5', 'r4']);
+
+  const second = await call(mod, env, `/api/history?limit=2&cursor=${nextCursor(first)}`);
+  assert.deepEqual((await second.json()).map((r) => r.id), ['r3', 'r2']);
+
+  const third = await call(mod, env, `/api/history?limit=2&cursor=${nextCursor(second)}`);
+  assert.deepEqual((await third.json()).map((r) => r.id), ['r1']);
+  assert.equal(nextCursor(third), null, '最後のページで続きを返しています');
+});
+
+test('ページの途中で削除しても、続きの位置は生きている', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  for (let i = 1; i <= 4; i++) await postRecord(mod, env, { id: `r${i}`, images: [] });
+
+  const first = await call(mod, env, '/api/history?limit=2');
+  assert.deepEqual((await first.json()).map((r) => r.id), ['r4', 'r3']);
+  await call(mod, env, '/api/history/r2', { method: 'DELETE' });
+
+  const second = await call(mod, env, `/api/history?limit=2&cursor=${nextCursor(first)}`);
+  assert.deepEqual((await second.json()).map((r) => r.id), ['r1'], '消したぶんが出ています');
+});
+
+test('id はルートが受ける形だけ通す', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+
+  // 通らない id を保存できてしまうと、1 件取得も削除もできないレコードが残る
+  assert.equal((await postRecord(mod, env, { id: 'あ/い', images: [] })).status, 422);
+  assert.equal((await postRecord(mod, env, { id: '', images: [] })).status, 422);
+  assert.equal((await postRecord(mod, env, { id: 'ok.id-1_2', images: [] })).status, 200);
 });
 
 test('旧レイアウト（history:list に全件）から移行する', async () => {
@@ -200,11 +263,39 @@ test('旧レイアウト（history:list に全件）から移行する', async (
   assert.deepEqual(list.map((r) => r.id).slice(0, 2), ['old-0', 'old-1'], '並び順が変わっています');
   assert.equal('mask' in list[0], false);
 
-  // 実体は 1 件ずつのキーに移り、旧キーは消える
+  // 実体は 1 件ずつのキーに移り、並び順は 1 件 1 キーの索引になり、旧キーは消える
   assert.equal(await storage.get('history:list'), undefined);
+  assert.equal(await storage.get('history:order'), undefined);
   assert.equal((await storage.list({ prefix: 'hist:' })).size, 300);
+  assert.deepEqual((await indexIds(storage)).slice(0, 2), ['old-0', 'old-1']);
   const one = await (await call(mod, env, '/api/history/old-0')).json();
   assert.deepEqual(one.mask, MASK, '移行でマスクが落ちています');
+
+  // 移行後も、続きの保存と削除がそのまま効く
+  await postRecord(mod, env, { id: 'new', images: [] });
+  await call(mod, env, '/api/history/old-1', { method: 'DELETE' });
+  const after = await (await call(mod, env, '/api/history')).json();
+  assert.deepEqual(after.map((r) => r.id).slice(0, 2), ['new', 'old-0']);
+  assert.equal(after.length, 300);
+});
+
+test('旧レイアウト（history:order に id の配列）から移行する', async () => {
+  const mod = await loadWorker();
+  const storage = makeStorage();
+  // 一括操作の 128 件をまたぐ件数で、分割し忘れがあれば落ちるようにする
+  const ids = Array.from({ length: 300 }, (_, i) => `old-${i}`);
+  for (const [i, id] of ids.entries()) {
+    await storage.put(`hist:${id}`, { id, prompt: `過去 ${i}`, images: [] });
+  }
+  await storage.put('history:order', ids);
+  // 消し込みが途中で終わった残り（並び順にあって実体が無い）も混ぜておく
+  await storage.put('history:order', [...ids.slice(0, 5), 'ghost', ...ids.slice(5)]);
+  const env = makeEnv(mod, storage);
+
+  const list = await (await call(mod, env, '/api/history')).json();
+  assert.deepEqual(list.map((r) => r.id).slice(0, 2), ['old-0', 'old-1'], '並び順が変わっています');
+  assert.equal(list.length, 300, '実体の無い並び順まで数えています');
+  assert.equal(await storage.get('history:order'), undefined, '旧キーが残っています');
 
   // 移行後も、続きの保存と削除がそのまま効く
   await postRecord(mod, env, { id: 'new', images: [] });

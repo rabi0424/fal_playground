@@ -34,10 +34,15 @@ export function makeStorage() {
       for (const key of k) if (map.delete(key)) n += 1;
       return n;
     },
-    async list({ prefix } = {}) {
+    // 本物はキーの辞書順に返す。startAfter / limit も同じく再現しておく
+    //（履歴のページ送りはこの並びと打ち切りに乗っているため）
+    async list({ prefix, startAfter, limit } = {}) {
       const out = new Map();
-      for (const [k, v] of map) {
-        if (!prefix || k.startsWith(prefix)) out.set(k, structuredClone(v));
+      for (const k of [...map.keys()].sort()) {
+        if (prefix && !k.startsWith(prefix)) continue;
+        if (startAfter !== undefined && k <= startAfter) continue;
+        if (limit !== undefined && out.size >= limit) break;
+        out.set(k, structuredClone(map.get(k)));
       }
       return out;
     },

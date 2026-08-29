@@ -178,17 +178,36 @@ function persistHistoryCache() {
   falStore.set(LS_HISTORY, JSON.stringify(keep.map(historyCacheEntry)));
 }
 
+// サーバーから取れた一覧を表示へ反映する。
+//
+// タブ復帰時は、この取得と「復帰で再開したポーリングの完了 → 履歴保存」が
+// 競合する。保存中（POST 応答待ち）や、この取得の開始後に保存が完了した
+// レコードは応答一覧に含まれないことがあり、丸ごと上書きすると
+// ギャラリーから消える。それらはローカル側を残してマージする
+function applyServerHistory(server, startedAt) {
+  const onServer = new Set(server.map((r) => r.id));
+  const keep = historyCache.filter(
+    (r) =>
+      !onServer.has(r.id) &&
+      (pendingHistorySaves.has(r.id) || (historySavedAt.get(r.id) ?? 0) >= startedAt),
+  );
+  historyCache = [...keep, ...server];
+  historyIsServerBacked = true; // ここから先は、消してもサーバーから戻せる
+  persistHistoryCache();
+  renderGallery();
+}
+
+// 履歴に件数の上限は無いので、サーバーはページごとに返す。取れたぶんから順に
+// 描いて、続きは裏で追う（最初の 1 ページで画面が出る）
 async function fetchHistoryFromServer() {
   const startedAt = Date.now();
-  let res;
-  try {
-    res = await fetch('/api/history');
-  } catch {
-    return; // オフラインなどはキャッシュ表示のまま
-  }
-  if (!res.ok || isHtmlResponse(res)) return;
-  const server = await res.json().catch(() => null);
-  if (!Array.isArray(server)) return;
+  const server = [];
+  const got = await falHistory.fetchAll((page) => {
+    if (page.length === 0) return; // サーバーが空のときは手元の表示を消さない
+    server.push(...page);
+    applyServerHistory(server, startedAt);
+  });
+  if (!got.ok) return; // オフラインなどは、取れたぶんを出したままにする
 
   // 旧バージョンのローカル履歴が残っていてサーバーが空なら、一度だけ取り込む
   if (server.length === 0 && historyCache.length > 0 && !falStore.get(LS_HISTORY_MIGRATED)) {
@@ -206,23 +225,6 @@ async function fetchHistoryFromServer() {
     }
     return fetchHistoryFromServer();
   }
-
-  // サーバーが空で手元に表示中の履歴があるときは消さない（移行直後の失敗対策）
-  if (server.length === 0 && historyCache.length > 0) return;
-
-  // タブ復帰時は、この取得と「復帰で再開したポーリングの完了 → 履歴保存」が
-  // 競合する。保存中（POST 応答待ち）や、この取得の開始後に保存が完了した
-  // レコードは応答一覧に含まれないことがあり、丸ごと上書きすると
-  // ギャラリーから消える。それらはローカル側を残してマージする
-  const keep = historyCache.filter(
-    (r) =>
-      (pendingHistorySaves.has(r.id) || (historySavedAt.get(r.id) ?? 0) >= startedAt) &&
-      !server.some((s) => s.id === r.id),
-  );
-  historyCache = [...keep, ...server];
-  historyIsServerBacked = true; // ここから先は、消してもサーバーから戻せる
-  persistHistoryCache();
-  renderGallery();
 }
 
 // 生成完了時に呼ぶ。即座にローカルへ反映し、サーバーへは裏で保存する。

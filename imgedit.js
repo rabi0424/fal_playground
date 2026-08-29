@@ -2395,15 +2395,17 @@ function renderCostHint() {
 
 let historyItems = [];
 
+// 履歴に件数の上限は無いので、サーバーはページごとに返す。
+// 取れたぶんから順に描いて、続きは裏で追う
 async function fetchHistory() {
-  try {
-    const res = await fetch('/api/history');
-    if (!res.ok || isHtmlResponse(res)) return;
-    const all = await res.json();
-    historyItems = Array.isArray(all) ? all : [];
-  } catch {
-    // オフライン時などは空のまま
-  }
+  const items = [];
+  const got = await falHistory.fetchAll((page) => {
+    items.push(...page);
+    if (page.length === 0) return; // 取れなかった / 空のときは表示中のまま
+    historyItems = items;
+    renderGallery();
+  });
+  if (got.ok) historyItems = items; // 全消しの直後など、空になったことも反映する
   renderGallery();
 }
 
