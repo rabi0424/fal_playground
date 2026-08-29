@@ -9,9 +9,31 @@ export function makeStorage() {
   let alarm = null;
   return {
     map,
-    async get(k) { return map.has(k) ? structuredClone(map.get(k)) : undefined; },
-    async put(k, v) { map.set(k, structuredClone(v)); },
-    async delete(k) { return map.delete(k); },
+    // 一括版（配列 / オブジェクト）も本物と同じく受ける。1 回 128 件の上限も再現して、
+    // 分割し忘れをテストで捕まえられるようにしておく
+    async get(k) {
+      if (!Array.isArray(k)) return map.has(k) ? structuredClone(map.get(k)) : undefined;
+      if (k.length > 128) throw new Error(`storage.get は 1 回 128 件まで（${k.length} 件）`);
+      const out = new Map();
+      for (const key of k) if (map.has(key)) out.set(key, structuredClone(map.get(key)));
+      return out;
+    },
+    async put(k, v) {
+      if (v === undefined && k && typeof k === 'object') {
+        const entries = Object.entries(k);
+        if (entries.length > 128) throw new Error(`storage.put は 1 回 128 件まで（${entries.length} 件）`);
+        for (const [key, val] of entries) map.set(key, structuredClone(val));
+        return;
+      }
+      map.set(k, structuredClone(v));
+    },
+    async delete(k) {
+      if (!Array.isArray(k)) return map.delete(k);
+      if (k.length > 128) throw new Error(`storage.delete は 1 回 128 件まで（${k.length} 件）`);
+      let n = 0;
+      for (const key of k) if (map.delete(key)) n += 1;
+      return n;
+    },
     async list({ prefix } = {}) {
       const out = new Map();
       for (const [k, v] of map) {

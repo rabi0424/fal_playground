@@ -21,6 +21,9 @@
   --sidebar-bg: #f2f2f4;
   --nav-hover: rgb(0 0 0 / 0.05);
   --nav-active: color-mix(in srgb, var(--accent) 12%, transparent);
+  /* 現在地の項目。サイドバーより明るい面を置いて浮かせる（色では示さない） */
+  --nav-current: #ffffff;
+  --nav-current-edge: rgb(0 0 0 / 0.08);
   color-scheme: light;
 }
 
@@ -43,6 +46,8 @@
   --sidebar-bg: #0b0b0d;
   --nav-hover: rgb(255 255 255 / 0.07);
   --nav-active: color-mix(in srgb, var(--accent) 20%, transparent);
+  --nav-current: rgb(255 255 255 / 0.10);
+  --nav-current-edge: rgb(255 255 255 / 0.14);
   color-scheme: dark;
 }
 
@@ -66,6 +71,8 @@
     --sidebar-bg: #0b0b0d;
     --nav-hover: rgb(255 255 255 / 0.07);
     --nav-active: color-mix(in srgb, var(--accent) 20%, transparent);
+    --nav-current: rgb(255 255 255 / 0.10);
+    --nav-current-edge: rgb(255 255 255 / 0.14);
     color-scheme: dark;
   }
 }
@@ -238,7 +245,9 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
   gap: 10px;
   width: 100%;
   padding: 9px 10px;
-  border: none;
+  /* 現在地の枠ぶんを全項目で確保しておく（box-sizing: border-box なので
+     枠が付いても大きさは変わらず、画面を移っても行の高さが動かない） */
+  border: 1px solid transparent;
   background: none;
   border-radius: 10px;
   color: var(--text);
@@ -248,17 +257,22 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
   text-decoration: none;
   white-space: nowrap;
   overflow: hidden;
-  transition: background var(--dur-quick) ease, color var(--dur-quick) ease;
+  transition: background var(--dur-quick) ease, color var(--dur-quick) ease,
+    border-color var(--dur-quick) ease, box-shadow var(--dur-quick) ease;
 }
 
 .nav-item:hover { background: var(--nav-hover); }
 .nav-item:active { background: var(--nav-active); }
 
-/* 現在地は面で示す。文字色だけだと畳んだとき（アイコンのみ）に分からない */
+/* 現在地は、まわりより明るい面が薄く浮き出ている形で示す。
+   文字色だけだと畳んだとき（アイコンのみ）に分からず、色で示すと
+   テーマやコントラスト設定で読みにくくなるので、面と影で示す */
 .nav-item.active {
-  background: var(--nav-active);
-  color: var(--accent);
+  background: var(--nav-current);
+  border-color: var(--nav-current-edge);
+  color: var(--text);
   font-weight: 600;
+  box-shadow: var(--shadow);
 }
 
 .nav-item .icon,
@@ -1099,6 +1113,12 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
   max-height: 60svh;
   overflow-y: auto;
   padding: 2px;
+}
+
+/* 分割描画の番人（gallery-pager.js）。グリッドの 1 マスを食わないよう全幅 1px */
+.gallery-sentinel {
+  grid-column: 1 / -1;
+  height: 1px;
 }
 
 .gallery-item {
@@ -2174,6 +2194,9 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 
 /* 編集プロンプトの折りたたみ（サマリーに先頭を薄く表示） */
 .prompt-preview { font-weight: 400; color: var(--muted); }
+
+/* 追加プロンプトは書き足し用なので、編集プロンプトより浅く見せる */
+.extra-prompt-field textarea { min-height: 56px; }
 
 /* ---------- アクセシビリティ ---------- */
 /* 動きを減らす設定: スライドやスケールは行わず、短いフェードに置き換える

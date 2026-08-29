@@ -111,9 +111,15 @@
     { value: 'dark', label: 'ダーク', icon: 'moon' },
   ];
 
+  /* 今どの画面に居るか。Cloudflare の静的アセットは既定（html_handling:
+     auto-trailing-slash）で /foo.html を /foo へ、/index.html を / へ 307 で寄せる。
+     つまりサイドバーのリンクから移ると URL に .html は残らない。素の pathname を
+     NAV の file と直に見比べていたため、生成（/）以外ではどれとも一致せず、
+     現在地のハイライトもページ見出しも data-page も出ていなかった。
+     拡張子の有無どちらの形でも同じ画面と分かるよう、正規化してから見比べる */
   function currentFile() {
-    const last = location.pathname.split('/').pop();
-    return last === '' ? 'index.html' : last;
+    const last = location.pathname.split('/').pop().replace(/\.html$/, '');
+    return last === '' || last === 'index' ? 'index.html' : `${last}.html`;
   }
 
   const here = currentFile();

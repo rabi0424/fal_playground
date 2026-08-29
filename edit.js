@@ -78,6 +78,7 @@ const els = {
   dimBadge: $('#dimBadge'),
   editPrompt: $('#editPrompt'),
   promptPreview: $('#promptPreview'),
+  extraPrompt: $('#extraPrompt'),
   nameInput: $('#nameInput'),
   namePresets: $('#namePresets'),
   botSelect: $('#botSelect'),
@@ -790,6 +791,14 @@ function applyNameToPrompt(prompt) {
   return name ? prompt.replaceAll('{NAME}', name) : prompt;
 }
 
+// 実際に送るプロンプト。{NAME} を置換した編集プロンプトの末尾に、
+// 追加プロンプト欄に入力があれば改行でつないで足す（そのつどの書き足し用）
+function buildPrompt() {
+  const base = applyNameToPrompt(els.editPrompt.value.trim());
+  const extra = applyNameToPrompt(els.extraPrompt.value.trim());
+  return extra ? `${base}\n${extra}` : base;
+}
+
 function currentBot() {
   return BOTS.find((b) => b.id === els.botSelect.value) || BOTS[0];
 }
@@ -851,12 +860,11 @@ async function execute() {
   if (running || !img || !hasSel) return;
   const bot = currentBot();
   const model = currentModel();
-  const rawPrompt = els.editPrompt.value.trim();
-  const prompt = applyNameToPrompt(rawPrompt);
+  const prompt = buildPrompt();
   if (!prompt || !/^[\w.-]{1,64}$/.test(model)) return;
 
   // {NAME} タグがあるのに名前欄が空のときだけ、置換されないまま送ってよいか確認する
-  if (rawPrompt.includes('{NAME}') && els.nameInput.value.trim() === '') {
+  if (prompt.includes('{NAME}') && els.nameInput.value.trim() === '') {
     const ok = confirm('プロンプトに {NAME} が含まれていますが、名前欄が空です。\n置換せずにこのまま送信しますか？');
     if (!ok) return;
   }
@@ -1034,9 +1042,8 @@ async function fetchHistory() {
 }
 
 function renderGallery() {
-  els.gallery.innerHTML = '';
-
   if (historyItems.length === 0) {
+    galleryPager.clear();
     const empty = document.createElement('div');
     empty.className = 'gallery-empty';
     empty.textContent = 'まだ履歴はありません';
@@ -1044,50 +1051,55 @@ function renderGallery() {
     return;
   }
 
-  for (const record of historyItems) {
-    const item = document.createElement('div');
-    item.className = 'gallery-item';
-
-    const thumb = document.createElement('img');
-    thumb.className = 'thumb';
-    thumb.alt = record.prompt ?? '';
-    thumb.loading = 'lazy';
-    loadThumb(thumb, galleryThumbUrl(record));
-    thumb.addEventListener('click', () => openLightbox(galleryImageUrls(record)));
-    item.appendChild(thumb);
-
-    const body = document.createElement('div');
-    body.className = 'body';
-
-    const promptText = document.createElement('div');
-    promptText.className = 'prompt-text';
-    promptText.textContent = record.prompt ?? '';
-    promptText.title = record.prompt ?? '';
-    body.appendChild(promptText);
-
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    meta.textContent = (record.model ?? '').replace(/^fal-ai\//, '');
-    body.appendChild(meta);
-
-    const actions = document.createElement('div');
-    actions.className = 'actions';
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'ghost-btn small';
-    deleteBtn.textContent = '削除';
-    deleteBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      historyItems = historyItems.filter((r) => r.id !== record.id);
-      fetch(`/api/history/${encodeURIComponent(record.id)}`, { method: 'DELETE' }).catch(() => {});
-      renderGallery();
-    });
-    actions.appendChild(deleteBtn);
-    body.appendChild(actions);
-
-    item.appendChild(body);
-    els.gallery.appendChild(item);
-  }
+  galleryPager.render(historyItems);
 }
+
+// 履歴 1 件ぶんのカード
+function galleryItemEl(record) {
+  const item = document.createElement('div');
+  item.className = 'gallery-item';
+
+  const thumb = document.createElement('img');
+  thumb.className = 'thumb';
+  thumb.alt = record.prompt ?? '';
+  thumb.loading = 'lazy';
+  loadThumb(thumb, galleryThumbUrl(record));
+  thumb.addEventListener('click', () => openLightbox(galleryImageUrls(record)));
+  item.appendChild(thumb);
+
+  const body = document.createElement('div');
+  body.className = 'body';
+
+  const promptText = document.createElement('div');
+  promptText.className = 'prompt-text';
+  promptText.textContent = record.prompt ?? '';
+  promptText.title = record.prompt ?? '';
+  body.appendChild(promptText);
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = (record.model ?? '').replace(/^fal-ai\//, '');
+  body.appendChild(meta);
+
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'ghost-btn small';
+  deleteBtn.textContent = '削除';
+  deleteBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    historyItems = historyItems.filter((r) => r.id !== record.id);
+    fetch(`/api/history/${encodeURIComponent(record.id)}`, { method: 'DELETE' }).catch(() => {});
+    renderGallery();
+  });
+  actions.appendChild(deleteBtn);
+  body.appendChild(actions);
+
+  item.appendChild(body);
+  return item;
+}
+
+const galleryPager = falGallery.create(els.gallery, galleryItemEl);
 
 /* ---------- lightbox（app.js の簡略版） ---------- */
 
@@ -1216,6 +1228,7 @@ async function resumeJob() {
 function saveForm() {
   falStore.set(LS_FORM, JSON.stringify({
     prompt: els.editPrompt.value,
+    extraPrompt: els.extraPrompt.value,
     name: els.nameInput.value,
     bot: els.botSelect.value,
     customBot: els.customBot.value,
@@ -1234,6 +1247,7 @@ function restoreForm() {
   } catch { /* 壊れていたら既定値のまま */ }
   if (!saved) return;
   if (typeof saved.prompt === 'string') els.editPrompt.value = saved.prompt;
+  if (typeof saved.extraPrompt === 'string') els.extraPrompt.value = saved.extraPrompt;
   if (typeof saved.name === 'string') els.nameInput.value = saved.name;
   if (BOTS.some((b) => b.id === saved.bot)) els.botSelect.value = saved.bot;
   if (typeof saved.customBot === 'string') els.customBot.value = saved.customBot;
@@ -1326,6 +1340,7 @@ function initForm() {
   els.customBot.addEventListener('input', () => { updateExecState(); saveForm(); });
   els.qualitySelect.addEventListener('change', saveForm);
   els.editPrompt.addEventListener('input', () => { updateExecState(); updatePromptPreview(); saveForm(); });
+  els.extraPrompt.addEventListener('input', saveForm);
   els.nameInput.addEventListener('input', saveForm);
   els.blendSlider.addEventListener('input', () => { els.blendVal.textContent = els.blendSlider.value; saveForm(); });
   els.colorSlider.addEventListener('input', () => { els.colorVal.textContent = els.colorSlider.value; saveForm(); });

@@ -11,6 +11,18 @@ import { DurableObject } from 'cloudflare:workers';
 // 画像本体は R2（env.IMAGES）に置く。履歴レコードは Durable Object の SQLite に
 // 小さな JSON（プロンプト・設定・画像への参照）として持つ。
 const HISTORY_KEEP = 1000; // 履歴レコードの上限。超過分は画像ごと古い順に自動削除
+const HISTORY_PREFIX = 'hist:'; // 履歴 1 件ぶん（hist:<id>）
+const HISTORY_ORDER_KEY = 'history:order'; // 新しい順に並べた id の配列
+const HISTORY_LEGACY_KEY = 'history:list'; // 旧レイアウト（全件を 1 キーに詰めていた）
+
+// Durable Object の一括 get / put / delete は 1 回 128 件まで
+const DO_BATCH = 128;
+
+function chunkBatch(items, size = DO_BATCH) {
+  const out = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
 
 // Modal 生成ジョブの設定。ジョブは Durable Object の alarm でサーバー側完結で
 // 処理する（クライアントとの接続が切れても結果を取りこぼさないため）
@@ -469,6 +481,19 @@ function recordImageLists(record) {
   return [{ images: record?.images ?? [], loras: record?.loras ?? null }];
 }
 
+// 一覧で返すときに落とすフィールド。
+//
+// 画像編集のマスクは塗った線の座標をそのまま持つので、1 レコードで数十 KB になる。
+// 履歴は 1000 件まで貯まり、生成・部分AI編集・画像編集の 3 画面がページを開くたびに
+// 全件を取りに来るため、ここがそのまま毎回の転送量とパース時間になっていた。
+// マスクが要るのは「マスクを調整」で 1 件開くときだけなので、
+// 一覧からは外して GET /api/history/<id> で渡す
+function historyListEntry(record) {
+  if (!record?.mask) return record;
+  const { mask, ...rest } = record;
+  return rest;
+}
+
 // このアプリが配信している画像 URL から id を取り出す（/api/krea2/image/ は旧 URL 互換）
 // 末尾の ?v=... は差し替え時のキャッシュ避け（/api/upload の replace）。
 // 同じキーを指すので、削除対象の判定では無視する
@@ -531,29 +556,92 @@ export class SyncState extends DurableObject {
   }
 
   /* ---- 生成履歴（サーバーが正） ---- */
+  //
+  // 1 レコード 1 キー（hist:<id>）で持ち、並び順だけを別のキー（history:order）に置く。
+  // 以前は全件を history:list の 1 キーに詰めていたが、SQLite バックエンドの
+  // Durable Object はキーと値の合計で 2MB までで、マスク付きのレコード（塗った線の
+  // 座標を持つので 1 件で数十 KB）が増えると保存そのものが失敗し始める。分けておけば
+  // 上限はレコード 1 件ぶんになり、1 件の保存が全履歴の書き直しになることもない。
+  // 並びは order が正なので、そこに載っていないレコードは無いものとして扱う
+
+  // 旧レイアウトが残っていれば分割する。1 度だけ走ればよいので、
+  // 済んだことはインスタンスに覚えておく（作り直されても、次の 1 回で分かる）
+  async migrateHistory() {
+    if (this.historyMigrated) return;
+    const legacy = await this.ctx.storage.get(HISTORY_LEGACY_KEY);
+    if (Array.isArray(legacy)) {
+      const seen = new Set();
+      const order = [];
+      const entries = [];
+      for (const record of legacy) {
+        if (typeof record?.id !== 'string' || seen.has(record.id)) continue;
+        seen.add(record.id);
+        order.push(record.id);
+        entries.push([HISTORY_PREFIX + record.id, record]);
+      }
+      // 1 件が数十 KB になりうるので、一括 put は上限より小さく刻む
+      for (const part of chunkBatch(entries, 32)) {
+        await this.ctx.storage.put(Object.fromEntries(part));
+      }
+      await this.ctx.storage.put(HISTORY_ORDER_KEY, order);
+      await this.ctx.storage.delete(HISTORY_LEGACY_KEY);
+    }
+    this.historyMigrated = true;
+  }
+
+  async historyOrder() {
+    return (await this.ctx.storage.get(HISTORY_ORDER_KEY)) ?? [];
+  }
 
   async listHistory() {
-    return (await this.ctx.storage.get('history:list')) ?? [];
+    await this.migrateHistory();
+    const order = await this.historyOrder();
+    if (order.length === 0) return [];
+    const stored = await this.ctx.storage.list({ prefix: HISTORY_PREFIX });
+    // order にあって実体が無いものは、消し込みが途中で終わった残り。無いものとして扱う
+    return order.map((id) => stored.get(HISTORY_PREFIX + id)).filter(Boolean);
+  }
+
+  async getHistory(id) {
+    await this.migrateHistory();
+    return (await this.ctx.storage.get(HISTORY_PREFIX + id)) ?? null;
   }
 
   async addHistory(record) {
-    const list = await this.listHistory();
-    const next = list.filter((r) => r.id !== record.id); // 同 id は差し替え
-    next.unshift(record);
-    const removed = next.splice(HISTORY_KEEP);
-    await this.deleteRecordImages(removed);
-    await this.ctx.storage.put('history:list', next);
+    await this.migrateHistory();
+    const order = (await this.historyOrder()).filter((id) => id !== record.id); // 同 id は差し替え
+    order.unshift(record.id);
+    // 超過分は画像ごと消す。先に消しておけば、途中で止まっても
+    // 「order にあるのに実体が無い」だけで済む（消し残しの孤児を作らない）
+    await this.dropHistoryRecords(order.splice(HISTORY_KEEP));
+    await this.ctx.storage.put(HISTORY_PREFIX + record.id, record);
+    await this.ctx.storage.put(HISTORY_ORDER_KEY, order);
   }
 
   async deleteHistory(id) {
-    const list = await this.listHistory();
-    await this.deleteRecordImages(list.filter((r) => r.id === id));
-    await this.ctx.storage.put('history:list', list.filter((r) => r.id !== id));
+    await this.migrateHistory();
+    await this.ctx.storage.put(
+      HISTORY_ORDER_KEY,
+      (await this.historyOrder()).filter((x) => x !== id),
+    );
+    await this.dropHistoryRecords([id]);
   }
 
   async clearHistory() {
-    await this.deleteRecordImages(await this.listHistory());
-    await this.ctx.storage.put('history:list', []);
+    await this.migrateHistory();
+    await this.ctx.storage.put(HISTORY_ORDER_KEY, []);
+    // order ではなく実体を数える。消し込みの途中で終わった残りもここで片付く
+    const keys = [...(await this.ctx.storage.list({ prefix: HISTORY_PREFIX })).keys()];
+    await this.dropHistoryRecords(keys.map((k) => k.slice(HISTORY_PREFIX.length)));
+  }
+
+  // 履歴レコードを、保存済み画像ごと消す
+  async dropHistoryRecords(ids) {
+    for (const part of chunkBatch(ids.map((id) => HISTORY_PREFIX + id))) {
+      const stored = await this.ctx.storage.get(part);
+      await this.deleteRecordImages([...stored.values()]);
+      await this.ctx.storage.delete(part);
+    }
   }
 
   async deleteRecordImages(records) {
@@ -2038,7 +2126,7 @@ export default {
     // ローカル URL に差し替えたうえで、生成設定を PNG に焼き込む
     if (url.pathname === '/api/history') {
       if (request.method === 'GET') {
-        return Response.json(await stub.listHistory());
+        return Response.json((await stub.listHistory()).map(historyListEntry));
       }
       if (request.method === 'POST') {
         if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });
@@ -2095,9 +2183,14 @@ export default {
       return new Response('Method not allowed', { status: 405 });
     }
 
-    // 履歴 1 件の削除（保存済み画像も一緒に消す）
+    // 履歴 1 件の取得（マスクを含む丸ごと）と削除（保存済み画像も一緒に消す）
     const historyMatch = url.pathname.match(/^\/api\/history\/([\w.-]{1,100})$/);
     if (historyMatch) {
+      if (request.method === 'GET') {
+        const record = await stub.getHistory(historyMatch[1]);
+        if (!record) return new Response('Not found', { status: 404 });
+        return Response.json(record);
+      }
       if (request.method !== 'DELETE') return new Response('Method not allowed', { status: 405 });
       await stub.deleteHistory(historyMatch[1]);
       return Response.json({ ok: true });
