@@ -2,6 +2,7 @@
 // Durable Object のストレージ、R2 バケット（multipart 対応）、Civitai / Hugging Face の
 // エンドポイントを最低限だけ再現する。
 import { createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 
 /* ---- Durable Object storage のモック ---- */
 export function makeStorage() {
@@ -49,6 +50,49 @@ export function makeStorage() {
     async getAlarm() { return alarm; },
     async setAlarm(t) { alarm = t; },
     async deleteAlarm() { alarm = null; },
+  };
+}
+
+/* ---- D1 のモック（本物の SQLite で動かす） ----
+ *
+ * 履歴カタログは SQL に乗っているので、ここを作り物にすると肝心の
+ * 並び替え・ページ送り・参照の数え上げが検証できない。node:sqlite で
+ * 実際に実行し、D1 の呼び出し形（prepare / bind / run / first / all / batch）
+ * だけを被せる。queries は 1 リクエストのクエリ数（無料プランは 50）の確認用。
+ */
+export function makeD1(counters = { queries: 0 }) {
+  const db = new DatabaseSync(':memory:');
+  // 本物は null prototype ではなく素のオブジェクトを返す
+  const plain = (row) => (row === undefined ? null : { ...row });
+
+  const make = (sql, args) => ({
+    sql,
+    args,
+    bind: (...next) => make(sql, next),
+    async run() {
+      counters.queries++;
+      db.prepare(sql).run(...args);
+      return { success: true };
+    },
+    async first() {
+      counters.queries++;
+      return plain(db.prepare(sql).get(...args));
+    },
+    async all() {
+      counters.queries++;
+      return { results: db.prepare(sql).all(...args).map(plain) };
+    },
+  });
+
+  return {
+    db,
+    counters,
+    prepare: (sql) => make(sql, []),
+    async batch(statements) {
+      const out = [];
+      for (const statement of statements) out.push(await statement.run());
+      return out;
+    },
   };
 }
 

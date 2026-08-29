@@ -265,11 +265,26 @@ function deleteHistoryRecord(id) {
   fetch(`/api/history/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
 }
 
+// 全消しは、サーバー側の 1 リクエストでは終わらないことがある
+//（D1 の 1 リクエストあたりのクエリ数に上限があるため）。
+// 続きがあるあいだ done: false が返るので、終わるまで送り直す
 function clearHistory() {
   for (const r of historyCache) deletedHistoryIds.add(r.id);
   historyCache = [];
   persistHistoryCache();
-  fetch('/api/history', { method: 'DELETE' }).catch(() => {});
+  (async () => {
+    for (let guard = 0; guard < 500; guard++) {
+      let res;
+      try {
+        res = await fetch('/api/history', { method: 'DELETE' });
+      } catch {
+        return; // オフラインなど。残りは次に開いたときに見える
+      }
+      if (!res.ok || isHtmlResponse(res)) return;
+      const body = await res.json().catch(() => null);
+      if (body?.done !== false) return;
+    }
+  })();
 }
 
 /* ---------- form ---------- */

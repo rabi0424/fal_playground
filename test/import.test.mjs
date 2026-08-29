@@ -7,7 +7,7 @@
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { makeStorage, makeBucket, makeFetch } from './harness.mjs';
+import { makeStorage, makeBucket, makeFetch, makeD1 } from './harness.mjs';
 
 const WORKER = new URL('../worker.js', import.meta.url);
 const OUT = new URL('./.worker.test.mjs', import.meta.url); // 定数を差し替えた実行用コピー
@@ -526,13 +526,10 @@ async function testCaptureEndpoint() {
   const mod = await loadWorker();
   const counters = { sub: 0 };
   const bucket = makeBucket(counters);
-  // 履歴は実物の Durable Object に入れる（載っているかの確認は索引をたどるので、
-  // 一覧を返すだけのモックでは経路が変わってしまう）
+  // 履歴は実物のカタログ（D1）に入れる。載っているかの確認は history_images を
+  // 引くので、一覧を返すだけのモックでは経路が変わってしまう
   const stub = new mod.SyncState({ storage: makeStorage() }, { IMAGES: bucket });
-  await stub.addHistory({
-    id: 'r1',
-    images: [{ url: 'https://cdn.example.com/a.png' }, { url: '/api/image/' + 'a'.repeat(32) }],
-  });
+  const d1 = makeD1();
   const fetched = [];
   globalThis.fetch = async (u) => {
     fetched.push(String(u));
@@ -540,8 +537,17 @@ async function testCaptureEndpoint() {
   };
   const env = {
     IMAGES: bucket,
+    DB: d1,
     STATE: { idFromName: (n) => n, get: () => stub },
   };
+  await mod.default.fetch(new Request('https://app.example/api/history', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: 'r1',
+      images: [{ url: 'https://cdn.example.com/a.png' }, { url: '/api/image/' + 'a'.repeat(32) }],
+    }),
+  }), env);
   const call = (body) => mod.default.fetch(new Request('https://app.example/api/capture', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
