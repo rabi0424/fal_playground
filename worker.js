@@ -537,15 +537,18 @@ function localImageId(u) {
 const HISTORY_SOURCE = 'playground'; // この画面が作ったレコードの source
 const D1_MAX_BIND = 90; // bound parameter の上限 100 に対して少し余裕を取る
 const HISTORY_MIGRATE_BATCH = 60; // 1 度に Durable Object から引き取る件数
-const HISTORY_MIGRATE_BUDGET = 20; // 1 リクエストで移行に使うクエリ数の上限
-const HISTORY_LINKS_BUDGET = 24; // 画像参照の作り直しに使うクエリ数の上限
-const HISTORY_LINKS_PAGE = 100;
+// 無料プランの D1 は 1 リクエスト 50 クエリまで。裏の片付けはそのうちの一部しか
+// 使わないよう、1 リクエストにつき 1 回ぶんで打ち切る（残りは次のリクエストで）
+const HISTORY_MIGRATE_BUDGET = 12; // 1 リクエストで移行に使うクエリ数の上限
+const HISTORY_LINKS_BUDGET = 10; // 画像参照の作り直しに使うクエリ数の上限
+const HISTORY_LINKS_PAGE = 50;
 const HISTORY_CLEAR_BUDGET = 40; // 全消し 1 リクエストで使うクエリ数の上限
 const HISTORY_CLEAR_PAGE = 200;
 
 // meta の覚書。スキーマ版が上がると、次のアクセスで DDL と作り直しが走る
 const META_SCHEMA = 'schema_version';
 const META_MIGRATED = 'history_migrated';
+const META_LINKS = 'image_links_rebuilt';
 const META_LINKS_CURSOR = 'image_links_cursor';
 const META_GC_CURSOR = 'image_gc_cursor';
 const META_GC_STATS = 'image_gc_stats';
@@ -568,28 +571,36 @@ const IMAGE_GC_PAGE = 200; // R2 を 1 度に列挙する件数
 const HISTORY_COLS = ['seq', 'id', 'source', 'type', 'created', 'model', 'prompt', 'record', 'mask'];
 
 // schema.sql と同じ内容。Git 連携デプロイでは wrangler の migrations が走らないので、
-// 最初に履歴へ触れたときにここから用意する
-const HISTORY_SCHEMA = [
+// 最初に履歴へ触れたときにここから用意する。
+//
+// 順番が要る: 表 → 列の追加 → 索引。既にある表には CREATE TABLE IF NOT EXISTS が
+// 何もしないので、あとから足した列は ALTER でしか入らない。索引をその前に流すと
+// 「no such column」で落ちる（実際に image_id でそれをやって、履歴 API を
+// まるごと 500 にした）
+const HISTORY_TABLES = [
   `CREATE TABLE IF NOT EXISTS history (
      seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE,
      source TEXT NOT NULL DEFAULT 'playground', type TEXT NOT NULL DEFAULT '',
      created INTEGER NOT NULL DEFAULT 0, model TEXT NOT NULL DEFAULT '',
      prompt TEXT NOT NULL DEFAULT '', record TEXT NOT NULL, mask TEXT)`,
-  'CREATE INDEX IF NOT EXISTS history_source_seq ON history (source, seq DESC)',
   `CREATE TABLE IF NOT EXISTS history_images (
      url TEXT NOT NULL, history_id TEXT NOT NULL, image_id TEXT,
      PRIMARY KEY (url, history_id))`,
-  'CREATE INDEX IF NOT EXISTS history_images_owner ON history_images (history_id)',
-  'CREATE INDEX IF NOT EXISTS history_images_image ON history_images (image_id)',
   `CREATE TABLE IF NOT EXISTS image_gc (
      image_id TEXT PRIMARY KEY, marked_at INTEGER NOT NULL)`,
   'CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)',
 ];
 
-// 既にある表への追加。列がある場合は「duplicate column name」で失敗するので、
-// それは適用済みとして黙って進む（CREATE TABLE IF NOT EXISTS では足せないため）
+// 既にある表への列の追加。列がある場合は「duplicate column name」で失敗するので、
+// それは適用済みとして黙って進む
 const HISTORY_ALTERS = [
   'ALTER TABLE history_images ADD COLUMN image_id TEXT',
+];
+
+const HISTORY_INDEXES = [
+  'CREATE INDEX IF NOT EXISTS history_source_seq ON history (source, seq DESC)',
+  'CREATE INDEX IF NOT EXISTS history_images_owner ON history_images (history_id)',
+  'CREATE INDEX IF NOT EXISTS history_images_image ON history_images (image_id)',
 ];
 
 // 移行まで済んでいるか。isolate ごとに覚えておけば、平常時の追加コストは
@@ -662,33 +673,44 @@ async function ensureHistoryCatalog(env, stub) {
 
   let state = new Map();
   try {
-    state = await getMeta(env, [META_MIGRATED, META_SCHEMA]);
+    state = await getMeta(env, [META_MIGRATED, META_SCHEMA, META_LINKS]);
   } catch {
     // 表がまだ無い（初回）
   }
-  if (state.get(META_MIGRATED) && state.get(META_SCHEMA) === SCHEMA_VERSION) {
+  if (state.get(META_MIGRATED) && state.get(META_LINKS) && state.get(META_SCHEMA) === SCHEMA_VERSION) {
     historyCatalogReady = true;
     return;
   }
 
-  // 揃うまでは毎回スキーマを確かめる。途中で欠けても次のリクエストで直る
-  for (const sql of HISTORY_SCHEMA) await env.DB.prepare(sql).run();
-  for (const sql of HISTORY_ALTERS) {
-    try {
-      await env.DB.prepare(sql).run();
-    } catch {
-      // 適用済み
-    }
-  }
-
-  // 1. Durable Object に残っている履歴を引き取る
-  if (!state.get(META_MIGRATED) && !(await migrateHistoryFromDo(env, stub))) return;
-  // 2. 画像参照（history_images）を、レコードから作り直す
+  // スキーマは版が上がったときだけ流す。表 → 列の追加 → 索引の順を守ること
   if (state.get(META_SCHEMA) !== SCHEMA_VERSION) {
-    if (!(await rebuildImageLinks(env))) return;
+    for (const sql of HISTORY_TABLES) await env.DB.prepare(sql).run();
+    for (const sql of HISTORY_ALTERS) {
+      try {
+        await env.DB.prepare(sql).run();
+      } catch {
+        // 適用済み
+      }
+    }
+    for (const sql of HISTORY_INDEXES) await env.DB.prepare(sql).run();
+    // ここで立てておく。以後のリクエストは DDL を流さない
     await setMeta(env, META_SCHEMA, SCHEMA_VERSION);
   }
-  historyCatalogReady = true;
+
+  // 過去の持ち物の引き取りは「できるところまで」。予算切れや失敗で一覧まで
+  // 巻き添えにしない（表示できるぶんは表示する）
+  try {
+    // 1. Durable Object に残っている履歴を引き取る
+    if (!state.get(META_MIGRATED) && !(await migrateHistoryFromDo(env, stub))) return;
+    // 2. 画像参照（history_images）を、レコードから作り直す
+    if (!state.get(META_LINKS)) {
+      if (!(await rebuildImageLinks(env))) return;
+      await setMeta(env, META_LINKS, new Date().toISOString());
+    }
+    historyCatalogReady = true;
+  } catch {
+    // 続きは次のリクエストで。一覧はここまでのぶんを返す
+  }
 }
 
 // Durable Object から D1 へ。移し終えたら true。予算切れなら false（次のリクエストで続き）

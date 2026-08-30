@@ -260,6 +260,82 @@ test('全消しは実体も画像も消し、終わらなければ done: false �
   assert.deepEqual(await listIds(mod, env), []);
 });
 
+/* ---- スキーマの更新（既にある DB への追従） ---- */
+
+// image_id 列が無かった頃の DB を作る（本番がこの形だった）
+function seedOldCatalog(env, count, imagesPerRecord = 4) {
+  for (const sql of [
+    `CREATE TABLE history (seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE,
+       source TEXT NOT NULL DEFAULT 'playground', type TEXT NOT NULL DEFAULT '',
+       created INTEGER NOT NULL DEFAULT 0, model TEXT NOT NULL DEFAULT '',
+       prompt TEXT NOT NULL DEFAULT '', record TEXT NOT NULL, mask TEXT)`,
+    'CREATE TABLE history_images (url TEXT NOT NULL, history_id TEXT NOT NULL, PRIMARY KEY (url, history_id))',
+    'CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)',
+  ]) env.d1.db.prepare(sql).run();
+
+  const ins = env.d1.db.prepare(
+    'INSERT INTO history (seq,id,source,type,created,model,prompt,record) VALUES (?,?,?,?,?,?,?,?)',
+  );
+  for (let i = 1; i <= count; i++) {
+    const id = `old-${i}`;
+    const images = Array.from({ length: imagesPerRecord }, (_, n) => ({
+      url: `/api/image/${String(i * 10 + n).padStart(32, '0')}`,
+    }));
+    ins.run(i, id, 'playground', '', 1780000000000 + i, 'modal/krea2-exp', 'p', JSON.stringify({ id, images }));
+  }
+  // Durable Object からの引き取りは済んでいる状態
+  env.d1.db.prepare("INSERT INTO meta (k,v) VALUES ('history_migrated','done')").run();
+}
+
+test('image_id 列が無い既存の DB でも、一覧が落ちない', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  seedOldCatalog(env, 20);
+
+  // 列を足す ALTER より先に、その列を使う CREATE INDEX を流すと
+  // 「no such column: image_id」で履歴 API がまるごと 500 になる
+  const res = await call(mod, env, '/api/history?limit=500');
+  assert.equal(res.status, 200, '一覧が落ちています');
+  assert.equal((await res.json()).length, 20);
+
+  const cols = rows(env, 'PRAGMA table_info(history_images)').map((c) => c.name);
+  assert.ok(cols.includes('image_id'), `列が足されていません: ${cols.join(', ')}`);
+});
+
+test('既存の画像参照に image_id が埋め戻され、一覧は全件たどれる', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  seedOldCatalog(env, 120);
+
+  let ids = [];
+  for (let guard = 0; guard < 30; guard++) {
+    ids = await listIds(mod, env, '?limit=500'); // 作り直しは 1 リクエストずつ進む
+    const done = rows(env, "SELECT v FROM meta WHERE k = 'image_links_rebuilt'").length > 0;
+    if (done) break;
+  }
+  assert.equal(ids.length, 120);
+  assert.equal(rows(env, 'SELECT url FROM history_images').length, 120 * 4);
+  assert.equal(rows(env, 'SELECT url FROM history_images WHERE image_id IS NULL').length, 0,
+    'image_id が埋まっていない参照が残っています');
+});
+
+test('1 リクエストの D1 クエリ数は、無料プランの上限（50）に収まる', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  // 1 レコード 8 枚。画像編集や比較アリーナはこれくらいになる
+  seedOldCatalog(env, 300, 8);
+
+  let worst = 0;
+  for (let req = 0; req < 25; req++) {
+    const before = env.d1.counters.queries;
+    const res = await call(mod, env, '/api/history?limit=500');
+    worst = Math.max(worst, env.d1.counters.queries - before);
+    assert.equal(res.status, 200, `${req + 1} 回目で落ちました`);
+  }
+  // 裏の片付け（スキーマ更新・参照の作り直し）が一覧を巻き添えにしないこと
+  assert.ok(worst <= 50, `1 リクエストで ${worst} クエリ使っています`);
+});
+
 /* ---- 使われなかった画像の回収 ---- */
 
 const sweep = async (mod, env) =>
@@ -392,7 +468,12 @@ test('Durable Object に貯まっていた履歴が、並び順そのままで D
   const mod = await loadWorker();
   const env = makeEnv(mod, await seedDurableObject(mod, 150));
 
-  assert.deepEqual((await listIds(mod, env)).slice(0, 3), ['old-0', 'old-1', 'old-2']);
+  let ids = [];
+  for (let guard = 0; guard < 30; guard++) {
+    ids = await listIds(mod, env); // 引き取りは 1 リクエストずつ進む
+    if (ids.length === 150) break;
+  }
+  assert.deepEqual(ids.slice(0, 3), ['old-0', 'old-1', 'old-2']);
   assert.equal(rows(env, 'SELECT id FROM history').length, 150);
   // 画像の参照も張り直される（移行後に /api/capture や削除が効くように）
   assert.equal(rows(env, 'SELECT url FROM history_images').length, 150);
@@ -409,7 +490,7 @@ test('Durable Object に貯まっていた履歴が、並び順そのままで D
 });
 
 test('移行が 1 リクエストで終わらなくても、続きから移り切る', async () => {
-  const mod = await loadWorker([['const HISTORY_MIGRATE_BUDGET = 20;', 'const HISTORY_MIGRATE_BUDGET = 2;'],
+  const mod = await loadWorker([['const HISTORY_MIGRATE_BUDGET = 12;', 'const HISTORY_MIGRATE_BUDGET = 2;'],
     ['const HISTORY_MIGRATE_BATCH = 60;', 'const HISTORY_MIGRATE_BATCH = 5;']]);
   const env = makeEnv(mod, await seedDurableObject(mod, 20));
 

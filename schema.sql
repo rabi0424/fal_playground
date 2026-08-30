@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS history_images (
 CREATE INDEX IF NOT EXISTS history_images_owner ON history_images (history_id);
 CREATE INDEX IF NOT EXISTS history_images_image ON history_images (image_id);
 
+-- 既にこの表がある DB では、CREATE TABLE IF NOT EXISTS は何もしないので
+-- image_id は ALTER でしか入らない。Worker は「表 → 列の追加 → 索引」の順に流す。
+-- 手で流すときも、上の索引より先にこれを実行すること（列が無いと索引が作れない）:
+--   ALTER TABLE history_images ADD COLUMN image_id TEXT;
+
 -- 使われなかった画像の回収（マーク&スイープ）の印。
 -- 画像編集は「画像を選んだ瞬間」に R2 へ上げ、履歴に載るのは編集が終わってから
 -- なので、参照が無いだけでは消せない。まず印を付け、猶予（既定 1 週間）を越えて
