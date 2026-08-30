@@ -945,6 +945,25 @@ function openStats() {
   els.statsDialog.showModal();
 }
 
+/* ---------- 想定外の例外を画面に出す ----------
+ *
+ * 例外で処理が途中で止まっても、画面には何も出ないので原因が分からない。
+ * 実際に「統計ボタンを押しても何も開かない」（openStats の中で ReferenceError）、
+ * 「履歴が 60 件しか出ない」（取得の入口で例外）を、症状からしか追えなかった。
+ * 出るのは短い一文だけで、詳細はコンソールに残す
+ */
+let reportedError = false;
+
+function reportUnexpected(cause) {
+  if (reportedError) return; // 続けて出しても読めないので、最初の 1 つだけ
+  reportedError = true;
+  const message = cause instanceof Error ? cause.message : String(cause ?? '不明なエラー');
+  setError(`アプリでエラーが起きました（${message}）。再読み込みしてください。`);
+}
+
+window.addEventListener('error', (e) => reportUnexpected(e.error ?? e.message));
+window.addEventListener('unhandledrejection', (e) => reportUnexpected(e.reason));
+
 function initStatsDialog() {
   // 統計はサイドバーの項目。この画面では直接開き、他の画面からは ./#stats で来る
   document.getElementById('statsNav').addEventListener('click', openStats);
