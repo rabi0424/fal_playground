@@ -11,11 +11,16 @@
  * ここでは「末尾が見えたぶんだけ足す」を 1 か所に置く。並べた件数は描き直しを
  * またいで保つので、下までスクロールしてからサムネを選んでも先頭には戻らない。
  *
- *   const pager = falGallery.create(el, (record) => 要素を作って返す);
- *   pager.render(records);  // 並べ直す（並べていた件数は保つ）
- *   pager.clear();          // 空にする（「履歴はありません」を出すときなど）
- *   pager.reset();          // 次の render を先頭 1 ページぶんに戻す（絞り込みが変わったとき）
- *   pager.ensure(i);        // i 番目が並ぶまで広げる（キー操作で飛ぶときなど）
+ * サーバー側にも続きがあるときは setHasMore(true) を渡しておく。末尾まで並べ切って
+ * なお続きがあれば onNeedMore が呼ばれるので、呼び出し側が次のページを取って
+ * render し直す（取得中に何度も呼ばれないよう、呼び出し側で番をすること）。
+ *
+ *   const pager = falGallery.create(el, (record) => 要素を作って返す, { onNeedMore });
+ *   pager.render(records);      // 並べ直す（並べていた件数は保つ）
+ *   pager.setHasMore(bool);     // サーバー側に続きがあるか
+ *   pager.clear();              // 空にする（「履歴はありません」を出すときなど）
+ *   pager.reset();              // 次の render を先頭 1 ページぶんに戻す（絞り込みが変わったとき）
+ *   pager.ensure(i);            // i 番目が並ぶまで広げる（キー操作で飛ぶときなど）
  * ========================================================================== */
 
 (() => {
@@ -25,12 +30,14 @@ const PAGE = 30;
 /**
  * @param {HTMLElement} container 並べ先。中身はこのページャが管理する
  * @param {(record: any, index: number) => HTMLElement} buildItem 1 件ぶんの要素を作る
- * @param {number} pageSize 一度に足す件数
+ * @param {{ pageSize?: number, onNeedMore?: () => void }} opts
  */
-function create(container, buildItem, pageSize = PAGE) {
+function create(container, buildItem, opts = {}) {
+  const { pageSize = PAGE, onNeedMore = null } = opts;
   let records = [];
   let shown = 0; // DOM に並べた件数
   let target = pageSize; // 並べておきたい件数（スクロールで増える）
+  let hasMore = false; // サーバー側にまだ続きがあるか（呼び出し側が教える）
 
   // 末尾の番人。グリッドの 1 マスを食わないよう、全幅 1px にしておく
   const sentinel = document.createElement('div');
@@ -50,7 +57,8 @@ function create(container, buildItem, pageSize = PAGE) {
     : null;
 
   function syncSentinel() {
-    if (shown < records.length) {
+    // 手元に続きがあるか、サーバー側に続きがあるうちは番人を置いたままにする
+    if (shown < records.length || hasMore) {
       container.appendChild(sentinel); // 追記のたびに末尾へ動かす
       io.observe(sentinel);
     } else {
@@ -69,8 +77,13 @@ function create(container, buildItem, pageSize = PAGE) {
   }
 
   function grow() {
-    target = shown + pageSize;
-    append(Math.min(target, records.length));
+    if (shown < records.length) {
+      target = shown + pageSize;
+      append(Math.min(target, records.length));
+      return;
+    }
+    // 手元のぶんは並べ切った。続きは呼び出し側に取ってきてもらう
+    if (hasMore) onNeedMore?.();
   }
 
   return {
@@ -92,6 +105,11 @@ function create(container, buildItem, pageSize = PAGE) {
 
     reset() {
       target = pageSize;
+    },
+
+    setHasMore(value) {
+      hasMore = !!value;
+      if (io) syncSentinel();
     },
 
     ensure(index) {

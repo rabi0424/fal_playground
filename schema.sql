@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS history (
   created INTEGER NOT NULL DEFAULT 0, -- record.ts（ミリ秒）
   model   TEXT    NOT NULL DEFAULT '',
   prompt  TEXT    NOT NULL DEFAULT '',
+  -- ギャラリー検索の対象。プロンプト・モデル名・LoRA（パスと表示名）をつないだ
+  -- 小文字の文字列。空白区切りの AND で LIKE をかける（索引は効かないが、この
+  -- 規模では十分。遅くなったら FTS5 の trigram を足せる）
+  search  TEXT    NOT NULL DEFAULT '',
   -- レコード全体の JSON。ただしマスクは除く（下記）
   record  TEXT    NOT NULL,
   -- 画像編集のマスク（塗った線の座標）。1 件で数十 KB になり、一覧では要らないので
@@ -53,6 +57,7 @@ CREATE INDEX IF NOT EXISTS history_images_image ON history_images (image_id);
 -- image_id は ALTER でしか入らない。Worker は「表 → 列の追加 → 索引」の順に流す。
 -- 手で流すときも、上の索引より先にこれを実行すること（列が無いと索引が作れない）:
 --   ALTER TABLE history_images ADD COLUMN image_id TEXT;
+--   ALTER TABLE history ADD COLUMN search TEXT NOT NULL DEFAULT '';
 
 -- 使われなかった画像の回収（マーク&スイープ）の印。
 -- 画像編集は「画像を選んだ瞬間」に R2 へ上げ、履歴に載るのは編集が終わってから

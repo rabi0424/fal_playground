@@ -143,7 +143,7 @@ function isHtmlResponse(res) {
 let historyCache = [];
 
 // サーバーへ保存中（POST 応答待ち）のレコード ID と、保存が完了した時刻。
-// fetchHistoryFromServer の応答一覧に含まれない可能性がある間、上書きから守る
+// 一覧の応答に含まれない可能性がある間、上書きから守る
 const pendingHistorySaves = new Set();
 const historySavedAt = new Map();
 
@@ -177,65 +177,93 @@ function persistHistoryCache() {
   falStore.set(LS_HISTORY, JSON.stringify(keep.map(historyCacheEntry)));
 }
 
-// サーバーから取れた一覧を表示へ反映する。
-//
-// タブ復帰時は、この取得と「復帰で再開したポーリングの完了 → 履歴保存」が
-// 競合する。保存中（POST 応答待ち）や、この取得の開始後に保存が完了した
-// レコードは応答一覧に含まれないことがあり、丸ごと上書きすると
-// ギャラリーから消える。それらはローカル側を残してマージする
-function applyServerHistory(server, startedAt) {
-  const onServer = new Set(server.map((r) => r.id));
-  const keep = historyCache.filter(
-    (r) =>
-      !onServer.has(r.id) &&
-      (pendingHistorySaves.has(r.id) || (historySavedAt.get(r.id) ?? 0) >= startedAt),
-  );
-  historyCache = [...keep, ...server];
-  historyIsServerBacked = true; // ここから先は、消してもサーバーから戻せる
-  persistHistoryCache();
-  renderGallery();
+/* ---------- サーバーからの取得（ページ送り + 絞り込み） ----------
+ *
+ * 検索も統計もサーバー側へ移したので、履歴を全件手元に持つ必要は無くなった。
+ * 手元にあるのは「いま見えているぶん」だけで、ギャラリーの末尾に着いたときに
+ * 続きを足す。絞り込みが変われば先頭から取り直す。
+ */
+let historyCursor = null; // 次ページの位置（null なら続きは無い）
+let historyQuery = ''; // サーバーへ投げている絞り込み
+let historyLoading = false;
+
+// 古い HTML だと history-feed.js が読まれておらず、ここだけが黙って失敗して
+// 表示キャッシュのぶんしか出ない状態になる。読み直して直す
+function historyFeedReady() {
+  if (window.falHistory) return true;
+  if (!falBoot.requireShared(['falHistory'])) {
+    setError('アプリの読み込みが古いままです。ページを再読み込みしてください。');
+  }
+  return false;
 }
 
-// 履歴に件数の上限は無いので、サーバーはページごとに返す。取れたぶんから順に
-// 描いて、続きは裏で追う（最初の 1 ページで画面が出る）
-async function fetchHistoryFromServer() {
-  // 古い HTML だと history-feed.js が読まれておらず、ここだけが黙って失敗して
-  // 表示キャッシュのぶん（60 件）しか出ない状態になる。読み直して直す
-  if (!window.falHistory) {
-    if (!falBoot.requireShared(['falHistory'])) {
-      setError('アプリの読み込みが古いままです。ページを再読み込みしてください。');
-    }
-    return;
-  }
+// 先頭から取り直す（起動時・絞り込みが変わったとき・タブ復帰時）
+async function reloadHistory() {
+  if (!historyFeedReady() || historyLoading) return;
+  historyLoading = true;
   const startedAt = Date.now();
-  const server = [];
-  const got = await falHistory.fetchAll((page) => {
-    if (page.length === 0) return; // サーバーが空のときは手元の表示を消さない
-    server.push(...page);
-    applyServerHistory(server, startedAt);
-  });
-  if (!got.ok) {
-    // 取れたぶんは出したままにするが、それが全部ではないことは知らせる。
-    // 黙って途中までを出すと、履歴が消えたようにしか見えない
-    setError('履歴をサーバーから取得しきれませんでした（表示は取得できたぶんだけです）。');
-    return;
-  }
-
-  // 旧バージョンのローカル履歴が残っていてサーバーが空なら、一度だけ取り込む
-  if (server.length === 0 && historyCache.length > 0 && !falStore.get(LS_HISTORY_MIGRATED)) {
-    falStore.set(LS_HISTORY_MIGRATED, '1');
-    for (const record of [...historyCache].reverse()) {
-      try {
-        await fetch('/api/history', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(record),
-        });
-      } catch {
-        // 移行できなかった分は諦める（fal CDN の失効済み画像など）
-      }
+  const q = historyQuery;
+  try {
+    const page = await falHistory.page({ q });
+    if (!page.ok) {
+      // 取れなかったことは知らせる。黙って手元のぶんを出すと、履歴が消えた
+      // ようにしか見えない
+      setError('履歴をサーバーから取得できませんでした（表示は手元のぶんだけです）。');
+      return;
     }
-    return fetchHistoryFromServer();
+    if (q !== historyQuery) return; // 待っている間に絞り込みが変わった
+
+    // 旧バージョンのローカル履歴が残っていてサーバーが空なら、一度だけ取り込む
+    if (!q && page.records.length === 0 && historyCache.length > 0
+        && !falStore.get(LS_HISTORY_MIGRATED)) {
+      falStore.set(LS_HISTORY_MIGRATED, '1');
+      for (const record of [...historyCache].reverse()) {
+        try {
+          await fetch('/api/history', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(record),
+          });
+        } catch {
+          // 移行できなかった分は諦める（失効済みの画像など）
+        }
+      }
+      historyLoading = false;
+      return reloadHistory();
+    }
+
+    // タブ復帰時は、この取得と「復帰で再開したポーリングの完了 → 履歴保存」が
+    // 競合する。保存中（POST 応答待ち）や、この取得の開始後に保存が完了した
+    // レコードは応答に含まれないことがあり、丸ごと入れ替えるとギャラリーから
+    // 消える。それらは手元のぶんを残してマージする（絞り込み中はしない）
+    const onServer = new Set(page.records.map((r) => r.id));
+    const keep = q ? [] : historyCache.filter(
+      (r) => !onServer.has(r.id)
+        && (pendingHistorySaves.has(r.id) || (historySavedAt.get(r.id) ?? 0) >= startedAt),
+    );
+    historyCache = [...keep, ...page.records];
+    historyCursor = page.cursor;
+    historyIsServerBacked = true; // ここから先は、消してもサーバーから戻せる
+    if (!q) persistHistoryCache(); // 表示キャッシュは絞り込んでいないときのぶんだけ
+    renderGallery();
+  } finally {
+    historyLoading = false;
+  }
+}
+
+// ギャラリーの末尾まで並べ切ったときに、続きを足す
+async function loadMoreHistory() {
+  if (historyLoading || !historyCursor || !historyFeedReady()) return;
+  historyLoading = true;
+  const q = historyQuery;
+  try {
+    const page = await falHistory.page({ q, cursor: historyCursor });
+    if (!page.ok || q !== historyQuery) return;
+    historyCache = [...historyCache, ...page.records];
+    historyCursor = page.cursor;
+    renderGallery();
+  } finally {
+    historyLoading = false;
   }
 }
 
@@ -780,89 +808,19 @@ function initHfDialog() {
 }
 
 /* ---------- 生成時間の統計 ---------- */
-// アクセスポイント（モデル）別に、履歴から画像 1 枚あたりの生成所要時間を集計する。
 //
-// Modal 版はサーバーの Durable Object が全ジョブを順次処理するため、連続投入時の
-// クライアント計測値（record.elapsed）には先行ジョブの処理待ちが含まれる。
-// - 新しい記録: サーバーが実処理時間（record.procMs、ジョブごとの ms 配列）を
-//   記録するのでそれをそのまま使う
-// - 古い記録: 完了時刻（ts）と所要秒（elapsed）から送信時刻を逆算し、直前の
-//   Modal 記録の完了時刻と重なる分（= 待ち時間）を差し引いて補正する。
-//   Modal のジョブはエンドポイントによらず同じ DO で順次処理されるため、
-//   補正のキューは全 Modal 記録をまとめて 1 本として扱う。
-//   途中の履歴が削除されていると重なりを検出できず、待ち時間が残ることがある
-// fal はリクエストが並列に処理されるためこの補正は適用できない（キュー待ち込みの実測値）
-
-function isModalRecord(record) {
-  return typeof record?.model === 'string' && record.model.startsWith('modal/');
-}
-
-// 統計に採用する 1 枚あたり所要時間の上限。現実の生成でこれを超えることはなく、
-// 超過分は補正しきれなかった待ち時間や放置されたタブなどの異常値とみなして捨てる
-const STATS_MAX_SEC = 30 * 60;
-
-// モデル ID → 1 枚あたりの所要秒のサンプル配列
-function collectStatsSamples() {
-  const samples = new Map();
-  const add = (model, sec) => {
-    if (!Number.isFinite(sec) || sec <= 0 || sec > STATS_MAX_SEC) return;
-    if (!samples.has(model)) samples.set(model, []);
-    samples.get(model).push(sec);
-  };
-
-  const history = loadHistory().filter((r) => Number.isFinite(r?.ts));
-
-  // Modal: 完了時刻順に並べて順次キューを再構成する
-  const modal = history.filter(isModalRecord).sort((a, b) => a.ts - b.ts);
-  let prevEnd = 0;
-  for (const r of modal) {
-    // 画像編集のレコードは images に合成前の生画像と入力画像も並ぶので、
-    // 枚数は outputCount を優先して見る（無い生成レコードは images の数でよい）
-    const count = Math.max(1, r.outputCount ?? r.images?.length ?? 1);
-    if (Array.isArray(r.procMs) && r.procMs.length > 0) {
-      for (const ms of r.procMs) add(r.model, ms / 1000);
-    } else {
-      const elapsedMs = parseFloat(r.elapsed) * 1000;
-      if (elapsedMs > 0) {
-        const start = Math.max(r.ts - elapsedMs, prevEnd);
-        const span = r.ts - start;
-        // 複数枚の記録は 1 ジョブずつ順に処理された合計なので枚数で割り、
-        // 新記録（枚数ぶんのサンプル）と重みを揃えるため枚数回カウントする
-        for (let i = 0; i < count; i++) add(r.model, span / count / 1000);
-      }
-    }
-    prevEnd = Math.max(prevEnd, r.ts);
-  }
-
-  // fal ほか: 比較レコード（variants）は所要時間を持たないので対象外
-  for (const r of history) {
-    if (isModalRecord(r) || Array.isArray(r.variants)) continue;
-    add(r.model, parseFloat(r.elapsed));
-  }
-  return samples;
-}
-
-function statsQuantile(sorted, q) {
-  const pos = (sorted.length - 1) * q;
-  const lo = Math.floor(pos);
-  const hi = Math.ceil(pos);
-  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
-}
+// 集計はサーバー側（GET /api/history/stats）。以前はここで全履歴を舐めていたが、
+// そのために「履歴を全件手元に持つ」ことが前提になっていた。手順は worker.js へ
+// そのまま移してあり（Modal の順次処理による待ち時間の補正も含む）、
+// ここで受け取るのはモデルごとの集計だけなので、応答は件数に依らない。
 
 function formatSec(s) {
-  return `${s >= 100 ? s.toFixed(0) : s.toFixed(1)}s`;
+  return s >= 60 ? `${Math.floor(s / 60)}分${Math.round(s % 60)}秒` : `${s.toFixed(1)}秒`;
 }
 
-function renderStatsHistogram(values) {
+// サーバーが刻んだヒストグラム（最小値・階級幅・度数）をそのまま描く
+function renderStatsHistogram({ min, max, width, counts }) {
   const wrap = document.createElement('div');
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const bins = Math.min(16, Math.max(5, Math.ceil(Math.sqrt(values.length))));
-  const width = Math.max((max - min) / bins, 0.05);
-  const counts = new Array(bins).fill(0);
-  for (const v of values) {
-    counts[Math.min(bins - 1, Math.floor((v - min) / width))] += 1;
-  }
   const peak = Math.max(...counts);
 
   const hist = document.createElement('div');
@@ -889,26 +847,42 @@ function renderStatsHistogram(values) {
   return wrap;
 }
 
-function renderStats() {
+function statsMessage(text) {
+  const empty = document.createElement('div');
+  empty.className = 'stats-empty';
+  empty.textContent = text;
+  els.statsBody.appendChild(empty);
+}
+
+async function renderStats() {
   els.statsBody.innerHTML = '';
-  const samples = collectStatsSamples();
+  statsMessage('集計中…');
+
+  let stats = null;
+  try {
+    const res = await fetch('/api/history/stats');
+    if (res.ok && !isHtmlResponse(res)) stats = await res.json().catch(() => null);
+  } catch {
+    // オフラインなど
+  }
+  els.statsBody.innerHTML = '';
+  if (!stats) {
+    statsMessage('統計を取得できませんでした');
+    return;
+  }
 
   // 表示順: モデル一覧の並び → それ以外（カスタムモデルなど）は名前順
-  const known = MODELS.map((m) => m.id).filter((id) => samples.has(id));
-  const others = [...samples.keys()].filter((id) => !known.includes(id)).sort();
+  const ids = Object.keys(stats);
+  const known = MODELS.map((m) => m.id).filter((id) => ids.includes(id));
+  const others = ids.filter((id) => !known.includes(id)).sort();
 
   if (known.length + others.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'stats-empty';
-    empty.textContent = '所要時間つきの生成履歴がまだありません';
-    els.statsBody.appendChild(empty);
+    statsMessage('所要時間つきの生成履歴がまだありません');
     return;
   }
 
   for (const id of [...known, ...others]) {
-    const values = samples.get(id).sort((a, b) => a - b);
-    const n = values.length;
-    const mean = values.reduce((sum, v) => sum + v, 0) / n;
+    const stat = stats[id];
 
     const group = document.createElement('div');
     group.className = 'stats-group';
@@ -920,31 +894,31 @@ function renderStats() {
 
     const nums = document.createElement('div');
     nums.className = 'stats-nums';
-    const stat = (label, value) => {
-      const s = document.createElement('span');
-      s.append(`${label} `);
+    const cell = (label, value) => {
+      const el = document.createElement('span');
+      el.append(`${label} `);
       const strong = document.createElement('strong');
       strong.textContent = value;
-      s.appendChild(strong);
-      return s;
+      el.appendChild(strong);
+      return el;
     };
     nums.append(
-      stat('平均', formatSec(mean)),
-      stat('中央値', formatSec(statsQuantile(values, 0.5))),
-      stat('最短', formatSec(values[0])),
-      stat('最長', formatSec(values[n - 1])),
-      stat('件数', `${n}`),
+      cell('平均', formatSec(stat.mean)),
+      cell('中央値', formatSec(stat.median)),
+      cell('最短', formatSec(stat.min)),
+      cell('最長', formatSec(stat.max)),
+      cell('件数', `${stat.n}`),
     );
     group.appendChild(nums);
 
-    group.appendChild(renderStatsHistogram(values));
+    group.appendChild(renderStatsHistogram(stat));
     els.statsBody.appendChild(group);
   }
 }
 
-// 使われなかった画像の回収の結果。サーバー側が 1 日に 1 度、生成の完了に
-// 便乗して走らせている（画像編集は「画像を選んだ瞬間」に R2 へ上げるので、
-// 編集せずに閉じたぶんがどうしても残る）
+// 使われなかった画像の回収の結果。サーバー側が 1 日に 1 度、生成の完了や
+// 一覧の取得に便乗して走らせている（画像編集は「画像を選んだ瞬間」に R2 へ
+// 上げるので、編集せずに閉じたぶんがどうしても残る）
 async function renderSweepStats() {
   let res;
   try {
@@ -970,6 +944,25 @@ function openStats() {
   renderSweepStats(); // 取れたら後から足す（統計の表示は待たせない）
   els.statsDialog.showModal();
 }
+
+/* ---------- 想定外の例外を画面に出す ----------
+ *
+ * 例外で処理が途中で止まっても、画面には何も出ないので原因が分からない。
+ * 実際に「統計ボタンを押しても何も開かない」（openStats の中で ReferenceError）、
+ * 「履歴が 60 件しか出ない」（取得の入口で例外）を、症状からしか追えなかった。
+ * 出るのは短い一文だけで、詳細はコンソールに残す
+ */
+let reportedError = false;
+
+function reportUnexpected(cause) {
+  if (reportedError) return; // 続けて出しても読めないので、最初の 1 つだけ
+  reportedError = true;
+  const message = cause instanceof Error ? cause.message : String(cause ?? '不明なエラー');
+  setError(`アプリでエラーが起きました（${message}）。再読み込みしてください。`);
+}
+
+window.addEventListener('error', (e) => reportUnexpected(e.error ?? e.message));
+window.addEventListener('unhandledrejection', (e) => reportUnexpected(e.reason));
 
 function initStatsDialog() {
   // 統計はサイドバーの項目。この画面では直接開き、他の画面からは ./#stats で来る
@@ -1993,29 +1986,7 @@ function galleryThumbUrl(record) {
   return record.images[0]?.url ?? '';
 }
 
-// 履歴レコードから重み（scale）が 0 より大きい LoRA だけを集める
-function recordActiveLoras(record) {
-  const loras = [];
-  if (Array.isArray(record.loras)) loras.push(...record.loras);
-  if (Array.isArray(record.common)) loras.push(...record.common);
-  if (Array.isArray(record.variants)) {
-    for (const v of record.variants) {
-      if (Array.isArray(v.ownLoras)) loras.push(...v.ownLoras);
-    }
-  }
-  // 重みゼロの LoRA は効果がないので検索対象から除外する
-  return loras.filter((l) => l && l.path && (Number(l.scale) || 0) > 0);
-}
-
-// ギャラリー検索の対象テキスト（プロンプト・モデル名・使用 LoRA）
-function gallerySearchText(record) {
-  const loraText = recordActiveLoras(record)
-    .map((l) => `${l.path} ${loraDisplayName(l.path)}`)
-    .join(' ');
-  return `${record.prompt ?? ''} ${record.model ?? ''} ${loraText}`.toLowerCase();
-}
-
-// 絞り込んだあとの一覧。キー操作での前後移動もこれをたどる
+// いま並べている一覧。キー操作での前後移動もこれをたどる
 let galleryItems = [];
 
 function galleryEmpty(text) {
@@ -2026,32 +1997,20 @@ function galleryEmpty(text) {
   els.gallery.appendChild(empty);
 }
 
+// 絞り込みはサーバー側（search 列への LIKE）でかかっているので、
+// ここは受け取ったものをそのまま並べるだけ
 function renderGallery() {
-  const allItems = loadHistory();
-
-  if (allItems.length === 0) {
-    galleryItems = [];
-    galleryEmpty('まだ履歴はありません');
-    return;
-  }
-
-  // スペース区切りで AND 検索。各トークンをすべて含む履歴だけを残す
-  const tokens = (els.gallerySearch?.value ?? '').trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const items = tokens.length
-    ? allItems.filter((record) => {
-        const haystack = gallerySearchText(record);
-        return tokens.every((t) => haystack.includes(t));
-      })
-    : allItems;
-
+  const items = loadHistory();
   galleryItems = items;
 
   if (items.length === 0) {
-    galleryEmpty('一致する履歴がありません');
+    galleryEmpty(historyQuery ? '一致する履歴がありません' : 'まだ履歴はありません');
+    galleryPager.setHasMore(false);
     return;
   }
-
   galleryPager.render(items);
+  // 末尾まで並べ切ったら、続きを取りに行く合図を出す
+  galleryPager.setHasMore(!!historyCursor);
 }
 
 // 履歴 1 件ぶんのカード
@@ -2120,7 +2079,7 @@ function galleryItemEl(record) {
   return item;
 }
 
-const galleryPager = falGallery.create(els.gallery, galleryItemEl);
+const galleryPager = falGallery.create(els.gallery, galleryItemEl, { onNeedMore: loadMoreHistory });
 
 // 詳細表示中に前後の履歴（ギャラリー）へ移動する。dir=+1 で右、-1 で左
 function navigateGallery(dir) {
@@ -2300,7 +2259,7 @@ try {
   historyCache = [];
 }
 renderGallery();
-fetchHistoryFromServer();
+reloadHistory();
 
 // モバイルでは LoRA アコーディオンを畳んだ状態で開始する（PC は常時展開）
 if (MOBILE_MQ.matches) els.loraField.open = false;
@@ -2335,7 +2294,7 @@ document.addEventListener('visibilitychange', () => {
   // タブに戻ってきたら他端末の変更（LoRA ライブラリ・履歴）を取り込む
   if (document.visibilityState === 'visible') {
     deviceSync.pull();
-    fetchHistoryFromServer();
+    reloadHistory();
   }
 });
 
@@ -2397,10 +2356,19 @@ document.addEventListener('keydown', (e) => {
 function syncGallerySearchSize() {
   els.gallerySearch.size = Math.max(8, els.gallerySearch.value.length + 1);
 }
+// 絞り込みはサーバーへ投げるので、打つたびに投げないよう少し待つ
+let gallerySearchTimer = null;
 els.gallerySearch.addEventListener('input', () => {
   syncGallerySearchSize();
-  galleryPager.reset(); // 絞り込みが変われば、また先頭から
-  renderGallery();
+  clearTimeout(gallerySearchTimer);
+  gallerySearchTimer = setTimeout(() => {
+    const q = els.gallerySearch.value.trim();
+    if (q === historyQuery) return;
+    historyQuery = q;
+    historyCursor = null;
+    galleryPager.reset(); // 絞り込みが変われば、また先頭から
+    reloadHistory();
+  }, 250);
 });
 syncGallerySearchSize();
 

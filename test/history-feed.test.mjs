@@ -1,16 +1,13 @@
-// 履歴のページ送り取得（history-feed.js）の単体テスト:  node test/history-feed.test.mjs
+// 履歴の取得（history-feed.js）の単体テスト:  node test/history-feed.test.mjs
 //
-// 見るのは 3 点:
-//   - 続きが無くなるまでページを追い、取れたぶんから順に呼び出し側へ渡すこと
-//   - 続きの位置（X-Next-Cursor）が percent-encoded なので、そのまま問い合わせに
-//     入れ直すと二重エンコードになる。素に戻してから渡していること
-//   - 途中で切れたとき（オフライン / Access のセッション切れ）は ok=false にして、
-//     それまでに取れたぶんは呼び出し側に渡したままにすること
+// 履歴に件数の上限が無いので、一覧は 1 ページぶんだけが返り、続きの位置が
+// X-Next-Cursor で示される。絞り込み（q・type）もサーバー側でかかる。
+// 見るのは「問い合わせを正しく組み立てること」と「取れなかったときに
+// 中途半端なものを返さないこと」。
 import { readFileSync } from 'node:fs';
 import { createContext, runInContext } from 'node:vm';
 import assert from 'node:assert/strict';
 
-// pages: 1 ページぶんの配列の配列。fetch に来た URL は asked に記録する
 function loadFeed(handler) {
   const asked = [];
   const sandbox = {
@@ -18,8 +15,8 @@ function loadFeed(handler) {
     URLSearchParams,
     Response,
     fetch: async (url) => {
-      asked.push(String(url));
-      return handler(new URL(String(url), 'https://app.example'), asked.length);
+      asked.push(new URL(String(url), 'https://app.example'));
+      return handler(asked.length);
     },
   };
   sandbox.window = sandbox;
@@ -31,75 +28,72 @@ function loadFeed(handler) {
 const json = (body, cursor) => new Response(JSON.stringify(body), {
   headers: {
     'Content-Type': 'application/json',
-    ...(cursor ? { 'X-Next-Cursor': encodeURIComponent(cursor) } : {}),
+    ...(cursor ? { 'X-Next-Cursor': cursor } : {}),
   },
 });
 
-// fetchAll の戻り値は vm の中で作られる（realm が違うと deepStrictEqual が落ちる）
-// ので、比べる前に素のオブジェクトへ写す
 let passed = 0;
 const check = (label, actual, expected) => {
   assert.deepEqual(actual, expected, label);
   passed++;
 };
+const param = (url, key) => url.searchParams.get(key);
 
-// 実際に返る形の索引キー（':' を含むので、素で query に入れると壊れる）
-const CURSOR = 'hidx:999999999999998:rec-1';
-
-/* ---- 続きがある間は追う ---- */
+/* ---- 1 ページ取って、続きの位置を返す ---- */
 {
-  const { falHistory, asked } = loadFeed((url, n) => (n === 1
-    ? json([{ id: 'a' }, { id: 'b' }], CURSOR)
-    : json([{ id: 'c' }])));
+  const { falHistory, asked } = loadFeed(() => json([{ id: 'a' }, { id: 'b' }], '1234'));
+  const page = await falHistory.page();
 
-  const pages = [];
-  const got = await falHistory.fetchAll((page, info) => pages.push([page.map((r) => r.id), info.first]));
+  check('取れた記録を返す', page.records.map((r) => r.id), ['a', 'b']);
+  check('続きの位置を返す', page.cursor, '1234');
+  check('ok', page.ok, true);
+  check('既定の件数を投げる', param(asked[0], 'limit'), '60');
+  check('余計な絞り込みは付けない', [param(asked[0], 'q'), param(asked[0], 'cursor')], [null, null]);
+}
 
-  check('取れたぶんをページごとに渡す', pages, [[['a', 'b'], true], [['c'], false]]);
-  check('最後まで取れた', { ...got }, { ok: true, total: 3 });
-  check('1 回目は先頭から', new URL(asked[0], 'https://x').searchParams.get('cursor'), null);
-  // ヘッダは encode 済み。そのまま入れると %3A が %253A になって別のキーになる
-  check('続きの位置が素に戻っている', new URL(asked[1], 'https://x').searchParams.get('cursor'), CURSOR);
+/* ---- 絞り込みと続きの位置を渡す ---- */
+{
+  const { falHistory, asked } = loadFeed(() => json([]));
+  await falHistory.page({ limit: 10, cursor: '99', q: '青い 犬', type: 'imgedit' });
+
+  check('件数', param(asked[0], 'limit'), '10');
+  check('続きの位置', param(asked[0], 'cursor'), '99');
+  check('絞り込み（日本語と空白もそのまま）', param(asked[0], 'q'), '青い 犬');
+  check('種類', param(asked[0], 'type'), 'imgedit');
+}
+
+/* ---- 続きが無ければ cursor は null ---- */
+{
+  const { falHistory } = loadFeed(() => json([{ id: 'a' }]));
+  const page = await falHistory.page();
+  check('最後のページ', page.cursor, null);
+  check('記録は返る', page.records.length, 1);
 }
 
 /* ---- 空の履歴 ---- */
 {
-  const { falHistory, asked } = loadFeed(() => json([]));
-  const pages = [];
-  const got = await falHistory.fetchAll((page) => pages.push(page));
-  check('空でも 1 度は渡す', pages, [[]]);
-  check('空で終わる', { ...got }, { ok: true, total: 0 });
-  check('余計に取りに行かない', asked.length, 1);
+  const { falHistory } = loadFeed(() => json([]));
+  const page = await falHistory.page();
+  check('空でも ok', [page.ok, page.records.length, page.cursor], [true, 0, null]);
 }
 
-/* ---- 途中で切れた（オフライン） ---- */
+/* ---- 取れなかったとき（オフライン / セッション切れ / 5xx） ---- */
 {
-  const { falHistory } = loadFeed((url, n) => {
-    if (n === 1) return json([{ id: 'a' }], CURSOR);
-    throw new TypeError('Failed to fetch');
-  });
-  const pages = [];
-  const got = await falHistory.fetchAll((page) => pages.push(page.map((r) => r.id)));
-  check('取れたぶんは渡してある', pages, [['a']]);
-  check('最後までは取れていない', { ...got }, { ok: false, total: 1 });
+  const { falHistory } = loadFeed(() => { throw new TypeError('Failed to fetch'); });
+  const page = await falHistory.page();
+  check('オフラインは ok=false', [page.ok, page.records.length], [false, 0]);
 }
-
-/* ---- Access のセッション切れ（ログインページの HTML が返る） ---- */
 {
   const { falHistory } = loadFeed(() => new Response('<html>sign in</html>', {
     headers: { 'Content-Type': 'text/html; charset=utf-8' },
   }));
-  const pages = [];
-  const got = await falHistory.fetchAll((page) => pages.push(page));
-  check('HTML を履歴として渡さない', pages, []);
-  check('ok=false で返る', { ...got }, { ok: false, total: 0 });
+  const page = await falHistory.page();
+  check('ログインページを履歴として返さない', [page.ok, page.records.length], [false, 0]);
 }
-
-/* ---- 5xx ---- */
 {
   const { falHistory } = loadFeed(() => new Response('boom', { status: 500 }));
-  const got = await falHistory.fetchAll(() => {});
-  check('エラー応答も ok=false', { ...got }, { ok: false, total: 0 });
+  const page = await falHistory.page();
+  check('エラー応答も ok=false', [page.ok, page.records.length], [false, 0]);
 }
 
 console.log(`ok: ${passed} checks passed`);
