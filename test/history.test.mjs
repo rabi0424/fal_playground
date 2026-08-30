@@ -266,6 +266,204 @@ test('全消しは実体も画像も消し、終わらなければ done: false �
   assert.deepEqual(await listIds(mod, env), []);
 });
 
+/* ---- 検索（search 列 + LIKE） ---- */
+
+const LORA = 'https://huggingface.co/tottie2215/temp_str/resolve/main/Shimizu_krea2_v1.safetensors';
+
+async function seedSearchable(mod, env) {
+  await postRecord(mod, env, {
+    id: 'a', ts: 1, model: 'fal-ai/flux/dev', prompt: 'a red CAT on a roof', images: [],
+  });
+  await postRecord(mod, env, {
+    id: 'b', ts: 2, model: 'modal/krea2-exp', prompt: '青い犬', images: [],
+    loras: [{ path: LORA, scale: 0.8 }],
+  });
+  await postRecord(mod, env, {
+    id: 'c', ts: 3, type: 'imgedit', model: 'fal-ai/qwen-image-edit-2511/lora',
+    prompt: 'remove the cup', images: [],
+    // 重み 0 の LoRA は効いていないので、検索の対象にしない
+    loras: [{ path: 'https://x/y/Unused_lora.safetensors', scale: 0 }],
+  });
+}
+
+test('q でプロンプト・モデル名・LoRA を横断して絞り込める', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  await seedSearchable(mod, env);
+
+  // プロンプト（大文字小文字は区別しない）
+  assert.deepEqual(await listIds(mod, env, '?q=cat'), ['a']);
+  // 日本語
+  assert.deepEqual(await listIds(mod, env, `?q=${encodeURIComponent('青い')}`), ['b']);
+  // モデル名
+  assert.deepEqual(await listIds(mod, env, '?q=krea2'), ['b']);
+  // LoRA のパス
+  assert.deepEqual(await listIds(mod, env, '?q=temp_str'), ['b']);
+  // LoRA の表示名（パスから決まるので、サーバーでも同じものが作れる）
+  assert.deepEqual(await listIds(mod, env, '?q=shimizu'), ['b']);
+  // 重み 0 の LoRA は拾わない
+  assert.deepEqual(await listIds(mod, env, '?q=unused'), []);
+});
+
+test('q は空白区切りの AND で、ワイルドカードは効かない', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  await seedSearchable(mod, env);
+
+  assert.deepEqual(await listIds(mod, env, `?q=${encodeURIComponent('red cat')}`), ['a']);
+  assert.deepEqual(await listIds(mod, env, `?q=${encodeURIComponent('red 犬')}`), []);
+  // % を打ち消していないと全件に当たる
+  assert.deepEqual(await listIds(mod, env, `?q=${encodeURIComponent('%')}`), []);
+  // _ は文字として探す（LoRA 名の temp_str / Shimizu_krea2_v1 に実在する）
+  assert.deepEqual(await listIds(mod, env, `?q=${encodeURIComponent('_')}`), ['b']);
+  // 1 文字ワイルドカードとして効いていれば 'cat' に当たってしまう
+  assert.deepEqual(await listIds(mod, env, `?q=${encodeURIComponent('c_t')}`), []);
+});
+
+test('type で種類を絞り込める', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  await seedSearchable(mod, env);
+
+  assert.deepEqual(await listIds(mod, env, '?type=imgedit'), ['c']);
+  assert.deepEqual(await listIds(mod, env, `?type=imgedit&q=${encodeURIComponent('cup')}`), ['c']);
+  assert.deepEqual(await listIds(mod, env, '?type=imgedit&q=cat'), []);
+});
+
+test('検索の絞り込みでもページ送りが続く', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  for (let i = 1; i <= 5; i++) {
+    await postRecord(mod, env, { id: `r${i}`, ts: i, model: 'm', prompt: 'ねこ', images: [] });
+  }
+  await postRecord(mod, env, { id: 'other', ts: 9, model: 'm', prompt: 'いぬ', images: [] });
+
+  const first = await call(mod, env, `/api/history?limit=2&q=${encodeURIComponent('ねこ')}`);
+  assert.deepEqual((await first.json()).map((r) => r.id), ['r5', 'r4']);
+  const second = await call(mod, env, `/api/history?limit=2&q=${encodeURIComponent('ねこ')}&cursor=${nextCursor(first)}`);
+  assert.deepEqual((await second.json()).map((r) => r.id), ['r3', 'r2']);
+});
+
+test('search 列は既存の行にも埋め戻される', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  seedOldCatalog(env, 30);
+  // 旧レイアウトには search 列が無い。ALTER で足り、あとから埋まる
+  for (let guard = 0; guard < 30; guard++) {
+    await listIds(mod, env);
+    if (rows(env, "SELECT id FROM history WHERE search = ''").length === 0) break;
+  }
+  assert.equal(rows(env, "SELECT id FROM history WHERE search = ''").length, 0, '埋まっていません');
+  assert.equal((await listIds(mod, env, '?q=krea2')).length, 30, '埋め戻したぶんが検索に出ません');
+});
+
+/* ---- 生成時間の統計 ---- */
+
+// 移行前に app.js が持っていた手順（collectStatsSamples）。サーバーの計算が
+// これと一致することを確かめるために、そのまま写してある
+function clientStatsSamples(history) {
+  const MAX = 30 * 60;
+  const samples = new Map();
+  const add = (model, sec) => {
+    if (!Number.isFinite(sec) || sec <= 0 || sec > MAX) return;
+    if (!samples.has(model)) samples.set(model, []);
+    samples.get(model).push(sec);
+  };
+  const isModal = (r) => typeof r?.model === 'string' && r.model.startsWith('modal/');
+  const rows = history.filter((r) => Number.isFinite(r?.ts));
+
+  const modal = rows.filter(isModal).sort((a, b) => a.ts - b.ts);
+  let prevEnd = 0;
+  for (const r of modal) {
+    const count = Math.max(1, r.outputCount ?? r.images?.length ?? 1);
+    if (Array.isArray(r.procMs) && r.procMs.length > 0) {
+      for (const ms of r.procMs) add(r.model, ms / 1000);
+    } else {
+      const elapsedMs = parseFloat(r.elapsed) * 1000;
+      if (elapsedMs > 0) {
+        const start = Math.max(r.ts - elapsedMs, prevEnd);
+        const span = r.ts - start;
+        for (let i = 0; i < count; i++) add(r.model, span / count / 1000);
+      }
+    }
+    prevEnd = Math.max(prevEnd, r.ts);
+  }
+  for (const r of rows) {
+    if (isModal(r) || Array.isArray(r.variants)) continue;
+    add(r.model, parseFloat(r.elapsed));
+  }
+  return samples;
+}
+
+const quantile = (sorted, q) => {
+  const pos = (sorted.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+};
+
+test('統計は、これまでのクライアント側の計算と一致する', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+
+  const img = (n) => Array.from({ length: n }, (_, i) => ({ url: imageUrl(i + 1) }));
+  let ts = 1780000000000;
+  const history = [
+    // Modal: 待ち時間が重なる並び（前の完了より前に遡らせない補正が効く）
+    { id: 'm1', ts: (ts += 60000), model: 'modal/krea2-exp', elapsed: '20.0', images: img(1) },
+    { id: 'm2', ts: (ts += 15000), model: 'modal/krea2-exp', elapsed: '30.0', images: img(1) },
+    // 複数枚（枚数で割って枚数回数える）
+    { id: 'm3', ts: (ts += 90000), model: 'modal/krea2-exp', elapsed: '60.0', images: img(3), outputCount: 3 },
+    // procMs があるときはそちらを使う
+    { id: 'm4', ts: (ts += 60000), model: 'modal/krea2-wan', elapsed: '99.0', procMs: [17200, 16800], images: img(2), outputCount: 2 },
+    // fal
+    { id: 'f1', ts: (ts += 30000), model: 'fal-ai/flux/dev', elapsed: '3.2', images: img(1) },
+    { id: 'f2', ts: (ts += 30000), model: 'fal-ai/flux/dev', elapsed: '4.8', images: img(1) },
+    { id: 'f3', ts: (ts += 30000), model: 'fal-ai/flux/dev', elapsed: '2.5', images: img(1) },
+    // 比較は所要時間を持たないので対象外
+    { id: 'c1', ts: (ts += 30000), model: 'fal-ai/flux/dev', elapsed: '9.9', variants: [{ images: img(1) }] },
+    // 上限を超えるものは捨てる
+    { id: 'x1', ts: (ts += 30000), model: 'fal-ai/flux/dev', elapsed: '5000.0', images: img(1) },
+  ];
+  for (const record of history) await postRecord(mod, env, record);
+
+  const expected = clientStatsSamples(history);
+  const got = await (await call(mod, env, '/api/history/stats')).json();
+
+  assert.deepEqual(Object.keys(got).sort(), [...expected.keys()].sort(), 'モデルの顔ぶれが違います');
+  for (const [model, values] of expected) {
+    const sorted = [...values].sort((a, b) => a - b);
+    const stat = got[model];
+    assert.equal(stat.n, sorted.length, `${model}: 件数`);
+    assert.equal(stat.min, sorted[0], `${model}: 最短`);
+    assert.equal(stat.max, sorted[sorted.length - 1], `${model}: 最長`);
+    assert.equal(stat.median, quantile(sorted, 0.5), `${model}: 中央値`);
+    const mean = sorted.reduce((s, v) => s + v, 0) / sorted.length;
+    assert.ok(Math.abs(stat.mean - mean) < 1e-9, `${model}: 平均 ${stat.mean} !== ${mean}`);
+    // ヒストグラムは、標本の総数と刻み数が合っていること
+    assert.equal(stat.counts.reduce((s, c) => s + c, 0), sorted.length, `${model}: ヒストグラムの総数`);
+  }
+  assert.equal('fal-ai/flux/dev' in got, true);
+  assert.equal(got['fal-ai/flux/dev'].n, 3, '比較や上限超えを数えています');
+});
+
+test('統計は 1 クエリで済み、応答は件数に依らない', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  seedOldCatalog(env, 300);
+  for (let guard = 0; guard < 30; guard++) {
+    await listIds(mod, env);
+    if (rows(env, "SELECT id FROM history WHERE search = ''").length === 0) break;
+  }
+
+  const before = env.d1.counters.queries;
+  const got = await (await call(mod, env, '/api/history/stats')).json();
+  assert.ok(env.d1.counters.queries - before <= 3, `${env.d1.counters.queries - before} クエリ使っています`);
+  // 300 件ぶんの標本があっても、返るのはモデルごとの集計だけ
+  assert.equal(Object.keys(got).length, 1);
+  assert.ok(!('samples' in got['modal/krea2-exp']), '標本そのものを返しています');
+});
+
 /* ---- スキーマの更新（既にある DB への追従） ---- */
 
 // image_id 列が無かった頃の DB を作る（本番がこの形だった）
@@ -287,7 +485,9 @@ function seedOldCatalog(env, count, imagesPerRecord = 4) {
     const images = Array.from({ length: imagesPerRecord }, (_, n) => ({
       url: `/api/image/${String(i * 10 + n).padStart(32, '0')}`,
     }));
-    ins.run(i, id, 'playground', '', 1780000000000 + i, 'modal/krea2-exp', 'p', JSON.stringify({ id, images }));
+    // 実物と同じく、レコード側にも設定を持たせる（search と統計はここから作られる）
+    ins.run(i, id, 'playground', '', 1780000000000 + i * 60000, 'modal/krea2-exp', 'p',
+      JSON.stringify({ id, model: 'modal/krea2-exp', prompt: 'p', elapsed: '12.0', images }));
   }
   // Durable Object からの引き取りは済んでいる状態
   env.d1.db.prepare("INSERT INTO meta (k,v) VALUES ('history_migrated','done')").run();

@@ -2389,15 +2389,11 @@ let historyItems = [];
 
 // 履歴に件数の上限は無いので、サーバーはページごとに返す。
 // 取れたぶんから順に描いて、続きは裏で追う
+// 下部に並べるのはこの画面で作った記録だけなので、type でサーバー側に絞らせる。
+// 全件を手元に持たなくても、直近のぶんが確実に並ぶ
 async function fetchHistory() {
-  const items = [];
-  const got = await falHistory.fetchAll((page) => {
-    items.push(...page);
-    if (page.length === 0) return; // 取れなかった / 空のときは表示中のまま
-    historyItems = items;
-    renderGallery();
-  });
-  if (got.ok) historyItems = items; // 全消しの直後など、空になったことも反映する
+  const page = await falHistory.page({ type: 'imgedit' });
+  if (page.ok) historyItems = page.records; // 取れなかったときは表示中のまま
   renderGallery();
 }
 
@@ -2588,11 +2584,17 @@ async function reopenMaskedResult(listRecord) {
   renderResult(record);
 }
 
-function openHistoryPicker() {
+// 入力画像に使えるものは種類を問わないので、下部の履歴（imgedit だけ）とは
+// 別に取りに行く。開いたときの 1 ページぶんで足りる
+async function openHistoryPicker() {
   els.historyPicker.innerHTML = '';
-  const withImages = historyItems.filter((r) => recordThumb(r));
+  els.historyEmpty.hidden = true;
+  els.historyDialog.showModal();
+
+  const page = await falHistory.page({ limit: 60 });
+  const withImages = page.records.filter((r) => recordThumb(r));
   els.historyEmpty.hidden = withImages.length > 0;
-  for (const record of withImages.slice(0, 60)) {
+  for (const record of withImages) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'ie-picker-item';
@@ -2607,7 +2609,6 @@ function openHistoryPicker() {
     });
     els.historyPicker.appendChild(btn);
   }
-  els.historyDialog.showModal();
 }
 
 async function saveHistoryRecord(record) {

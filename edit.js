@@ -1026,19 +1026,37 @@ function galleryImageUrls(record) {
   return (record.images ?? []).map((i) => i.url);
 }
 
-// 履歴に件数の上限は無いので、サーバーはページごとに返す。
-// 取れたぶんから順に描いて、続きは裏で追う
+// 履歴に件数の上限は無いので、サーバーはページごとに返す。先頭の 1 ページを出し、
+// ギャラリーの末尾まで並べ切ったら続きを足す（loadMoreHistory）
+let historyCursor = null;
+let historyLoading = false;
+
 async function fetchHistory() {
-  const items = [];
-  const got = await falHistory.fetchAll((page) => {
-    items.push(...page);
-    if (page.length === 0) return; // 取れなかった / 空のときは表示中のまま
-    historyItems = items;
+  if (historyLoading) return;
+  historyLoading = true;
+  try {
+    const page = await falHistory.page();
+    if (!page.ok) return; // オフラインなどは表示中のまま
+    historyItems = page.records;
+    historyCursor = page.cursor;
     renderGallery();
-  });
-  if (!got.ok) return; // オフラインなどは、取れたぶんを出したままにする
-  historyItems = items; // 全消しの直後など、空になったことも反映する
-  renderGallery();
+  } finally {
+    historyLoading = false;
+  }
+}
+
+async function loadMoreHistory() {
+  if (historyLoading || !historyCursor) return;
+  historyLoading = true;
+  try {
+    const page = await falHistory.page({ cursor: historyCursor });
+    if (!page.ok) return;
+    historyItems = [...historyItems, ...page.records];
+    historyCursor = page.cursor;
+    renderGallery();
+  } finally {
+    historyLoading = false;
+  }
 }
 
 function renderGallery() {
@@ -1052,6 +1070,7 @@ function renderGallery() {
   }
 
   galleryPager.render(historyItems);
+  galleryPager.setHasMore(!!historyCursor); // 末尾に着いたら続きを取りに行く
 }
 
 // 履歴 1 件ぶんのカード
@@ -1099,7 +1118,7 @@ function galleryItemEl(record) {
   return item;
 }
 
-const galleryPager = falGallery.create(els.gallery, galleryItemEl);
+const galleryPager = falGallery.create(els.gallery, galleryItemEl, { onNeedMore: loadMoreHistory });
 
 /* ---------- lightbox（app.js の簡略版） ---------- */
 

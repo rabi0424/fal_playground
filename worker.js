@@ -554,10 +554,11 @@ const HISTORY_CLEAR_PAGE = 200;
 const META_SCHEMA = 'schema_version';
 const META_MIGRATED = 'history_migrated';
 const META_LINKS = 'image_links_rebuilt';
+const META_SEARCH = 'search_backfilled';
 const META_LINKS_CURSOR = 'image_links_cursor';
 const META_GC_CURSOR = 'image_gc_cursor';
 const META_GC_STATS = 'image_gc_stats';
-const SCHEMA_VERSION = '2';
+const SCHEMA_VERSION = '3';
 
 // 自分が配信している画像の id。64 桁は内容アドレス（中身の sha256）、
 // 32 桁はそうする前に置いた画像（ランダム UUID）。どちらもそのまま配信する
@@ -576,7 +577,16 @@ const IMAGE_GC_PAGE = 200; // R2 を 1 度に列挙する件数
 // D1 の書き換えが要るので、無料プランの 1 リクエスト 50 クエリに収まる数にする
 const HISTORY_CAPTURE_BUDGET = 6;
 
-const HISTORY_COLS = ['seq', 'id', 'source', 'type', 'created', 'model', 'prompt', 'record', 'mask'];
+const HISTORY_COLS = [
+  'seq', 'id', 'source', 'type', 'created', 'model', 'prompt', 'search', 'record', 'mask',
+];
+
+// 検索は search 列への LIKE。索引は効かないが、この規模では十分で、
+// FTS5（trigram）は必要になってから足せる（列さえあれば差分は小さい）。
+// 空白区切りの AND 検索なので、語をいくつまで受けるか決めておく
+const HISTORY_SEARCH_TOKENS = 8;
+const HISTORY_SEARCH_PAGE = 60; // 検索文字列を埋め戻すときの 1 回ぶん
+const HISTORY_SEARCH_BUDGET = 8;
 
 // schema.sql と同じ内容。Git 連携デプロイでは wrangler の migrations が走らないので、
 // 最初に履歴へ触れたときにここから用意する。
@@ -590,7 +600,8 @@ const HISTORY_TABLES = [
      seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE,
      source TEXT NOT NULL DEFAULT 'playground', type TEXT NOT NULL DEFAULT '',
      created INTEGER NOT NULL DEFAULT 0, model TEXT NOT NULL DEFAULT '',
-     prompt TEXT NOT NULL DEFAULT '', record TEXT NOT NULL, mask TEXT)`,
+     prompt TEXT NOT NULL DEFAULT '', search TEXT NOT NULL DEFAULT '',
+     record TEXT NOT NULL, mask TEXT)`,
   `CREATE TABLE IF NOT EXISTS history_images (
      url TEXT NOT NULL, history_id TEXT NOT NULL, image_id TEXT,
      PRIMARY KEY (url, history_id))`,
@@ -603,6 +614,7 @@ const HISTORY_TABLES = [
 // それは適用済みとして黙って進む
 const HISTORY_ALTERS = [
   'ALTER TABLE history_images ADD COLUMN image_id TEXT',
+  "ALTER TABLE history ADD COLUMN search TEXT NOT NULL DEFAULT ''",
 ];
 
 const HISTORY_INDEXES = [
@@ -639,6 +651,7 @@ function historyRow(record) {
     Number.isFinite(record.ts) ? record.ts : 0,
     typeof record.model === 'string' ? record.model : '',
     typeof record.prompt === 'string' ? record.prompt : '',
+    historySearchText(record),
     JSON.stringify(rest),
     mask ? JSON.stringify(mask) : null,
   ];
@@ -651,6 +664,66 @@ function recordImageUrls(record) {
     for (const img of images) if (typeof img?.url === 'string') urls.add(img.url);
   }
   return [...urls];
+}
+
+/* ---------- 検索用の文字列 ----------
+ *
+ * app.js のギャラリー検索（gallerySearchText）が作っていたものと同じ文字列を、
+ * 保存時に search 列へ入れる。同じ結果になることがこの移行の要なので、
+ * 手順もそのまま持ってきてある（プロンプト・モデル名・LoRA のパスと表示名）。
+ *
+ * 表示名は LoRA ライブラリの設定ではなくパスから決まる（lora-library.js の
+ * fileName）ので、サーバー側でもまったく同じものを作れる
+ */
+function loraFileName(path) {
+  const seg = String(path).split('?')[0].split('/').filter(Boolean).pop() || path;
+  try {
+    return decodeURIComponent(seg).replace(/\.safetensors$/i, '');
+  } catch {
+    return seg.replace(/\.safetensors$/i, '');
+  }
+}
+
+// 効いている LoRA（重み 0 は効果が無いので検索対象から外す）
+function recordActiveLoras(record) {
+  const loras = [];
+  if (Array.isArray(record.loras)) loras.push(...record.loras);
+  if (Array.isArray(record.common)) loras.push(...record.common);
+  if (Array.isArray(record.variants)) {
+    for (const v of record.variants) {
+      if (Array.isArray(v.ownLoras)) loras.push(...v.ownLoras);
+    }
+  }
+  return loras.filter((l) => l && l.path && (Number(l.scale) || 0) > 0);
+}
+
+function historySearchText(record) {
+  const loraText = recordActiveLoras(record)
+    .map((l) => `${l.path} ${loraFileName(l.path)}`)
+    .join(' ');
+  return `${record.prompt ?? ''} ${record.model ?? ''} ${loraText}`.toLowerCase();
+}
+
+// 空白区切りの AND 検索。LIKE のワイルドカードは打ち消す
+function searchTokens(q) {
+  return String(q ?? '').toLowerCase().trim().split(/\s+/)
+    .filter(Boolean)
+    .slice(0, HISTORY_SEARCH_TOKENS)
+    .map((token) => token.replace(/[\\%_]/g, (c) => `\\${c}`));
+}
+
+// id ごとに違う値を 1 文で書き込む（1 行 1 文だとクエリ数の予算に収まらない）
+function updateByIdStatements(db, table, column, rows) {
+  const perStatement = Math.max(1, Math.floor(D1_MAX_BIND / 3));
+  const out = [];
+  for (const part of chunkBatch(rows, perStatement)) {
+    const cases = part.map(() => 'WHEN ? THEN ?').join(' ');
+    const marks = part.map(() => '?').join(',');
+    out.push(db.prepare(
+      `UPDATE ${table} SET ${column} = CASE id ${cases} END WHERE id IN (${marks})`,
+    ).bind(...part.flat(), ...part.map(([id]) => id)));
+  }
+  return out;
 }
 
 // history_images に入れる行。image_id は自分が配信している画像のときだけ入る
@@ -715,6 +788,11 @@ async function ensureHistoryCatalog(env, stub) {
       if (!(await rebuildImageLinks(env))) return;
       await setMeta(env, META_LINKS, new Date().toISOString());
     }
+    // 3. 検索用の文字列（search 列）を、レコードから埋める
+    if (!state.get(META_SEARCH)) {
+      if (!(await backfillSearch(env))) return;
+      await setMeta(env, META_SEARCH, new Date().toISOString());
+    }
     historyCatalogReady = true;
   } catch {
     // 続きは次のリクエストで。一覧はここまでのぶんを返す
@@ -775,19 +853,155 @@ async function rebuildImageLinks(env) {
   return false;
 }
 
+// search 列を埋める。空文字の行が対象なので、済んだものは自然に外れていく
+async function backfillSearch(env) {
+  for (let spent = 0; spent < HISTORY_SEARCH_BUDGET;) {
+    const { results } = await env.DB.prepare(
+      "SELECT id, record FROM history WHERE search = '' LIMIT ?",
+    ).bind(HISTORY_SEARCH_PAGE).all();
+    spent += 1;
+    if (results.length === 0) return true;
+
+    const stmts = updateByIdStatements(env.DB, 'history', 'search',
+      results.map((row) => [row.id, historySearchText(JSON.parse(row.record))]));
+    await env.DB.batch(stmts);
+    spent += stmts.length;
+  }
+  return false; // 続きは次のリクエストで
+}
+
 // 新しい順に 1 ページ。cursor は前のページの最後の seq
-async function historyPage(env, limit, cursor) {
+async function historyPage(env, { limit, cursor, q, type } = {}) {
   const want = Math.max(1, Math.min(Math.trunc(limit) || HISTORY_PAGE_DEFAULT, HISTORY_PAGE_MAX));
+  const where = ['source = ?'];
+  const bind = [HISTORY_SOURCE];
+
   const after = Number(cursor);
-  const scoped = Number.isFinite(after) && after > 0;
+  if (Number.isFinite(after) && after > 0) {
+    where.push('seq < ?');
+    bind.push(after);
+  }
+  if (type) {
+    where.push('type = ?');
+    bind.push(type);
+  }
+  // 空白区切りの AND 検索。すべての語を含む記録だけを残す
+  for (const token of searchTokens(q)) {
+    where.push("search LIKE ? ESCAPE '\\'");
+    bind.push(`%${token}%`);
+  }
+  bind.push(want);
+
   const { results } = await env.DB.prepare(
-    `SELECT seq, record FROM history WHERE source = ?${scoped ? ' AND seq < ?' : ''}`
-    + ' ORDER BY seq DESC LIMIT ?',
-  ).bind(...(scoped ? [HISTORY_SOURCE, after, want] : [HISTORY_SOURCE, want])).all();
+    `SELECT seq, record FROM history WHERE ${where.join(' AND ')} ORDER BY seq DESC LIMIT ?`,
+  ).bind(...bind).all();
 
   const records = results.map((row) => JSON.parse(row.record));
   // want 件取れたなら、まだ続きがあるかもしれない
   return { records, cursor: results.length < want ? null : results[results.length - 1].seq };
+}
+
+/* ---------- 生成時間の統計 ----------
+ *
+ * これまではクライアントが全履歴を持って計算していた。手順はそのまま持ってきて
+ * あり（同じ結果になることが移行の要）、違うのは入力の集め方だけ:
+ * レコード全体ではなく、必要な数項目だけを SQL で抜き出す。
+ *
+ * Modal は Durable Object で順次処理されるので、記録された所要時間には前の
+ * ジョブを待っていた時間が混ざる。完了時刻順に並べて、直前の記録の完了時刻より
+ * 前には遡らないようにして待ち時間を差し引く
+ */
+const STATS_MAX_SEC = 30 * 60; // これを超える標本は、補正しきれなかった待ち時間とみなして捨てる
+
+const isModalModel = (model) => String(model ?? '').startsWith('modal/');
+
+async function historyStats(env) {
+  const { results } = await env.DB.prepare(
+    `SELECT model,
+            created AS ts,
+            json_extract(record, '$.elapsed') AS elapsed,
+            json_extract(record, '$.outputCount') AS outputCount,
+            json_extract(record, '$.procMs') AS procMs,
+            json_array_length(json_extract(record, '$.images')) AS imageCount,
+            json_extract(record, '$.variants') AS variants
+       FROM history
+      WHERE source = ? AND created > 0
+      ORDER BY created ASC`,
+  ).bind(HISTORY_SOURCE).all();
+  return summarizeStats(statsSamples(results));
+}
+
+// モデル ID → 1 枚あたりの所要秒
+function statsSamples(rows) {
+  const samples = new Map();
+  const add = (model, sec) => {
+    if (!Number.isFinite(sec) || sec <= 0 || sec > STATS_MAX_SEC) return;
+    if (!samples.has(model)) samples.set(model, []);
+    samples.get(model).push(sec);
+  };
+
+  // Modal: 完了時刻順（rows はその並び）に、順次キューを再構成する
+  let prevEnd = 0;
+  for (const row of rows) {
+    if (!isModalModel(row.model)) continue;
+    // 画像編集の記録は images に合成前の生画像と入力画像も並ぶので、
+    // 枚数は outputCount を優先して見る
+    const count = Math.max(1, row.outputCount ?? row.imageCount ?? 1);
+    const procMs = safeJsonParse(row.procMs);
+    if (Array.isArray(procMs) && procMs.length > 0) {
+      for (const ms of procMs) add(row.model, ms / 1000);
+    } else {
+      const elapsedMs = parseFloat(row.elapsed) * 1000;
+      if (elapsedMs > 0) {
+        const start = Math.max(row.ts - elapsedMs, prevEnd);
+        const span = row.ts - start;
+        // 複数枚の記録は 1 ジョブずつ順に処理された合計なので枚数で割り、
+        // 新しい記録（枚数ぶんの標本）と重みを揃えるため枚数回数える
+        for (let i = 0; i < count; i++) add(row.model, span / count / 1000);
+      }
+    }
+    prevEnd = Math.max(prevEnd, row.ts);
+  }
+
+  // fal ほか: 比較の記録（variants）は所要時間を持たないので対象外
+  for (const row of rows) {
+    if (isModalModel(row.model) || row.variants !== null) continue;
+    add(row.model, parseFloat(row.elapsed));
+  }
+  return samples;
+}
+
+function statsQuantile(sorted, q) {
+  const pos = (sorted.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+// 標本そのものではなく、描くのに要るものだけ返す（件数に依らない大きさにする）。
+// ヒストグラムの刻み方は、これまでクライアントが描いていたものと同じ
+function summarizeStats(samples) {
+  const out = {};
+  for (const [model, values] of samples) {
+    values.sort((a, b) => a - b);
+    const n = values.length;
+    const min = values[0];
+    const max = values[n - 1];
+    const bins = Math.min(16, Math.max(5, Math.ceil(Math.sqrt(n))));
+    const width = Math.max((max - min) / bins, 0.05);
+    const counts = new Array(bins).fill(0);
+    for (const v of values) counts[Math.min(bins - 1, Math.floor((v - min) / width))] += 1;
+    out[model] = {
+      n,
+      min,
+      max,
+      width,
+      counts,
+      mean: values.reduce((sum, v) => sum + v, 0) / n,
+      median: statsQuantile(values, 0.5),
+    };
+  }
+  return out;
 }
 
 // 1 件（マスク込み）
@@ -2710,11 +2924,12 @@ export default {
     if (url.pathname === '/api/history') {
       await ensureHistoryCatalog(env, stub);
       if (request.method === 'GET') {
-        const { records, cursor } = await historyPage(
-          env,
-          Number(url.searchParams.get('limit')),
-          url.searchParams.get('cursor') ?? '',
-        );
+        const { records, cursor } = await historyPage(env, {
+          limit: Number(url.searchParams.get('limit')),
+          cursor: url.searchParams.get('cursor') ?? '',
+          q: url.searchParams.get('q') ?? '',
+          type: url.searchParams.get('type') ?? '',
+        });
         // 続きの位置はヘッダで返し、本文は今までどおり配列のままにしておく。
         // デプロイ直後にまだ古い JS を持っているタブでも、直近の 1 ページぶんは
         // そのまま表示できる（読み込み直せば続きも追うようになる）
@@ -2773,6 +2988,14 @@ export default {
         return Response.json({ ok: true, done: await historyClear(env, stub) });
       }
       return new Response('Method not allowed', { status: 405 });
+    }
+
+    // 生成時間の統計。集計だけを返すので、応答の大きさは件数に依らない。
+    // 1 件取得のルートより先に置くこと（stats が id として食われる）
+    if (url.pathname === '/api/history/stats') {
+      if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
+      await ensureHistoryCatalog(env, stub);
+      return Response.json(await historyStats(env));
     }
 
     // 履歴 1 件の取得（マスクを含む丸ごと）と削除（保存済み画像も一緒に消す）
