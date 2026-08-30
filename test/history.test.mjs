@@ -363,6 +363,63 @@ test('search 列は既存の行にも埋め戻される（1 リクエストで�
   assert.equal((await listIds(mod, env, '?q=krea2&limit=500')).length, 250, '検索に出ません');
 });
 
+test('params 列は保存時に入り、既存の行にも埋め戻される', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+
+  await postRecord(mod, env, {
+    id: 'rec-p',
+    type: 'imgedit',
+    model: 'fal-ai/qwen-image-edit',
+    prompt: 'remove the cup',
+    seed: 99,
+    masked: true,
+    mask: MASK,
+    loras: [{ path: 'https://x/detail.safetensors', scale: 0.6 }],
+    input: { image_size: { width: 1024, height: 1024 }, num_inference_steps: 30, guidance_scale: 4 },
+    images: [{ url: imageUrl(1) }],
+  });
+  const [saved] = rows(env, 'SELECT params FROM history WHERE id = ?', 'rec-p');
+  const params = JSON.parse(saved.params);
+  assert.equal(params.v, 1);
+  assert.equal(params.kind, 'inpaint', 'マスクのある画像編集はインペイント扱い');
+  assert.equal(params.provider, 'fal');
+  assert.deepEqual([params.width, params.height, params.steps, params.cfg, params.seed],
+    [1024, 1024, 30, 4, 99]);
+  assert.deepEqual(params.loras, [{ path: 'https://x/detail.safetensors', scale: 0.6 }]);
+  // 経路固有の設定（raw）は record 側にあるので、列には入れない
+  assert.equal('raw' in params, false, 'params 列に raw を入れています');
+
+});
+
+// 既存の行の埋め戻しは、1 リクエストで終わらなくても続くこと
+//（早期 return の条件に入れ忘れると、1 回走ったきり止まる）
+test('params 列は既存の行にも埋め戻される（1 リクエストで終わらなくても続く）', async () => {
+  const mod2 = await loadWorker(); // カタログ用意済みの印は isolate ごとなので、別に読む
+  const env2 = makeEnv(mod2);
+  seedOldCatalog(env2, 250);
+  // マスク付きの画像編集も 1 件混ぜる。マスク本体は列を分けてあって record には
+  // 入っていないので、マスクの有無を mask で見ていると保存時と答えが食い違う
+  env2.d1.db.prepare(
+    'INSERT INTO history (seq,id,source,type,created,model,prompt,record,mask) VALUES (?,?,?,?,?,?,?,?,?)',
+  ).run(9000, 'masked-1', 'playground', 'imgedit', 1780000000000, 'fal-ai/qwen-image-edit', 'p',
+    JSON.stringify({ id: 'masked-1', type: 'imgedit', masked: true, model: 'fal-ai/qwen-image-edit', prompt: 'p', images: [] }),
+    JSON.stringify(MASK));
+  const pending = () => rows(env2, "SELECT id FROM history WHERE params = ''").length;
+  let requests = 0;
+  for (let guard = 0; guard < 60; guard++) {
+    await listIds(mod2, env2);
+    requests += 1;
+    if (pending() === 0) break;
+  }
+  assert.equal(pending(), 0, '埋め戻しが途中で止まっています');
+  assert.ok(requests > 1, '1 リクエストで終わってしまい、続きの経路を確かめられていません');
+  const [old1] = rows(env2, 'SELECT params FROM history WHERE id = ?', 'old-1');
+  assert.equal(JSON.parse(old1.params).model, 'modal/krea2-exp');
+  const [masked] = rows(env2, 'SELECT params FROM history WHERE id = ?', 'masked-1');
+  assert.equal(JSON.parse(masked.params).kind, 'inpaint', 'マスクの有無を record から見ていません');
+});
+
 /* ---- 生成時間の統計 ---- */
 
 // 移行前に app.js が持っていた手順（collectStatsSamples）。サーバーの計算が
@@ -459,7 +516,7 @@ test('統計は 1 クエリで済み、応答は件数に依らない', async ()
   seedOldCatalog(env, 300);
   for (let guard = 0; guard < 30; guard++) {
     await listIds(mod, env);
-    if (rows(env, "SELECT id FROM history WHERE search = ''").length === 0) break;
+    if (rows(env, "SELECT id FROM history WHERE search = '' OR params = ''").length === 0) break;
   }
 
   const before = env.d1.counters.queries;

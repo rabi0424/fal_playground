@@ -141,13 +141,13 @@ export function makeBucket(counters) {
   return {
     objects,
     uploads,
-    async put(key, value) {
+    async put(key, value, opts) {
       counters.sub++;
       const body = typeof value === 'string' ? Buffer.from(value)
         : value instanceof Uint8Array ? Buffer.from(value)
           : value instanceof ArrayBuffer ? Buffer.from(new Uint8Array(value))
             : await drain(value);
-      objects.set(key, { body, uploaded: new Date() });
+      objects.set(key, { body, uploaded: new Date(), httpMetadata: opts?.httpMetadata ?? {} });
     },
     async get(key, opts) {
       counters.sub++;
@@ -157,10 +157,14 @@ export function makeBucket(counters) {
       if (opts?.range) body = body.subarray(opts.range.offset, opts.range.offset + opts.range.length);
       return {
         size: obj.body.length,
+        httpMetadata: obj.httpMetadata ?? {},
         get body() {
           return new ReadableStream({
             start(c) { c.enqueue(new Uint8Array(body)); c.close(); },
           });
+        },
+        async arrayBuffer() {
+          return body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
         },
         async json() { return JSON.parse(body.toString()); },
         async text() { return body.toString(); },

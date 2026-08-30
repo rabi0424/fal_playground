@@ -45,7 +45,9 @@ async function sha256Hex(bytes) {
 
 /**
  * @param {string} dataUri 送る画像
- * @param {object|null} meta PNG に焼き込む生成設定（JPEG のときは無視される）
+ * @param {object|null} meta PNG に焼き込む生成設定（JPEG のときは無視される）。
+ *   サーバーが正規化（v:1）してから焼くので、こちら側は kind / model / prompt など
+ *   分かるものを素直に渡せばよい。決まった項目に無いものは raw にまとめられる
  * @returns {Promise<string>} /api/image/<sha256>
  */
 async function put(dataUri, meta = null) {

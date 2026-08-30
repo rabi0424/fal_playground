@@ -26,6 +26,15 @@ CREATE TABLE IF NOT EXISTS history (
   -- 小文字の文字列。空白区切りの AND で LIKE をかける（索引は効かないが、この
   -- 規模では十分。遅くなったら FTS5 の trigram を足せる）
   search  TEXT    NOT NULL DEFAULT '',
+  -- 正規化した生成設定（v:1）の JSON。record と違ってどの経路のものでも同じ形なので、
+  -- アーカイブ側はこちらだけを読めば済む。画像に焼き込まれるものと同じ内容:
+  --   { app, v, kind, provider, model, prompt, negative, seed,
+  --     width, height, steps, cfg, loras: [{ path, scale }], created }
+  --   kind     … generate | edit | inpaint | composite | input
+  --   provider … fal | modal | poe | wavespeed | runware | comfyui | a1111 | null
+  -- 経路固有の設定（Modal の sampler_name、ComfyUI のグラフなど）はここには入らない
+  -- （画像側の raw と record にある）
+  params  TEXT    NOT NULL DEFAULT '',
   -- レコード全体の JSON。ただしマスクは除く（下記）
   record  TEXT    NOT NULL,
   -- 画像編集のマスク（塗った線の座標）。1 件で数十 KB になり、一覧では要らないので
@@ -58,6 +67,7 @@ CREATE INDEX IF NOT EXISTS history_images_image ON history_images (image_id);
 -- 手で流すときも、上の索引より先にこれを実行すること（列が無いと索引が作れない）:
 --   ALTER TABLE history_images ADD COLUMN image_id TEXT;
 --   ALTER TABLE history ADD COLUMN search TEXT NOT NULL DEFAULT '';
+--   ALTER TABLE history ADD COLUMN params TEXT NOT NULL DEFAULT '';
 
 -- 使われなかった画像の回収（マーク&スイープ）の印。
 -- 画像編集は「画像を選んだ瞬間」に R2 へ上げ、履歴に載るのは編集が終わってから

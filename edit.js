@@ -953,10 +953,10 @@ async function awaitAndComposite(job) {
   setStatus('保存中…');
   const compUri = compCanvas.toDataURL('image/png');
   const compUrl = await uploadImage(compUri, {
-    app: 'fal playground',
-    source: 'poe-edit',
-    model: job.model,
+    kind: 'composite',
+    model: `poe/${job.model}`,
     prompt: job.prompt,
+    // 正規化で拾われない項目は、サーバー側で raw にまとめられる
     rect: job.rect,
     blend: job.blend,
     colorMatch: job.color,

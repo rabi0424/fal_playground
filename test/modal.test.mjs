@@ -10,6 +10,7 @@
 //   - いつまでも終わらないジョブを打ち切ること
 //   - 編集の結果から seed と実際の解像度（X-Width / X-Height）を拾うこと
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { makeStorage, makeBucket } from './harness.mjs';
 
@@ -131,7 +132,9 @@ test('編集: 303 を追って完了し、seed と実際の解像度を拾う', 
   assert.equal(job.seed, 4242);
   assert.equal(job.width, 1248);
   assert.equal(job.height, 832);
-  assert.match(job.url, /^\/api\/image\/[0-9a-f]{32}$/);
+  // キーは Modal から受け取ったバイト列の sha256（内容アドレス）。
+  // 同じ画像が二度返っても R2 には 1 つしか積まれない
+  assert.equal(job.url, `/api/image/${createHash('sha256').update(PNG_1X1).digest('hex')}`);
   assert.ok(job.elapsedMs >= 0);
 
   // 1 回目が POST、2 回目がポーリング
@@ -140,14 +143,18 @@ test('編集: 303 を追って完了し、seed と実際の解像度を拾う', 
   assert.equal(modal.calls[0].body.prompt, 'remove');
   assert.equal(modal.calls[1].url, 'https://x--y.modal.run/poll/1');
 
-  // 焼き込むのは設定だけ。画像本体（base64）は入れない
+  // 焼き込むのは設定だけ。画像本体（base64）は入れない。
+  // 形は正規化済み（v:1）で、経路固有のものだけ raw に入る
   const meta = readEmbeddedMeta(await storedBytes(env, job.url));
-  assert.equal(meta.source, 'wan-vace-edit');
-  assert.equal(meta.endpoint, 'wan-edit');
+  assert.equal(meta.v, 1);
+  assert.equal(meta.kind, 'edit');
+  assert.equal(meta.provider, 'modal');
+  assert.equal(meta.model, 'modal/wan-edit');
+  assert.equal(meta.raw.endpoint, 'wan-edit');
   assert.equal(meta.width, 1248);
-  assert.equal(meta.image, undefined);
-  assert.equal(meta.mask, undefined);
-  assert.deepEqual(meta.loras, [{ name: 'distill', strength: 0.4 }]);
+  assert.equal(meta.raw.image, undefined);
+  assert.equal(meta.raw.mask, undefined);
+  assert.deepEqual(meta.loras, [{ path: 'distill', scale: 0.4 }]);
 });
 
 // Modal は結果 URL のポーリングに対して、関数が終わるまで 202 を返す。
@@ -270,8 +277,9 @@ test('生成: X-Width が無くても完了し、記録は生成として残る'
   assert.equal(job.height, null);
 
   const meta = readEmbeddedMeta(await storedBytes(env, job.url));
-  assert.equal(meta.source, 'krea2-modal');
-  assert.equal(meta.endpoint, 'wan');
+  assert.equal(meta.kind, 'generate');
+  assert.equal(meta.model, 'modal/wan');
+  assert.equal(meta.raw.endpoint, 'wan');
 });
 
 test('ルーティング: endpoint フィールドで URL を選び、未知の値は既定へ落とす', async () => {
@@ -352,11 +360,12 @@ test('インペイント: 結果は LanPaint として記録する', async () =>
   assert.equal(job.height, 1216);
 
   const meta = readEmbeddedMeta(await storedBytes(env, job.url));
-  assert.equal(meta.source, 'lanpaint-inpaint');
-  assert.equal(meta.endpoint, 'lanpaint');
-  assert.equal(meta.num_steps, 5);
-  assert.equal(meta.image, undefined);
-  assert.equal(meta.mask, undefined);
+  assert.equal(meta.kind, 'inpaint');
+  assert.equal(meta.model, 'modal/lanpaint');
+  assert.equal(meta.raw.endpoint, 'lanpaint');
+  assert.equal(meta.raw.num_steps, 5);
+  assert.equal(meta.raw.image, undefined);
+  assert.equal(meta.raw.mask, undefined);
 });
 
 test('編集: 画像とマスクが無ければ 422 で弾く', async () => {
