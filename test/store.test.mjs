@@ -99,4 +99,66 @@ const check = (label, actual, expected) => {
   passed++;
 }
 
+/* ---- 古い HTML の検出と復帰（falBoot.requireShared） ----
+ *
+ * _headers で HTML にもキャッシュの猶予があるので、デプロイ後しばらくは前の版の
+ * HTML が出る。あとから足した共有スクリプトは古い HTML には script タグごと
+ * 無いため、それを使うところだけが黙って壊れる（実際に、履歴の取得だけが失敗して
+ * 表示キャッシュの 60 件しか出ない状態になった）。ここはその検出と復帰。
+ */
+function loadBoot({ present = [], search = '', hash = '', session = {} } = {}) {
+  const replaced = [];
+  const store = { ...session };
+  const sandbox = {
+    console: { error() {} },
+    DOMException,
+    localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+    sessionStorage: {
+      getItem: (k) => (k in store ? store[k] : null),
+      setItem: (k, v) => { store[k] = String(v); },
+      removeItem: (k) => { delete store[k]; },
+    },
+    location: {
+      pathname: '/', search, hash,
+      replace: (url) => replaced.push(url),
+    },
+    history: { replaceState: (_s, _t, url) => replaced.push(`replaceState:${url}`) },
+  };
+  for (const name of present) sandbox[name] = {};
+  sandbox.window = sandbox;
+  createContext(sandbox);
+  runInContext(readFileSync(new URL('../store.js', import.meta.url), 'utf8'), sandbox);
+  return { falBoot: sandbox.falBoot, replaced, store };
+}
+
+{
+  // 揃っていれば何もしない
+  const ok = loadBoot({ present: ['falHistory', 'falUpload'] });
+  check('揃っていれば true', ok.falBoot.requireShared(['falHistory', 'falUpload']), true);
+  check('読み直さない', ok.replaced.length, 0);
+}
+{
+  // 足りなければ、問い合わせを変えて 1 度だけ読み直す
+  const stale = loadBoot({ present: ['falStoreOnly'], hash: '#stats' });
+  check('足りなければ false', stale.falBoot.requireShared(['falHistory']), false);
+  check('1 度だけ読み直す', stale.replaced.length, 1);
+  check('キャッシュを迂回する問い合わせを付ける', /^\/\?r=\d+#stats$/.test(stale.replaced[0]), true);
+  check('読み直した印を残す', stale.store.fal_stale_reload, '1');
+}
+{
+  // 読み直しても直らなければ、繰り返さない（無限ループにしない）
+  const again = loadBoot({ session: { fal_stale_reload: '1' } });
+  check('2 度目は読み直さない', again.falBoot.requireShared(['falHistory']), false);
+  check('読み直しは起きない', again.replaced.length, 0);
+}
+{
+  // 直ったら、印と URL の細工を片付ける
+  const healed = loadBoot({
+    present: ['falHistory'], search: '?r=123', hash: '#x', session: { fal_stale_reload: '1' },
+  });
+  check('直れば true', healed.falBoot.requireShared(['falHistory']), true);
+  check('印を消す', 'fal_stale_reload' in healed.store, false);
+  check('URL を元に戻す', healed.replaced, ['replaceState:/#x']);
+}
+
 console.log(`ok: ${passed} checks passed`);

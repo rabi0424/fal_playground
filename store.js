@@ -87,4 +87,51 @@
       }
     },
   };
+
+  /* ---------- 古い HTML を掴んでいないかの確認 ---------- */
+  //
+  // _headers で HTML にもキャッシュの猶予を持たせているので、デプロイ後しばらくは
+  // 前の版の HTML が出る（ホーム画面に追加したアプリだと長く持ち続けることがある）。
+  // あとから足した共有スクリプトは、古い HTML には script タグごと無いため、
+  // それを使うところだけが黙って壊れる（履歴が表示キャッシュのぶんしか出ない、
+  // 画像を保存できない、など）。原因が画面から見えないのが厄介なので、
+  // 「読めているはずのものが無い」を検出して 1 度だけ読み直す。
+  //
+  // これを store.js に置いてあるのは、どの画面の HTML にも最初期から入っていて、
+  // 古い HTML でも必ず読まれるからで、新しいファイルに置くと意味がない。
+  const RELOAD_ONCE_KEY = 'fal_stale_reload';
+
+  function requireShared(names) {
+    const missing = names.filter((name) => !window[name]);
+    if (missing.length === 0) {
+      // 無事だったので、読み直しの印と URL の細工を片付ける
+      try {
+        sessionStorage.removeItem(RELOAD_ONCE_KEY);
+      } catch {
+        // 使えない環境。消せなくても支障はない
+      }
+      if (location.search.startsWith('?r=')) {
+        history.replaceState(null, '', location.pathname + location.hash);
+      }
+      return true;
+    }
+
+    let already = '1'; // sessionStorage が使えない環境では読み直しに頼らない
+    try {
+      already = sessionStorage.getItem(RELOAD_ONCE_KEY);
+      sessionStorage.setItem(RELOAD_ONCE_KEY, '1');
+    } catch {
+      // プライベートモードなど
+    }
+    if (!already) {
+      // 同じ URL の再読み込みでは古い HTML がそのまま出ることがあるので、
+      // 問い合わせを変えてキャッシュを迂回する
+      location.replace(`${location.pathname}?r=${Date.now()}${location.hash}`);
+      return false;
+    }
+    console.error(`共有スクリプトが読めていません: ${missing.join(', ')}`);
+    return false;
+  }
+
+  window.falBoot = { requireShared };
 })();

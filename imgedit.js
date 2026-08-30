@@ -842,17 +842,9 @@ function storedImageUrl(src) {
   return null;
 }
 
-// replace に既存の /api/image/... を渡すと、新しく作らずその画像を差し替える
-// （マスクの塗り直しのたびに合成画像が増えて置き去りになるのを防ぐ）
-async function uploadDataUri(dataUri, meta, replace = null) {
-  const res = await postJson('/api/upload', { image: dataUri, meta, ...(replace ? { replace } : {}) });
-  if (isHtmlResponse(res)) throw new Error('画像の保存に失敗しました（ログインし直してください）');
-  if (!res.ok) {
-    const mb = (dataUriBytes(dataUri) / 1024 / 1024).toFixed(1);
-    throw new Error(`画像の保存に失敗しました（${mb}MB・HTTP ${res.status}）`);
-  }
-  return (await res.json()).url;
-}
+// R2 のキーは中身の sha256 なので、同じ画像なら送らずに済む（image-upload.js）。
+// 塗り直しのたびに増える合成画像は、参照が無くなったぶんをサーバー側が回収する
+const uploadDataUri = (dataUri, meta) => falUpload.put(dataUri, meta);
 
 // keepMask は「前の画像に合わせて塗ったマスクをそのまま引き継ぐ」場合だけ。
 // 下書きの復元と、過去の合成結果を開き直すときにしか使わない
@@ -2395,15 +2387,17 @@ function renderCostHint() {
 
 let historyItems = [];
 
+// 履歴に件数の上限は無いので、サーバーはページごとに返す。
+// 取れたぶんから順に描いて、続きは裏で追う
 async function fetchHistory() {
-  try {
-    const res = await fetch('/api/history');
-    if (!res.ok || isHtmlResponse(res)) return;
-    const all = await res.json();
-    historyItems = Array.isArray(all) ? all : [];
-  } catch {
-    // オフライン時などは空のまま
-  }
+  const items = [];
+  const got = await falHistory.fetchAll((page) => {
+    items.push(...page);
+    if (page.length === 0) return; // 取れなかった / 空のときは表示中のまま
+    historyItems = items;
+    renderGallery();
+  });
+  if (got.ok) historyItems = items; // 全消しの直後など、空になったことも反映する
   renderGallery();
 }
 
@@ -3633,8 +3627,8 @@ async function waitAndFinish(job) {
 // images は [合成 …, 生成結果そのまま …, 入力画像] の順になる
 async function buildMaskedRecord(record, maskData, onStatus = () => {}) {
   const n = record.outputCount ?? record.images.length - 1;
-  // 既に合成済みなら先頭 n 枚が前回の合成、その後ろが生成結果そのまま
-  const previous = record.masked ? record.images.slice(0, n) : []; // 差し替え先
+  // 既に合成済みなら先頭 n 枚が前回の合成、その後ろが生成結果そのまま。
+  // 塗り直すと前回の合成は参照から外れ、サーバー側の回収に任せる
   const tail = record.masked ? record.images.slice(n) : record.images; // [生成結果 …, 入力]
 
   // 合成には画素が要るので、外部 CDN のままの画像はここで R2 へ取り込む。
@@ -3664,7 +3658,6 @@ async function buildMaskedRecord(record, maskData, onStatus = () => {}) {
     const url = await uploadDataUri(
       dataUri,
       { app: 'fal playground', source: 'imgedit-masked', model: record.model, prompt: record.prompt },
-      previous[i]?.url ?? null,
     );
     composites.push({ url, width, height });
   }
@@ -4236,7 +4229,11 @@ syncRwAddLoraBtn();
 applyRunwareRecommended();
 syncProviderFields();
 restoreForm();
-fetchHistory().then(resumeJobs);
+// 古い HTML を掴んでいると、あとから足した共有スクリプトが読まれない。
+// falUpload が無いまま編集を始めると結果を保存できないので、ここで見て読み直す
+if (falBoot.requireShared(['falHistory', 'falUpload'])) {
+  fetchHistory().then(resumeJobs);
+}
 
 // 実行バーは順番待ちの件数で高さが変わる。本文の下余白をその実測値に合わせて、
 // 一番下の内容がバーに隠れないようにする

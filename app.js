@@ -124,7 +124,6 @@ const els = {
   detail: $('#detail'),
   gallery: $('#gallery'),
   gallerySearch: $('#gallerySearch'),
-  clearHistoryBtn: $('#clearHistoryBtn'),
 };
 
 function sleep(ms) {
@@ -178,17 +177,49 @@ function persistHistoryCache() {
   falStore.set(LS_HISTORY, JSON.stringify(keep.map(historyCacheEntry)));
 }
 
+// サーバーから取れた一覧を表示へ反映する。
+//
+// タブ復帰時は、この取得と「復帰で再開したポーリングの完了 → 履歴保存」が
+// 競合する。保存中（POST 応答待ち）や、この取得の開始後に保存が完了した
+// レコードは応答一覧に含まれないことがあり、丸ごと上書きすると
+// ギャラリーから消える。それらはローカル側を残してマージする
+function applyServerHistory(server, startedAt) {
+  const onServer = new Set(server.map((r) => r.id));
+  const keep = historyCache.filter(
+    (r) =>
+      !onServer.has(r.id) &&
+      (pendingHistorySaves.has(r.id) || (historySavedAt.get(r.id) ?? 0) >= startedAt),
+  );
+  historyCache = [...keep, ...server];
+  historyIsServerBacked = true; // ここから先は、消してもサーバーから戻せる
+  persistHistoryCache();
+  renderGallery();
+}
+
+// 履歴に件数の上限は無いので、サーバーはページごとに返す。取れたぶんから順に
+// 描いて、続きは裏で追う（最初の 1 ページで画面が出る）
 async function fetchHistoryFromServer() {
-  const startedAt = Date.now();
-  let res;
-  try {
-    res = await fetch('/api/history');
-  } catch {
-    return; // オフラインなどはキャッシュ表示のまま
+  // 古い HTML だと history-feed.js が読まれておらず、ここだけが黙って失敗して
+  // 表示キャッシュのぶん（60 件）しか出ない状態になる。読み直して直す
+  if (!window.falHistory) {
+    if (!falBoot.requireShared(['falHistory'])) {
+      setError('アプリの読み込みが古いままです。ページを再読み込みしてください。');
+    }
+    return;
   }
-  if (!res.ok || isHtmlResponse(res)) return;
-  const server = await res.json().catch(() => null);
-  if (!Array.isArray(server)) return;
+  const startedAt = Date.now();
+  const server = [];
+  const got = await falHistory.fetchAll((page) => {
+    if (page.length === 0) return; // サーバーが空のときは手元の表示を消さない
+    server.push(...page);
+    applyServerHistory(server, startedAt);
+  });
+  if (!got.ok) {
+    // 取れたぶんは出したままにするが、それが全部ではないことは知らせる。
+    // 黙って途中までを出すと、履歴が消えたようにしか見えない
+    setError('履歴をサーバーから取得しきれませんでした（表示は取得できたぶんだけです）。');
+    return;
+  }
 
   // 旧バージョンのローカル履歴が残っていてサーバーが空なら、一度だけ取り込む
   if (server.length === 0 && historyCache.length > 0 && !falStore.get(LS_HISTORY_MIGRATED)) {
@@ -206,23 +237,6 @@ async function fetchHistoryFromServer() {
     }
     return fetchHistoryFromServer();
   }
-
-  // サーバーが空で手元に表示中の履歴があるときは消さない（移行直後の失敗対策）
-  if (server.length === 0 && historyCache.length > 0) return;
-
-  // タブ復帰時は、この取得と「復帰で再開したポーリングの完了 → 履歴保存」が
-  // 競合する。保存中（POST 応答待ち）や、この取得の開始後に保存が完了した
-  // レコードは応答一覧に含まれないことがあり、丸ごと上書きすると
-  // ギャラリーから消える。それらはローカル側を残してマージする
-  const keep = historyCache.filter(
-    (r) =>
-      (pendingHistorySaves.has(r.id) || (historySavedAt.get(r.id) ?? 0) >= startedAt) &&
-      !server.some((s) => s.id === r.id),
-  );
-  historyCache = [...keep, ...server];
-  historyIsServerBacked = true; // ここから先は、消してもサーバーから戻せる
-  persistHistoryCache();
-  renderGallery();
 }
 
 // 生成完了時に呼ぶ。即座にローカルへ反映し、サーバーへは裏で保存する。
@@ -263,12 +277,10 @@ function deleteHistoryRecord(id) {
   fetch(`/api/history/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
 }
 
-function clearHistory() {
-  for (const r of historyCache) deletedHistoryIds.add(r.id);
-  historyCache = [];
-  persistHistoryCache();
-  fetch('/api/history', { method: 'DELETE' }).catch(() => {});
-}
+// 履歴の全消しは画面から外してある。ギャラリーの見出しに「すべて削除」を
+// 置いていたが、検索欄のすぐ隣で、取り返しがつかない（サーバーの画像ごと消える）。
+// 確認ダイアログがあっても押し間違いのほうが怖い。
+// サーバー側の DELETE /api/history は残してあるので、必要になったらそこを叩く
 
 /* ---------- form ---------- */
 
@@ -930,8 +942,32 @@ function renderStats() {
   }
 }
 
+// 使われなかった画像の回収の結果。サーバー側が 1 日に 1 度、生成の完了に
+// 便乗して走らせている（画像編集は「画像を選んだ瞬間」に R2 へ上げるので、
+// 編集せずに閉じたぶんがどうしても残る）
+async function renderSweepStats() {
+  let res;
+  try {
+    res = await fetch('/api/images/sweep');
+  } catch {
+    return; // オフラインなら出さないだけ
+  }
+  if (!res.ok || isHtmlResponse(res)) return;
+  const sweep = await res.json().catch(() => null);
+  if (!sweep?.at) return;
+
+  const line = document.createElement('div');
+  line.className = 'stats-sweep';
+  const when = new Date(sweep.at).toLocaleString('ja-JP');
+  line.textContent = `未使用画像の回収: ${when} に ${sweep.deleted} 枚削除`
+    + `（累計 ${sweep.total} 枚）`
+    + (sweep.done ? '' : '・まだ見ていない画像が残っています');
+  els.statsBody.appendChild(line);
+}
+
 function openStats() {
   renderStats();
+  renderSweepStats(); // 取れたら後から足す（統計の表示は待たせない）
   els.statsDialog.showModal();
 }
 
@@ -1938,6 +1974,18 @@ async function downloadImage(url, filename) {
   }
 }
 
+// 自分が配信している画像か（/api/krea2/image/... は旧 URL 互換）
+const isStoredImage = (url) => typeof url === 'string' && /^\/api(\/krea2)?\/image\//.test(url);
+
+// まだ取り込めていない画像（プロバイダの CDN の URL のまま）を持つ記録。
+// 相手が消せばこちらからは失われるので、ギャラリーでひと目で分かるようにする
+function hasExternalImage(record) {
+  const lists = Array.isArray(record.variants)
+    ? record.variants.map((v) => v.images ?? [])
+    : [record.images ?? []];
+  return lists.some((images) => images.some((img) => img?.url && !isStoredImage(img.url)));
+}
+
 function galleryThumbUrl(record) {
   if (record.type === 'compare') {
     return record.variants.find((v) => v.images?.length)?.images[0]?.url ?? '';
@@ -2024,6 +2072,16 @@ function galleryItemEl(record) {
     const badge = document.createElement('span');
     badge.className = 'compare-badge';
     badge.textContent = `比較 ×${record.variants.length}`;
+    item.appendChild(badge);
+  }
+
+  if (hasExternalImage(record)) {
+    item.classList.add('external');
+    const badge = document.createElement('span');
+    badge.className = 'external-badge';
+    badge.textContent = '未取り込み';
+    badge.title = 'この記録の画像は、まだサーバーに取り込まれていません。'
+      + '提供元の CDN が消すと失われます（しばらく使っていると裏で取り込まれます）。';
     item.appendChild(badge);
   }
 
@@ -2332,14 +2390,6 @@ document.addEventListener('keydown', (e) => {
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   e.preventDefault();
   navigateGallery(dir);
-});
-
-els.clearHistoryBtn.addEventListener('click', () => {
-  if (confirm('履歴をすべて削除しますか？（サーバーに保存された画像も消えます）')) {
-    clearHistory();
-    clearDetail();
-    renderGallery();
-  }
 });
 
 // ギャラリー検索：入力に応じてサムネを絞り込む（カラなら通常表示）。

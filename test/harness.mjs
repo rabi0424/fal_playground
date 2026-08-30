@@ -2,6 +2,7 @@
 // Durable Object のストレージ、R2 バケット（multipart 対応）、Civitai / Hugging Face の
 // エンドポイントを最低限だけ再現する。
 import { createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 
 /* ---- Durable Object storage のモック ---- */
 export function makeStorage() {
@@ -34,16 +35,64 @@ export function makeStorage() {
       for (const key of k) if (map.delete(key)) n += 1;
       return n;
     },
-    async list({ prefix } = {}) {
+    // 本物はキーの辞書順に返す。startAfter / limit も同じく再現しておく
+    //（履歴のページ送りはこの並びと打ち切りに乗っているため）
+    async list({ prefix, startAfter, limit } = {}) {
       const out = new Map();
-      for (const [k, v] of map) {
-        if (!prefix || k.startsWith(prefix)) out.set(k, structuredClone(v));
+      for (const k of [...map.keys()].sort()) {
+        if (prefix && !k.startsWith(prefix)) continue;
+        if (startAfter !== undefined && k <= startAfter) continue;
+        if (limit !== undefined && out.size >= limit) break;
+        out.set(k, structuredClone(map.get(k)));
       }
       return out;
     },
     async getAlarm() { return alarm; },
     async setAlarm(t) { alarm = t; },
     async deleteAlarm() { alarm = null; },
+  };
+}
+
+/* ---- D1 のモック（本物の SQLite で動かす） ----
+ *
+ * 履歴カタログは SQL に乗っているので、ここを作り物にすると肝心の
+ * 並び替え・ページ送り・参照の数え上げが検証できない。node:sqlite で
+ * 実際に実行し、D1 の呼び出し形（prepare / bind / run / first / all / batch）
+ * だけを被せる。queries は 1 リクエストのクエリ数（無料プランは 50）の確認用。
+ */
+export function makeD1(counters = { queries: 0 }) {
+  const db = new DatabaseSync(':memory:');
+  // 本物は null prototype ではなく素のオブジェクトを返す
+  const plain = (row) => (row === undefined ? null : { ...row });
+
+  const make = (sql, args) => ({
+    sql,
+    args,
+    bind: (...next) => make(sql, next),
+    async run() {
+      counters.queries++;
+      db.prepare(sql).run(...args);
+      return { success: true };
+    },
+    async first() {
+      counters.queries++;
+      return plain(db.prepare(sql).get(...args));
+    },
+    async all() {
+      counters.queries++;
+      return { results: db.prepare(sql).all(...args).map(plain) };
+    },
+  });
+
+  return {
+    db,
+    counters,
+    prepare: (sql) => make(sql, []),
+    async batch(statements) {
+      const out = [];
+      for (const statement of statements) out.push(await statement.run());
+      return out;
+    },
   };
 }
 
@@ -121,12 +170,24 @@ export function makeBucket(counters) {
       counters.sub++;
       for (const k of [].concat(keys)) objects.delete(k);
     },
-    async list({ prefix } = {}) {
+    async head(key) {
       counters.sub++;
+      const obj = objects.get(key);
+      return obj ? { key, size: obj.body.length, uploaded: obj.uploaded } : null;
+    },
+    // 本物はキー順に返し、続きがあれば truncated + cursor を付ける。
+    // カーソルの中身は不透明だが、ここでは「最後に返したキー」で代用する
+    async list({ prefix, limit = 1000, cursor } = {}) {
+      counters.sub++;
+      const keys = [...objects.keys()].sort()
+        .filter((k) => (!prefix || k.startsWith(prefix)) && (cursor === undefined || k > cursor));
+      const page = keys.slice(0, limit);
       return {
-        objects: [...objects.entries()]
-          .filter(([k]) => !prefix || k.startsWith(prefix))
-          .map(([key, o]) => ({ key, uploaded: o.uploaded, size: o.body.length })),
+        objects: page.map((key) => ({
+          key, uploaded: objects.get(key).uploaded, size: objects.get(key).body.length,
+        })),
+        truncated: keys.length > page.length,
+        cursor: page.length > 0 ? page[page.length - 1] : undefined,
       };
     },
     async createMultipartUpload(key) {

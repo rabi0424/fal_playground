@@ -21,6 +21,16 @@
   "r2_buckets": [
     { "binding": "IMAGES", "bucket_name": "fal-playground-images" }
   ],
+  // 生成履歴のカタログ（プロンプト・設定・画像への参照）。Durable Object の KV に
+  // 索引を手で作るのをやめ、D1（SQLite）の表にする。アーカイブ側のアプリからも
+  // 同じ DB をバインドして共有する前提。
+  //
+  // 別のアカウントで一から立てる場合は、D1 を作って database_id を差し替えること
+  // （ダッシュボードの Storage & Databases → D1、または npx wrangler d1 create fal-playground）。
+  // 表は Worker が最初に履歴へ触れたときに作るので、schema.sql の適用は不要
+  "d1_databases": [
+    { "binding": "DB", "database_name": "fal-playground", "database_id": "96c9475a-d9af-4299-94c8-e060ce6fb681" }
+  ],
   // 無料プランでは SQLite バックエンドの Durable Object のみ利用可能
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["SyncState"] }

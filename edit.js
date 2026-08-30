@@ -136,14 +136,13 @@ async function postJson(url, body) {
   return res.json();
 }
 
-// クライアント側で作った画像を R2 へ置き、/api/image/<id> の URL を得る
-async function uploadImage(dataUri, meta) {
-  const out = await postJson('/api/upload', meta ? { image: dataUri, meta } : { image: dataUri });
-  return out.url;
-}
+// クライアント側で作った画像を R2 へ置き、/api/image/<id> の URL を得る。
+// キーは中身の sha256 なので、同じ画像なら送らずに済む（image-upload.js）
+const uploadImage = (dataUri, meta) => falUpload.put(dataUri, meta);
 
+// 64 桁は内容アドレス（sha256）、32 桁はそうする前に置いた画像
 function imageIdFromUrl(u) {
-  const m = typeof u === 'string' ? u.match(/^\/api\/image\/([0-9a-f]{32})$/) : null;
+  const m = typeof u === 'string' ? u.match(/^\/api\/image\/([0-9a-f]{64}|[0-9a-f]{32})$/) : null;
   return m ? m[1] : null;
 }
 
@@ -1027,17 +1026,18 @@ function galleryImageUrls(record) {
   return (record.images ?? []).map((i) => i.url);
 }
 
+// 履歴に件数の上限は無いので、サーバーはページごとに返す。
+// 取れたぶんから順に描いて、続きは裏で追う
 async function fetchHistory() {
-  let res;
-  try {
-    res = await fetch('/api/history');
-  } catch {
-    return; // オフラインなどは表示中のまま
-  }
-  if (!res.ok || isHtmlResponse(res)) return;
-  const list = await res.json().catch(() => null);
-  if (!Array.isArray(list)) return;
-  historyItems = list;
+  const items = [];
+  const got = await falHistory.fetchAll((page) => {
+    items.push(...page);
+    if (page.length === 0) return; // 取れなかった / 空のときは表示中のまま
+    historyItems = items;
+    renderGallery();
+  });
+  if (!got.ok) return; // オフラインなどは、取れたぶんを出したままにする
+  historyItems = items; // 全消しの直後など、空になったことも反映する
   renderGallery();
 }
 
@@ -1413,6 +1413,6 @@ els.btnExec.addEventListener('click', execute);
 updateOrientVis();
 updateExecState();
 restoreWorkspace();
-fetchHistory();
+if (falBoot.requireShared(['falHistory', 'falUpload'])) fetchHistory();
 // タブに戻ってきたら他画面・他端末での変更を取り込む
 document.addEventListener('visibilitychange', () => { if (!document.hidden) fetchHistory(); });

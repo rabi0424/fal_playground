@@ -9,6 +9,7 @@
   --accent-hover: #1d4ed8;
   --accent-text: #ffffff;
   --danger: #dc2626;
+  --warn: #d97706;
   --success: #16a34a;
   /* 重なりの階層はシャドウの深さで表現する（浮いているものほど深い） */
   --shadow: 0 1px 2px rgb(0 0 0 / 0.04), 0 2px 6px rgb(0 0 0 / 0.04);
@@ -37,6 +38,7 @@
   --accent-hover: #60a5fa;
   --accent-text: #0b1220;
   --danger: #f87171;
+  --warn: #fbbf24;
   --success: #4ade80;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 2px 6px rgb(0 0 0 / 0.25);
   --shadow-raised: 0 2px 6px rgb(0 0 0 / 0.35), 0 8px 24px rgb(0 0 0 / 0.4);
@@ -62,6 +64,7 @@
     --accent-hover: #60a5fa;
     --accent-text: #0b1220;
     --danger: #f87171;
+    --warn: #fbbf24;
     --success: #4ade80;
     --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 2px 6px rgb(0 0 0 / 0.25);
     --shadow-raised: 0 2px 6px rgb(0 0 0 / 0.35), 0 8px 24px rgb(0 0 0 / 0.4);
@@ -735,6 +738,24 @@ details.lora-accordion { display: block; }
 
 .compare-col .ghost-btn { align-self: flex-start; }
 
+/* まだサーバーに取り込めていない画像を持つ記録。提供元の CDN が消したら
+   失われるので、枠と印で見分けられるようにする。裏の片付けで取り込まれれば、
+   次にギャラリーを取り直したときに消える */
+.gallery-item.external,
+.gallery-item.external:hover { border-color: var(--warn); }
+
+.external-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: var(--warn);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 6px;
+}
+
 .compare-badge {
   position: absolute;
   top: 6px;
@@ -1077,7 +1098,6 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
 }
 
 /* 「すべて削除」は常に右端へ寄せる */
-.gallery-head .ghost-btn { margin-left: auto; }
 
 .gallery-head h2 {
   font-size: 14px;
@@ -1380,6 +1400,14 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
 }
 
 .stats-empty { color: var(--muted); font-size: 13px; }
+/* 未使用画像の回収の結果。モデル別の統計とは別ものなので、区切って小さく出す */
+.stats-sweep {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
 
 .stats-group {
   display: flex;

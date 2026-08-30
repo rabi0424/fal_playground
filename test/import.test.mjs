@@ -7,7 +7,8 @@
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { makeStorage, makeBucket, makeFetch } from './harness.mjs';
+import { createHash } from 'node:crypto';
+import { makeStorage, makeBucket, makeFetch, makeD1 } from './harness.mjs';
 
 const WORKER = new URL('../worker.js', import.meta.url);
 const OUT = new URL('./.worker.test.mjs', import.meta.url); // 定数を差し替えた実行用コピー
@@ -486,39 +487,52 @@ async function testRunwareProxy() {
 
 // 画像のアップロード。replace 付きは同じキーへ上書きする
 //（画像編集のマスクを塗り直すたびに合成画像が増えて残らないように）
-async function testUploadReplace() {
+async function testUploadContentAddressed() {
   const mod = await loadWorker();
   const counters = { sub: 0 };
   const bucket = makeBucket(counters);
-  const env = { IMAGES: bucket, STATE: { idFromName: (n) => n, get: () => ({}) } };
-  // 1x1 の PNG
+  const d1 = makeD1();
+  const stub = new mod.SyncState({ storage: makeStorage() }, { IMAGES: bucket });
+  const env = { IMAGES: bucket, DB: d1, STATE: { idFromName: (n) => n, get: () => stub } };
+  // 1x1 の PNG と、中身の違う 1x1 の GIF
   const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const gif = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
   const upload = (body) => mod.default.fetch(new Request('https://app.example/api/upload', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   }), env);
+  const sha256 = (dataUri) =>
+    createHash('sha256').update(Buffer.from(dataUri.split(',')[1], 'base64')).digest('hex');
 
+  // キーは中身の sha256
   const first = await (await upload({ image: png })).json();
-  assert.match(first.url, /^\/api\/image\/[0-9a-f]{32}$/, `初回の URL が不正: ${first.url}`);
+  assert.equal(first.url, `/api/image/${sha256(png)}`, `内容アドレスになっていない: ${first.url}`);
   assert.equal(bucket.objects.size, 1);
 
-  // replace 付きは新しいキーを作らず、URL には版が付く（immutable キャッシュ避け）
-  const again = await (await upload({ image: png, replace: first.url })).json();
-  assert.equal(bucket.objects.size, 1, '差し替えなのに画像が増えている');
-  assert.equal(again.url.split('?')[0], first.url, '差し替え先が違う');
-  assert.match(again.url, /\?v=\d+$/, 'キャッシュ避けの版が付いていない');
+  // 同じ画像をもう一度送っても増えない
+  await upload({ image: png });
+  assert.equal(bucket.objects.size, 1, '同じ中身なのに画像が増えている');
 
-  // 版付きの URL をさらに差し替え先に渡しても同じキーを指す
-  const third = await (await upload({ image: png, replace: again.url })).json();
-  assert.equal(bucket.objects.size, 1);
-  assert.equal(third.url.split('?')[0], first.url);
+  // 問い合わせ（本文なし）: 持っていれば URL、無ければ null
+  const known = await (await upload({ hash: sha256(png) })).json();
+  assert.equal(known.url, first.url);
+  const unknown = await (await upload({ hash: sha256(gif) })).json();
+  assert.equal(unknown.url, null, '持っていない画像に URL を返している');
+  assert.equal(bucket.objects.size, 1, '問い合わせで画像が増えている');
 
-  // 他人の URL や壊れた指定は無視して新規作成にフォールバックする
-  const other = await (await upload({ image: png, replace: 'https://evil.example/x' })).json();
-  assert.equal(bucket.objects.size, 2);
+  // 中身が違えば別のキー
+  const other = await (await upload({ image: gif })).json();
   assert.notEqual(other.url, first.url);
-  console.log('✓ upload: replace で同じ画像を上書きし、版付き URL を返す');
+  assert.equal(bucket.objects.size, 2);
+
+  // 申告ハッシュは鍵に使わない（嘘をつかれても中身どおりのキーに収まる）
+  bucket.objects.clear();
+  const lied = await (await upload({ image: png, hash: sha256(gif) })).json();
+  assert.equal(lied.url, `/api/image/${sha256(png)}`, '申告ハッシュを鍵にしている');
+
+  assert.equal((await upload({ hash: 'ほげ' })).status, 422);
+  console.log('✓ upload: 中身の sha256 をキーにし、持っている画像は送らせない');
 }
 
 // 外部 CDN の画像の取り込み。履歴に載っている URL だけを通す（踏み台防止）
@@ -526,36 +540,55 @@ async function testCaptureEndpoint() {
   const mod = await loadWorker();
   const counters = { sub: 0 };
   const bucket = makeBucket(counters);
-  const history = [{
-    id: 'r1',
-    images: [{ url: 'https://cdn.example.com/a.png' }, { url: '/api/image/' + 'a'.repeat(32) }],
-  }];
+  // 履歴は実物のカタログ（D1）に入れる。載っているかの確認は history_images を
+  // 引くので、一覧を返すだけのモックでは経路が変わってしまう
+  const stub = new mod.SyncState({ storage: makeStorage() }, { IMAGES: bucket });
+  const d1 = makeD1();
+  // 保存のときは取りに行けなかった（相手の CDN が落ちていた）ことにして、
+  // 外部 URL のまま履歴に残った状態を作る。あとから /api/capture で拾う経路の確認
   const fetched = [];
+  let cdnAlive = false;
   globalThis.fetch = async (u) => {
     fetched.push(String(u));
-    return new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'image/png' } });
+    return cdnAlive
+      ? new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'image/png' } })
+      : new Response('down', { status: 503 });
   };
   const env = {
     IMAGES: bucket,
-    STATE: { idFromName: (n) => n, get: () => ({ listHistory: async () => history }) },
+    DB: d1,
+    STATE: { idFromName: (n) => n, get: () => stub },
   };
+  await mod.default.fetch(new Request('https://app.example/api/history', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: 'r1',
+      images: [{ url: 'https://cdn.example.com/a.png' }, { url: '/api/image/' + 'a'.repeat(32) }],
+    }),
+  }), env);
   const call = (body) => mod.default.fetch(new Request('https://app.example/api/capture', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   }), env);
 
+  assert.equal(fetched.length, 1, '保存のときに取りに行っていない');
+  assert.equal(bucket.objects.size, 0, '取れなかったのに保存されている');
+
+  cdnAlive = true;
   const ok = await call({ url: 'https://cdn.example.com/a.png' });
   assert.equal(ok.status, 200);
-  assert.match((await ok.json()).url, /^\/api\/image\/[0-9a-f]{32}$/);
+  // キーは中身の sha256（内容アドレス）
+  assert.match((await ok.json()).url, /^\/api\/image\/[0-9a-f]{64}$/);
   assert.equal(bucket.objects.size, 1, 'R2 に取り込まれていない');
-  assert.equal(fetched.length, 1);
+  assert.equal(fetched.length, 2);
 
   // 履歴に無い URL は取り込まない（任意の URL を取りに行かせない）
   assert.equal((await call({ url: 'https://cdn.example.com/other.png' })).status, 403);
   assert.equal((await call({ url: 'http://cdn.example.com/a.png' })).status, 403);
   assert.equal((await call({ url: 'not a url' })).status, 422);
-  assert.equal(fetched.length, 1, '拒否したはずの URL を取りに行っている');
+  assert.equal(fetched.length, 2, '拒否したはずの URL を取りに行っている');
   console.log('✓ capture: 履歴にある外部画像だけを R2 へ取り込む');
 }
 
@@ -574,7 +607,7 @@ await testLoraMetaEndpoint();
 await testWavespeedProxy();
 await testRunwareProxy();
 await testCivitaiResolveWithoutRepo();
-await testUploadReplace();
+await testUploadContentAddressed();
 await testCaptureEndpoint();
 rmSync(OUT, { force: true });
 console.log('\nすべて成功');
