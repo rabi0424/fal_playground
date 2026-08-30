@@ -1098,7 +1098,6 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
 }
 
 /* 「すべて削除」は常に右端へ寄せる */
-.gallery-head .ghost-btn { margin-left: auto; }
 
 .gallery-head h2 {
   font-size: 14px;

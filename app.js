@@ -124,7 +124,6 @@ const els = {
   detail: $('#detail'),
   gallery: $('#gallery'),
   gallerySearch: $('#gallerySearch'),
-  clearHistoryBtn: $('#clearHistoryBtn'),
 };
 
 function sleep(ms) {
@@ -278,27 +277,10 @@ function deleteHistoryRecord(id) {
   fetch(`/api/history/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
 }
 
-// 全消しは、サーバー側の 1 リクエストでは終わらないことがある
-//（D1 の 1 リクエストあたりのクエリ数に上限があるため）。
-// 続きがあるあいだ done: false が返るので、終わるまで送り直す
-function clearHistory() {
-  for (const r of historyCache) deletedHistoryIds.add(r.id);
-  historyCache = [];
-  persistHistoryCache();
-  (async () => {
-    for (let guard = 0; guard < 500; guard++) {
-      let res;
-      try {
-        res = await fetch('/api/history', { method: 'DELETE' });
-      } catch {
-        return; // オフラインなど。残りは次に開いたときに見える
-      }
-      if (!res.ok || isHtmlResponse(res)) return;
-      const body = await res.json().catch(() => null);
-      if (body?.done !== false) return;
-    }
-  })();
-}
+// 履歴の全消しは画面から外してある。ギャラリーの見出しに「すべて削除」を
+// 置いていたが、検索欄のすぐ隣で、取り返しがつかない（サーバーの画像ごと消える）。
+// 確認ダイアログがあっても押し間違いのほうが怖い。
+// サーバー側の DELETE /api/history は残してあるので、必要になったらそこを叩く
 
 /* ---------- form ---------- */
 
@@ -2408,14 +2390,6 @@ document.addEventListener('keydown', (e) => {
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   e.preventDefault();
   navigateGallery(dir);
-});
-
-els.clearHistoryBtn.addEventListener('click', () => {
-  if (confirm('履歴をすべて削除しますか？（サーバーに保存された画像も消えます）')) {
-    clearHistory();
-    clearDetail();
-    renderGallery();
-  }
 });
 
 // ギャラリー検索：入力に応じてサムネを絞り込む（カラなら通常表示）。
