@@ -58,8 +58,8 @@ const JOB_POLL_DELAY_MS = 2000;
 const ALARM_OVERDUE_MS = 60 * 1000;
 const JOB_MAX_SUBMIT_ATTEMPTS = 2; // 送信自体の再試行上限（多重生成・多重課金の防止）
 
-// 画像に焼き込む「何で作ったか」。ジョブの kind から引く（既定は生成）
-const JOB_SOURCES = { edit: 'wan-vace-edit', inpaint: 'lanpaint-inpaint' };
+// 画像に焼き込む kind。ジョブの kind から引く（既定は生成）
+const JOB_META_KINDS = { edit: 'edit', inpaint: 'inpaint' };
 
 // プロバイダ側の URL は失効しうるので、履歴に残す画像はすべて自分の R2 に取り込む。
 //
@@ -424,9 +424,9 @@ function looksLikePng(buf) {
 }
 
 function embedPngMetadata(buf, text) {
-  const src = new Uint8Array(buf);
-  if (src.length < 33 || !PNG_SIGNATURE.every((b, i) => src[i] === b)) return buf;
-  const ihdrLen = new DataView(buf).getUint32(8);
+  const src = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  if (src.length < 33 || !PNG_SIGNATURE.every((b, i) => src[i] === b)) return src;
+  const ihdrLen = new DataView(src.buffer, src.byteOffset, src.byteLength).getUint32(8);
   const insertAt = 8 + 12 + ihdrLen; // シグネチャ + IHDR チャンク全体の直後
 
   // iTXt: keyword \0 圧縮フラグ(0) 圧縮方式(0) 言語タグ \0 翻訳キーワード \0 本文(UTF-8)
@@ -443,14 +443,268 @@ function embedPngMetadata(buf, text) {
   out.set(src.subarray(0, insertAt), 0);
   out.set(chunk, insertAt);
   out.set(src.subarray(insertAt), insertAt + chunk.length);
-  return out.buffer;
+  return out;
+}
+
+/* ---------- 画像メタデータ（正規化） ----------
+ *
+ * 焼き込む JSON は、経路ごとに勝手な形になっていた（直下に並べる・input に
+ * 入れる・parameters に入れる・source 名がばらばら）。読む側がそのすべてを
+ * 知らないといけないのは持たないので、形を 1 つに決めてある:
+ *
+ *   { app, v, kind, provider, model, prompt, negative, seed,
+ *     width, height, steps, cfg, loras[{path,scale}], created, raw{…} }
+ *
+ * よく使う項目は固定の名前で持ち、経路固有のもの（Modal の sampler_name、
+ * ComfyUI のグラフなど）は raw にまとめて残す。書くのは storeImage だけ、
+ * 読むのは readImageMeta だけ。アーカイブ側のアプリもこの形を前提にする
+ */
+
+const IMAGE_META_APP = 'fal playground';
+const IMAGE_META_VERSION = 1;
+const IMAGE_META_LORA_MAX = 20; // 焼き込みが際限なく育たないように
+
+// 何をした画像か。generate=生成 / edit=画像編集 / inpaint=塗った範囲の描き直し /
+// composite=編集結果を元画像へ合成したもの / input=編集の入力として上げたもの
+const IMAGE_META_KINDS = new Set(['generate', 'edit', 'inpaint', 'composite', 'input']);
+
+// source 名で経路を区別していたころの焼き込みを読むための対応表
+const LEGACY_META_KINDS = {
+  'poe-edit': 'edit',
+  'wan-vace-edit': 'edit',
+  'lanpaint-inpaint': 'inpaint',
+  'krea2-modal': 'generate',
+  capture: 'generate',
+  'imgedit-input': 'input',
+  'imgedit-masked': 'composite',
+};
+
+// 正規化で拾う名前。ここに載っていない項目が raw 行きになる。
+// 同じ意味の別名（fal の num_inference_steps と Modal の steps など）も載せる
+const IMAGE_META_FIELDS = new Set([
+  'app', 'v', 'kind', 'source', 'provider', 'model', 'model_id', 'prompt',
+  'negative', 'negative_prompt', 'seed', 'width', 'height', 'image_size',
+  'steps', 'num_inference_steps', 'cfg', 'guidance_scale', 'cfg_scale',
+  'loras', 'created', 'raw', 'input', 'parameters',
+]);
+
+function metaText(v) {
+  return typeof v === 'string' && v !== '' ? v : null;
+}
+
+function metaNumber(v) {
+  const n = typeof v === 'number' ? v : (typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN);
+  return Number.isFinite(n) ? n : null;
+}
+
+// model 名の頭でどのサービスか分かる（fal-ai/… modal/… poe/… wavespeed-ai/… runware:…）
+function metaProvider(model) {
+  const id = String(model ?? '');
+  if (id.startsWith('fal-ai/')) return 'fal';
+  if (id.startsWith('modal/')) return 'modal';
+  if (id.startsWith('poe/')) return 'poe';
+  if (id.startsWith('wavespeed')) return 'wavespeed';
+  if (id.startsWith('runware')) return 'runware';
+  return null;
+}
+
+// LoRA の並び。fal は {path, scale}、Modal は {name, strength}、ComfyUI は
+// {lora_name, strength_model} と呼び方が違うので、ここで 1 つに寄せる
+function metaLoras(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const l of list) {
+    if (!l || typeof l !== 'object') continue;
+    const path = metaText(l.path) ?? metaText(l.name) ?? metaText(l.lora_name) ?? metaText(l.air);
+    if (!path) continue;
+    out.push({ path, scale: metaNumber(l.scale ?? l.strength ?? l.strength_model ?? l.weight) ?? 1 });
+    if (out.length >= IMAGE_META_LORA_MAX) break;
+  }
+  return out;
+}
+
+// 正規化で拾わなかった項目を raw に集める。v:1 の raw はそのまま引き継ぐ
+//（ComfyUI のグラフのように、名前が正規化の項目と重なるものが入っているため）
+function imageMetaRaw(meta) {
+  const raw = meta.raw && typeof meta.raw === 'object' ? { ...meta.raw } : {};
+  const add = (obj) => {
+    if (!obj || typeof obj !== 'object') return;
+    for (const [k, v] of Object.entries(obj)) {
+      if (!IMAGE_META_FIELDS.has(k) && v !== undefined) raw[k] = v;
+    }
+  };
+  add(meta.parameters);
+  add(meta.input);
+  add(meta);
+  return raw;
+}
+
+// どんな形で渡されても v:1 の形にして返す。
+// 設定が直下・input・parameters のどこにあっても拾えるよう、まず 1 つの袋にまとめる
+export function normalizeImageMeta(src) {
+  const meta = src && typeof src === 'object' && !Array.isArray(src) ? src : {};
+  const input = meta.input && typeof meta.input === 'object' ? meta.input : {};
+  const params = meta.parameters && typeof meta.parameters === 'object' ? meta.parameters : {};
+  const bag = { ...params, ...input, ...meta }; // 直下が最優先、次に input
+  const size = bag.image_size && typeof bag.image_size === 'object' ? bag.image_size : {};
+  const model = metaText(bag.model) ?? metaText(bag.model_id);
+
+  return {
+    app: IMAGE_META_APP,
+    v: IMAGE_META_VERSION,
+    kind: IMAGE_META_KINDS.has(meta.kind) ? meta.kind : (LEGACY_META_KINDS[meta.source] ?? 'generate'),
+    provider: metaText(meta.provider) ?? metaProvider(model),
+    model,
+    prompt: metaText(bag.prompt),
+    negative: metaText(bag.negative) ?? metaText(bag.negative_prompt),
+    seed: metaNumber(bag.seed),
+    width: metaNumber(bag.width) ?? metaNumber(size.width),
+    height: metaNumber(bag.height) ?? metaNumber(size.height),
+    steps: metaNumber(bag.steps) ?? metaNumber(bag.num_inference_steps),
+    cfg: metaNumber(bag.cfg) ?? metaNumber(bag.guidance_scale) ?? metaNumber(bag.cfg_scale),
+    loras: metaLoras(bag.loras),
+    created: metaText(meta.created) ?? new Date().toISOString(),
+    raw: imageMetaRaw(meta),
+  };
+}
+
+// 経路固有の中身を落とした要約。カタログの params 列に入れるのはこちら
+//（細かい設定が要るときは record を見ればよく、列を太らせる意味がない）
+function imageMetaSummary(meta) {
+  const { raw: _raw, ...rest } = normalizeImageMeta(meta);
+  return rest;
+}
+
+/* ---------- 焼き込みを読む ---------- */
+
+// PNG のテキストチャンクを { keyword: text } で返す。PNG でなければ null。
+// 圧縮された本文（zTXt・圧縮フラグ付きの iTXt）は deflate なので読み飛ばす
+function readPngTextChunks(buf) {
+  const src = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  if (src.length < 33 || !PNG_SIGNATURE.every((b, i) => src[i] === b)) return null;
+  const view = new DataView(src.buffer, src.byteOffset, src.byteLength);
+  const dec = new TextDecoder();
+  const out = new Map();
+  for (let at = 8; at + 12 <= src.length;) {
+    const len = view.getUint32(at);
+    if (!Number.isFinite(len) || at + 12 + len > src.length) break; // 途中で切れている
+    const type = dec.decode(src.subarray(at + 4, at + 8));
+    if (type === 'IEND') break;
+    if (type === 'tEXt' || type === 'iTXt') {
+      const body = src.subarray(at + 8, at + 8 + len);
+      const zero = body.indexOf(0);
+      const keyword = zero > 0 ? dec.decode(body.subarray(0, zero)) : null;
+      let text = null;
+      if (keyword && type === 'tEXt') {
+        text = dec.decode(body.subarray(zero + 1));
+      } else if (keyword && body[zero + 1] === 0) {
+        // iTXt: keyword \0 圧縮フラグ 圧縮方式 言語タグ \0 翻訳キーワード \0 本文
+        const lang = body.indexOf(0, zero + 3);
+        const trans = lang >= 0 ? body.indexOf(0, lang + 1) : -1;
+        if (trans >= 0) text = dec.decode(body.subarray(trans + 1));
+      }
+      if (keyword && text !== null && !out.has(keyword)) out.set(keyword, text);
+    }
+    at += 12 + len;
+  }
+  return out;
+}
+
+// ComfyUI の焼き込み（prompt = API 形式のグラフ、workflow = 画面の配線）を読む。
+// ノードの種類で当たりを付けるので、変わったワークフローでは埋まらない項目も出る。
+// 元のグラフは raw に丸ごと残すので、取りこぼしはそちらから拾える
+function comfyImageMeta(chunks) {
+  const graph = safeJsonParse(chunks.get('prompt') ?? '');
+  const nodes = graph && typeof graph === 'object' ? graph : {};
+  // ノードの入力は [ノード id, 出力番号] で他のノードを指す
+  const textOf = (ref) => (Array.isArray(ref) ? metaText(nodes[ref[0]]?.inputs?.text) : null);
+
+  let sampler = null;
+  let model = null;
+  let width = null;
+  let height = null;
+  const loras = [];
+  for (const node of Object.values(nodes)) {
+    const cls = String(node?.class_type ?? '');
+    const inp = node?.inputs ?? {};
+    if (!sampler && /KSampler|SamplerCustom/i.test(cls)) sampler = inp;
+    if (!model && /CheckpointLoader|UNETLoader|DiffusionLoader/i.test(cls)) {
+      model = metaText(inp.ckpt_name) ?? metaText(inp.unet_name) ?? metaText(inp.model_name);
+    }
+    if (/LoraLoader/i.test(cls)) loras.push(inp);
+    if (/EmptyLatentImage|EmptySD3LatentImage|EmptyLatent/i.test(cls)) {
+      width = metaNumber(inp.width) ?? width;
+      height = metaNumber(inp.height) ?? height;
+    }
+  }
+
+  return {
+    kind: 'generate',
+    provider: 'comfyui',
+    model,
+    prompt: textOf(sampler?.positive),
+    negative: textOf(sampler?.negative),
+    seed: sampler?.seed ?? sampler?.noise_seed ?? null,
+    steps: sampler?.steps ?? null,
+    cfg: sampler?.cfg ?? null,
+    width,
+    height,
+    loras: metaLoras(loras),
+    raw: Object.fromEntries([...chunks].map(([k, v]) => [k, safeJsonParse(v) ?? v])),
+  };
+}
+
+// A1111 / Forge 系の焼き込み（parameters に 1 枚のテキスト）を読む。
+//   プロンプト
+//   Negative prompt: …
+//   Steps: 20, Sampler: Euler a, CFG scale: 7, Seed: 1, Size: 512x768, Model: …
+function a1111ImageMeta(text) {
+  const lines = String(text ?? '').split(/\r?\n/);
+  let last = lines.length - 1;
+  while (last > 0 && lines[last].trim() === '') last--;
+  // 最終行が「Key: value, …」なら設定行。そうでなければ全部プロンプト扱い
+  const isSettings = /^[A-Za-z][\w ]*:/.test(lines[last] ?? '') && lines[last].includes(',');
+  const settings = isSettings ? lines[last] : '';
+  const head = lines.slice(0, isSettings ? last : lines.length).join('\n');
+
+  const NEG = 'Negative prompt:';
+  const negAt = head.indexOf(NEG);
+  const fields = new Map();
+  for (const m of settings.matchAll(/([A-Za-z][\w ]*?):\s*("[^"]*"|[^,]*)/g)) {
+    fields.set(m[1].trim().toLowerCase(), m[2].trim().replace(/^"|"$/g, ''));
+  }
+  const size = (fields.get('size') ?? '').match(/^(\d+)\s*x\s*(\d+)$/);
+
+  return {
+    kind: 'generate',
+    provider: 'a1111',
+    model: fields.get('model') ?? null,
+    prompt: (negAt >= 0 ? head.slice(0, negAt) : head).trim(),
+    negative: negAt >= 0 ? head.slice(negAt + NEG.length).trim() : null,
+    seed: fields.get('seed') ?? null,
+    steps: fields.get('steps') ?? null,
+    cfg: fields.get('cfg scale') ?? null,
+    width: size?.[1] ?? null,
+    height: size?.[2] ?? null,
+    raw: Object.fromEntries(fields),
+  };
+}
+
+// 画像を読んで v:1 のメタを返す（読めなければ null）。このアプリが焼いたもの・
+// ComfyUI・A1111 のどれでも同じ形で返るので、呼ぶ側は経路を気にしなくてよい。
+// アーカイブ側のアプリもこれを使う（だから export してある）
+export function readImageMeta(buf) {
+  const chunks = readPngTextChunks(buf);
+  if (!chunks || chunks.size === 0) return null;
+
+  const own = safeJsonParse(chunks.get(PNG_META_KEYWORD) ?? '');
+  if (own) return normalizeImageMeta(own);
+  if (chunks.has('prompt') || chunks.has('workflow')) return normalizeImageMeta(comfyImageMeta(chunks));
+  if (chunks.has('parameters')) return normalizeImageMeta(a1111ImageMeta(chunks.get('parameters')));
+  return null;
 }
 
 /* ---------- helpers ---------- */
-
-function randomId() {
-  return crypto.randomUUID().replaceAll('-', '');
-}
 
 // data URI（または生の base64 文字列）を { mime, bytes } に変換する。
 // 画像以外の MIME や壊れた base64 は null を返す
@@ -555,10 +809,11 @@ const META_SCHEMA = 'schema_version';
 const META_MIGRATED = 'history_migrated';
 const META_LINKS = 'image_links_rebuilt';
 const META_SEARCH = 'search_backfilled';
+const META_PARAMS = 'params_backfilled';
 const META_LINKS_CURSOR = 'image_links_cursor';
 const META_GC_CURSOR = 'image_gc_cursor';
 const META_GC_STATS = 'image_gc_stats';
-const SCHEMA_VERSION = '3';
+const SCHEMA_VERSION = '4';
 
 // 自分が配信している画像の id。64 桁は内容アドレス（中身の sha256）、
 // 32 桁はそうする前に置いた画像（ランダム UUID）。どちらもそのまま配信する
@@ -578,7 +833,7 @@ const IMAGE_GC_PAGE = 200; // R2 を 1 度に列挙する件数
 const HISTORY_CAPTURE_BUDGET = 6;
 
 const HISTORY_COLS = [
-  'seq', 'id', 'source', 'type', 'created', 'model', 'prompt', 'search', 'record', 'mask',
+  'seq', 'id', 'source', 'type', 'created', 'model', 'prompt', 'search', 'params', 'record', 'mask',
 ];
 
 // 検索は search 列への LIKE。索引は効かないが、この規模では十分で、
@@ -587,6 +842,11 @@ const HISTORY_COLS = [
 const HISTORY_SEARCH_TOKENS = 8;
 const HISTORY_SEARCH_PAGE = 60; // 検索文字列を埋め戻すときの 1 回ぶん
 const HISTORY_SEARCH_BUDGET = 8;
+
+// params 列（正規化した生成設定）の埋め戻し。1 リクエストで使うクエリ数の上限も
+// 検索と同じ考え方で決める
+const HISTORY_PARAMS_PAGE = 60;
+const HISTORY_PARAMS_BUDGET = 8;
 
 // schema.sql と同じ内容。Git 連携デプロイでは wrangler の migrations が走らないので、
 // 最初に履歴へ触れたときにここから用意する。
@@ -601,7 +861,7 @@ const HISTORY_TABLES = [
      source TEXT NOT NULL DEFAULT 'playground', type TEXT NOT NULL DEFAULT '',
      created INTEGER NOT NULL DEFAULT 0, model TEXT NOT NULL DEFAULT '',
      prompt TEXT NOT NULL DEFAULT '', search TEXT NOT NULL DEFAULT '',
-     record TEXT NOT NULL, mask TEXT)`,
+     params TEXT NOT NULL DEFAULT '', record TEXT NOT NULL, mask TEXT)`,
   `CREATE TABLE IF NOT EXISTS history_images (
      url TEXT NOT NULL, history_id TEXT NOT NULL, image_id TEXT,
      PRIMARY KEY (url, history_id))`,
@@ -615,6 +875,7 @@ const HISTORY_TABLES = [
 const HISTORY_ALTERS = [
   'ALTER TABLE history_images ADD COLUMN image_id TEXT',
   "ALTER TABLE history ADD COLUMN search TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE history ADD COLUMN params TEXT NOT NULL DEFAULT ''",
 ];
 
 const HISTORY_INDEXES = [
@@ -652,6 +913,7 @@ function historyRow(record) {
     typeof record.model === 'string' ? record.model : '',
     typeof record.prompt === 'string' ? record.prompt : '',
     historySearchText(record),
+    JSON.stringify(imageMetaSummary(recordImageMeta(record))),
     JSON.stringify(rest),
     mask ? JSON.stringify(mask) : null,
   ];
@@ -704,6 +966,31 @@ function historySearchText(record) {
   return `${record.prompt ?? ''} ${record.model ?? ''} ${loraText}`.toLowerCase();
 }
 
+// 履歴レコードの type から、画像メタの kind を決める。
+// 画像編集（imgedit）はマスクの有無で「塗った範囲の描き直し」か「全体の編集」かが変わる。
+//
+// マスクの有無は masked で見ること。mask 本体は列を分けてあり、record 列には
+// 入っていない ―― mask を見ると、保存のときと埋め戻しのときで答えが変わる
+function recordMetaKind(record) {
+  if (record?.type === 'edit') return 'edit';
+  if (record?.type === 'imgedit') return record.masked || record.maskNative ? 'inpaint' : 'edit';
+  return 'generate';
+}
+
+// 履歴レコード → v:1 のメタ。画像への焼き込みと params 列で同じものを使うので、
+// 「ファイルに焼かれている設定」と「カタログに載っている設定」がずれない
+function recordImageMeta(record, loras = null) {
+  return normalizeImageMeta({
+    kind: recordMetaKind(record),
+    model: record?.model,
+    prompt: record?.prompt,
+    seed: record?.seed ?? null,
+    loras: loras ?? recordActiveLoras(record),
+    input: record?.input ?? null,
+    created: new Date(Number(record?.ts) || Date.now()).toISOString(),
+  });
+}
+
 // 空白区切りの AND 検索。LIKE のワイルドカードは打ち消す
 function searchTokens(q) {
   return String(q ?? '').toLowerCase().trim().split(/\s+/)
@@ -754,14 +1041,14 @@ async function ensureHistoryCatalog(env, stub) {
 
   let state = new Map();
   try {
-    state = await getMeta(env, [META_MIGRATED, META_SCHEMA, META_LINKS, META_SEARCH]);
+    state = await getMeta(env, [META_MIGRATED, META_SCHEMA, META_LINKS, META_SEARCH, META_PARAMS]);
   } catch {
     // 表がまだ無い（初回）
   }
   // 片付けの段どりを増やしたら、ここの条件にも足すこと。入れ忘れると
   // 「1 回だけ走って、次からは早期 return で二度と進まない」状態になる
   if (state.get(META_MIGRATED) && state.get(META_LINKS) && state.get(META_SEARCH)
-      && state.get(META_SCHEMA) === SCHEMA_VERSION) {
+      && state.get(META_PARAMS) && state.get(META_SCHEMA) === SCHEMA_VERSION) {
     historyCatalogReady = true;
     return;
   }
@@ -795,6 +1082,11 @@ async function ensureHistoryCatalog(env, stub) {
     if (!state.get(META_SEARCH)) {
       if (!(await backfillSearch(env))) return;
       await setMeta(env, META_SEARCH, new Date().toISOString());
+    }
+    // 4. 正規化した生成設定（params 列）を、レコードから埋める
+    if (!state.get(META_PARAMS)) {
+      if (!(await backfillParams(env))) return;
+      await setMeta(env, META_PARAMS, new Date().toISOString());
     }
     historyCatalogReady = true;
   } catch {
@@ -867,6 +1159,24 @@ async function backfillSearch(env) {
 
     const stmts = updateByIdStatements(env.DB, 'history', 'search',
       results.map((row) => [row.id, historySearchText(JSON.parse(row.record))]));
+    await env.DB.batch(stmts);
+    spent += stmts.length;
+  }
+  return false; // 続きは次のリクエストで
+}
+
+// params 列を埋める。空文字の行が対象なので、済んだものは自然に外れていく
+async function backfillParams(env) {
+  for (let spent = 0; spent < HISTORY_PARAMS_BUDGET;) {
+    const { results } = await env.DB.prepare(
+      "SELECT id, record FROM history WHERE params = '' LIMIT ?",
+    ).bind(HISTORY_PARAMS_PAGE).all();
+    spent += 1;
+    if (results.length === 0) return true;
+
+    const stmts = updateByIdStatements(env.DB, 'history', 'params', results.map((row) => [
+      row.id, JSON.stringify(imageMetaSummary(recordImageMeta(JSON.parse(row.record)))),
+    ]));
     await env.DB.batch(stmts);
     spent += stmts.length;
   }
@@ -1064,8 +1374,31 @@ async function deleteImageObjects(env, stub, ids) {
 const claimImage = (env, id) =>
   env.DB.prepare('DELETE FROM image_gc WHERE image_id = ?').bind(id).run();
 
-// 外部にある画像を R2 へ取り込んで、同一オリジンの URL を返す（取れなければ null）。
-// キーは中身の sha256 なので、同じ画像を二度取り込んでも 1 つに収まる
+// 画像を R2 へ置く唯一の入口。生成結果も取り込みもアップロードも、必ずここを通す。
+// キーは中身の sha256（内容アドレス）なので、同じ画像は何度置いても 1 つに収まる。
+// PNG なら正規化したメタ（v:1）を焼き込む。
+//
+// 焼き込みはキーを決めたあとなので、保存されたファイル自身のハッシュはキーと
+// 一致しない。キーは「受け取ったバイト列」のハッシュ ―― クライアントが送って
+// くるハッシュ（/api/upload の問い合わせ）と突き合わせるためにこうしてある
+async function storeImage(env, bytes, { meta = null, contentType = 'image/png' } = {}) {
+  const src = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const id = await sha256Hex(src);
+  const body = meta ? embedPngMetadata(src, JSON.stringify(normalizeImageMeta(meta))) : src;
+  await env.IMAGES.put(`${id}.png`, body, { httpMetadata: { contentType } });
+
+  // 掃除の印を外す（前に「参照が無い」と印を付けた画像を、また使い始めたとき）。
+  // ここで落ちても画像は保存済みで、印は猶予 7 日のあいだに次の参照で外れるので、
+  // 保存そのものは失敗させない
+  try {
+    await claimImage(env, id);
+  } catch {
+    // カタログがまだ用意されていない経路（Durable Object の alarm など）
+  }
+  return { id, url: `/api/image/${id}` };
+}
+
+// 外部にある画像を R2 へ取り込んで、同一オリジンの URL を返す（取れなければ null）
 async function captureExternalImage(env, src, meta = null) {
   const res = await fetch(src, { signal: apiSignal() });
   if (!res.ok) return null;
@@ -1073,14 +1406,8 @@ async function captureExternalImage(env, src, meta = null) {
   if (!type.startsWith('image/')) return null;
   const buf = await res.arrayBuffer();
   if (buf.byteLength > UPLOAD_MAX_BYTES) return null;
-
-  // 鍵は「取ってきたバイト列」のハッシュ。meta の焼き込みはそのあとなので、
-  // 保存されたファイル自身のハッシュとは一致しない（/api/upload と揃えてある）
-  const id = await sha256Hex(new Uint8Array(buf));
-  const body = meta ? embedPngMetadata(buf, JSON.stringify(meta)) : buf;
-  await env.IMAGES.put(`${id}.png`, body, { httpMetadata: { contentType: type } });
-  await claimImage(env, id);
-  return `/api/image/${id}`;
+  const { url } = await storeImage(env, buf, { meta, contentType: type });
+  return url;
 }
 
 async function sha256Hex(bytes) {
@@ -1670,20 +1997,17 @@ export class SyncState extends DurableObject {
         await this.ctx.storage.put(key, job);
         return;
       }
-      const meta = {
-        app: 'fal playground',
-        source: 'poe-edit',
-        model,
-        prompt,
-        created: new Date(job.created).toISOString(),
-      };
-      const buf = embedPngMetadata(await imgRes.arrayBuffer(), JSON.stringify(meta));
-      const resultId = randomId();
-      await this.env.IMAGES.put(`${resultId}.png`, buf, {
-        httpMetadata: { contentType: imgRes.headers.get('Content-Type') || 'image/png' },
+      const { url } = await storeImage(this.env, await imgRes.arrayBuffer(), {
+        meta: {
+          kind: 'edit',
+          model: `poe/${model}`,
+          prompt,
+          created: new Date(job.created).toISOString(),
+        },
+        contentType: imgRes.headers.get('Content-Type') || 'image/png',
       });
       job.status = 'done';
-      job.url = `/api/image/${resultId}`;
+      job.url = url;
       await this.ctx.storage.put(key, job);
     } catch {
       // ネットワーク断など。pending のまま次の alarm で再試行する（attempts 上限で打ち切り）
@@ -1759,14 +2083,16 @@ export class SyncState extends DurableObject {
       // 実際に生成された解像度（編集では 32 の倍数に丸められる）
       const width = Number(res.headers.get('X-Width'));
       const height = Number(res.headers.get('X-Height'));
-      // 生成設定を画像に焼き込んでから保存する。画像本体（base64）は焼かない
+      // 生成設定を画像に焼き込んでから保存する。画像本体（base64）は焼かない。
+      // 正規化で拾われない項目（endpoint・sampler_name など）は raw に入る
       const { image: _img, mask: _mask, hf_token: _tok, ...params } = job.payload;
+      const endpoint = job.endpointKey ?? (job.endpoint.includes('-exp-') ? 'exp'
+        : job.endpoint.includes('-gpusnap-') ? 'gpusnap'
+          : job.endpoint.includes('-ckpt-') ? 'ckpt' : 'prod');
       const meta = {
-        app: 'fal playground',
-        source: JOB_SOURCES[job.kind] ?? 'krea2-modal',
-        endpoint: job.endpointKey ?? (job.endpoint.includes('-exp-') ? 'exp'
-          : job.endpoint.includes('-gpusnap-') ? 'gpusnap'
-            : job.endpoint.includes('-ckpt-') ? 'ckpt' : 'prod'),
+        kind: JOB_META_KINDS[job.kind] ?? 'generate',
+        model: `modal/${endpoint}`,
+        endpoint,
         ...params,
         seed: seed ?? job.payload.seed ?? null,
         created: new Date(job.created).toISOString(),
@@ -1781,13 +2107,9 @@ export class SyncState extends DurableObject {
         await this.ctx.storage.put(key, job);
         return;
       }
-      const png = embedPngMetadata(body, JSON.stringify(meta));
-      const imageId = randomId();
-      await this.env.IMAGES.put(`${imageId}.png`, png, {
-        httpMetadata: { contentType: 'image/png' },
-      });
+      const { url } = await storeImage(this.env, body, { meta, contentType: 'image/png' });
       job.status = 'done';
-      job.url = `/api/image/${imageId}`;
+      job.url = url;
       job.seed = seed;
       if (Number.isFinite(width) && width > 0) job.width = width;
       if (Number.isFinite(height) && height > 0) job.height = height;
@@ -2964,16 +3286,7 @@ export default {
             }
             if (src.protocol !== 'https:') continue;
             try {
-              const local = await captureExternalImage(env, src, {
-                app: 'fal playground',
-                source: 'capture',
-                model: record.model,
-                prompt: record.prompt,
-                seed: record.seed ?? null,
-                ...(loras?.length ? { loras } : {}),
-                ...(record.input ? { input: record.input } : {}),
-                created: new Date(record.ts || Date.now()).toISOString(),
-              });
+              const local = await captureExternalImage(env, src, recordImageMeta(record, loras));
               if (local) img.url = local;
             } catch {
               // 取得できなければ元の URL のまま残す（表示は CDN の失効まで可能）。
@@ -3055,7 +3368,7 @@ export default {
     //   1) { hash } だけ POST → 持っていれば { url }、無ければ { url: null }
     //   2) 無かったときだけ { image, meta } を POST
     // 申告されたハッシュは鍵に使わない（サーバーが計算し直すので、嘘をつかれても
-    // 正しいキーに収まるだけ）。meta があれば PNG に生成設定として焼き込むが、
+    // 正しいキーに収まるだけ）。meta があれば正規化して PNG へ焼き込むが、
     // 焼き込みは鍵を決めたあとなので、キーは「送られてきたバイト列」のハッシュになる
     if (url.pathname === '/api/upload') {
       if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
@@ -3085,14 +3398,11 @@ export default {
       if (decoded.bytes.length > UPLOAD_MAX_BYTES) {
         return new Response('Image too large', { status: 413 });
       }
-      const id = await sha256Hex(decoded.bytes);
-      let buf = decoded.bytes.buffer;
-      if (body.meta && typeof body.meta === 'object') {
-        buf = embedPngMetadata(buf, JSON.stringify(body.meta));
-      }
-      await env.IMAGES.put(`${id}.png`, buf, { httpMetadata: { contentType: decoded.mime } });
-      await claimImage(env, id);
-      return Response.json({ url: `/api/image/${id}` });
+      const stored = await storeImage(env, decoded.bytes, {
+        meta: body.meta && typeof body.meta === 'object' ? body.meta : null,
+        contentType: decoded.mime,
+      });
+      return Response.json({ url: stored.url });
     }
 
     // 使われなかった画像の回収。GET は最後の結果（統計に出す）、POST でその場で実行する
@@ -3275,6 +3585,18 @@ export default {
       const job = await stub.getKrea2Job(jobMatch[1]);
       if (!job) return new Response('Job not found', { status: 404 });
       return Response.json(job);
+    }
+
+    // 保存済み画像に焼き込まれている設定を、正規化した形（v:1）で返す。
+    // ComfyUI や A1111 で作った画像を取り込んだときも、同じ形で読める
+    const imageMetaMatch = url.pathname.match(/^\/api\/image\/([0-9a-f]{64}|[0-9a-f]{32})\/meta$/);
+    if (imageMetaMatch) {
+      if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
+      const obj = await env.IMAGES.get(`${imageMetaMatch[1]}.png`);
+      if (!obj) return new Response('Not found', { status: 404 });
+      const meta = readImageMeta(await obj.arrayBuffer());
+      if (!meta) return new Response('No metadata', { status: 404 });
+      return Response.json(meta);
     }
 
     // 保存済み生成画像の配信（/api/krea2/image/ は旧 URL 互換）。

@@ -863,7 +863,8 @@ async function setSourceFromSrc(src, from, { keepMask = false } = {}) {
       height = img.naturalHeight;
     } else {
       const original = toDataUri(img, { width, height }, ORIGINAL_QUALITY);
-      url = await uploadDataUri(original.dataUri, { app: 'fal playground', source: 'imgedit-input' });
+      // メタは渡さない。ここで作るのは JPEG で、焼き込めるのは PNG だけ
+      url = await uploadDataUri(original.dataUri);
     }
     // 別の画像に差し替えたらマスクは引き継がない。前の画像の形に合わせて
     // 塗った範囲を、関係のない画像へそのまま当ててしまわないようにする
@@ -3656,10 +3657,14 @@ async function buildMaskedRecord(record, maskData, onStatus = () => {}) {
       },
     );
     offsets[i] = offset ?? null;
-    const url = await uploadDataUri(
-      dataUri,
-      { app: 'fal playground', source: 'imgedit-masked', model: record.model, prompt: record.prompt },
-    );
+    const url = await uploadDataUri(dataUri, {
+      kind: 'composite',
+      model: record.model,
+      prompt: record.prompt,
+      seed: record.seed ?? null,
+      loras: record.loras ?? [],
+      input: record.input ?? null,
+    });
     composites.push({ url, width, height });
   }
   return {

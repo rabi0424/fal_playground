@@ -324,6 +324,7 @@ node test/store.test.mjs         # localStorage のラッパー（容量あふ�
 node test/gallery-pager.test.mjs # ギャラリーの分割描画
 node test/history-feed.test.mjs # 履歴の取得（ページ送り・絞り込み）
 node test/image-upload.test.mjs # 画像アップロード（内容アドレスによる省略）
+node test/image-meta.test.mjs   # 画像メタデータの正規化と読み書き（ComfyUI / A1111 を含む）
 node test/browser-refs.test.mjs # 画面用スクリプトの、定義が無い呼び出しの検出
 ```
 
@@ -388,7 +389,28 @@ localStorage はブラウザごとに 5MB 前後で頭打ちになり、超え�
 
 ### 生成設定の画像への焼き込み
 
-保存される PNG には、生成設定（プロンプト・モデル・LoRA・seed・サイズなど）の JSON が **iTXt チャンク（キーワード `playground`）** として埋め込まれます。ComfyUI がワークフローを画像に埋め込むのと同じ発想で、「保存」でダウンロードした画像ファイルだけから後で設定を確認できます（画質への影響はありません）。fal のモデルが JPEG を返した場合は焼き込みされませんが、履歴レコード側に設定が残ります。
+保存される PNG には、生成設定の JSON が **iTXt チャンク（キーワード `playground`）** として埋め込まれます。ComfyUI がワークフローを画像に埋め込むのと同じ発想で、「保存」でダウンロードした画像ファイルだけから後で設定を確認できます（画質への影響はありません）。fal のモデルが JPEG を返した場合は焼き込みされませんが、履歴レコード側に設定が残ります。
+
+**形は 1 つに決めてあります（`v: 1`）。** 以前は経路ごとに勝手な形で焼いていました ―― 設定を直下に並べるもの・`input` に入れるもの・`parameters` に入れるもの、`source` の名前も `poe-edit` / `wan-vace-edit` / `krea2-modal` / `capture` / `imgedit-masked` とばらばら。読む側がそのすべてを知らないと解釈できず、アーカイブ側のアプリをその継ぎ接ぎに合わせて作ることになるので、揃えました。
+
+```json
+{ "app": "fal playground", "v": 1,
+  "kind": "generate | edit | inpaint | composite | input",
+  "provider": "fal | modal | poe | wavespeed | runware | comfyui | a1111 | null",
+  "model": "...", "prompt": "...", "negative": null,
+  "seed": 42, "width": 1024, "height": 1536, "steps": 8, "cfg": 3.5,
+  "loras": [{ "path": "...", "scale": 0.8 }],
+  "created": "2026-01-02T03:04:05.000Z",
+  "raw": { "endpoint": "lanpaint", "sampler_name": "euler" } }
+```
+
+よく使う項目は固定の名前で持ち、経路固有のもの（Modal の `sampler_name`、fal の `num_images`、ComfyUI のグラフなど）は `raw` にまとめて残します。同じ意味で名前が違うもの（fal の `num_inference_steps` と Modal の `steps`、fal の `guidance_scale` と Modal の `cfg`、LoRA の `{path,scale}` / `{name,strength}` / `{lora_name,strength_model}`）は、読むときに 1 つへ寄せます。
+
+- **書くのは `storeImage` だけです。** 生成結果（Poe / Modal）・外部 CDN からの取り込み・`/api/upload` の 4 経路すべてがここを通ります。ついでに **R2 のキーも 4 経路すべてで内容アドレス**になりました（以前は Poe と Modal だけランダムな 32 桁で、同じ画像が何枚でも積まれていました）
+- **読むのは `readImageMeta` だけです。** このアプリの焼き込み・古い形の焼き込み・**ComfyUI**（`prompt` / `workflow`）・**A1111**（`parameters`）のどれを渡しても、上と同じ形で返ります。`GET /api/image/<id>/meta` がその窓口です
+- **カタログにも同じものが載ります。** `history` 表の `params` 列が、`raw` を除いた同じ JSON です。アーカイブ側は `record`（経路ごとに形の違う生の記録）を解釈せず、この列だけを読めば済みます
+
+古い焼き込みはそのまま読めます（`source` の名前から `kind` を割り出します）。既に保存済みの画像を焼き直すことはしません。
 
 ## Modal 自前ホスト版 Krea 2
 
@@ -473,7 +495,9 @@ LanPaint 版は、画像編集の「Modal 自前ホスト（LanPaint インペ�
 | `seq` | 並び順（主キー）。大きいほど新しい。同じ id を保存し直すと振り直されて先頭に来る |
 | `id` | 履歴レコードの id。1 件取得・削除のルートが受ける形（`[\w.-]{1,100}`）だけ通す |
 | `source` | 何が作ったか。この画面の生成物は `playground` |
-| `type` / `created` / `model` / `prompt` | 絞り込み・並び替え・（将来の）検索に使う列 |
+| `type` / `created` / `model` / `prompt` | 絞り込み・並び替えに使う列 |
+| `search` | ギャラリー検索の対象（プロンプト・モデル名・LoRA をつないだ小文字の文字列） |
+| `params` | 正規化した生成設定（`v: 1`）。画像に焼き込むものと同じ形。[生成設定の画像への焼き込み](#生成設定の画像への焼き込み)を参照 |
 | `record` | レコード全体の JSON。**ただしマスクは含まない** |
 | `mask` | 画像編集のマスク（塗った線の座標）。1 件で数十 KB になるので列を分ける |
 
