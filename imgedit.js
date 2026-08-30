@@ -842,17 +842,9 @@ function storedImageUrl(src) {
   return null;
 }
 
-// replace に既存の /api/image/... を渡すと、新しく作らずその画像を差し替える
-// （マスクの塗り直しのたびに合成画像が増えて置き去りになるのを防ぐ）
-async function uploadDataUri(dataUri, meta, replace = null) {
-  const res = await postJson('/api/upload', { image: dataUri, meta, ...(replace ? { replace } : {}) });
-  if (isHtmlResponse(res)) throw new Error('画像の保存に失敗しました（ログインし直してください）');
-  if (!res.ok) {
-    const mb = (dataUriBytes(dataUri) / 1024 / 1024).toFixed(1);
-    throw new Error(`画像の保存に失敗しました（${mb}MB・HTTP ${res.status}）`);
-  }
-  return (await res.json()).url;
-}
+// R2 のキーは中身の sha256 なので、同じ画像なら送らずに済む（image-upload.js）。
+// 塗り直しのたびに増える合成画像は、参照が無くなったぶんをサーバー側が回収する
+const uploadDataUri = (dataUri, meta) => falUpload.put(dataUri, meta);
 
 // keepMask は「前の画像に合わせて塗ったマスクをそのまま引き継ぐ」場合だけ。
 // 下書きの復元と、過去の合成結果を開き直すときにしか使わない
@@ -3635,8 +3627,8 @@ async function waitAndFinish(job) {
 // images は [合成 …, 生成結果そのまま …, 入力画像] の順になる
 async function buildMaskedRecord(record, maskData, onStatus = () => {}) {
   const n = record.outputCount ?? record.images.length - 1;
-  // 既に合成済みなら先頭 n 枚が前回の合成、その後ろが生成結果そのまま
-  const previous = record.masked ? record.images.slice(0, n) : []; // 差し替え先
+  // 既に合成済みなら先頭 n 枚が前回の合成、その後ろが生成結果そのまま。
+  // 塗り直すと前回の合成は参照から外れ、サーバー側の回収に任せる
   const tail = record.masked ? record.images.slice(n) : record.images; // [生成結果 …, 入力]
 
   // 合成には画素が要るので、外部 CDN のままの画像はここで R2 へ取り込む。
@@ -3666,7 +3658,6 @@ async function buildMaskedRecord(record, maskData, onStatus = () => {}) {
     const url = await uploadDataUri(
       dataUri,
       { app: 'fal playground', source: 'imgedit-masked', model: record.model, prompt: record.prompt },
-      previous[i]?.url ?? null,
     );
     composites.push({ url, width, height });
   }

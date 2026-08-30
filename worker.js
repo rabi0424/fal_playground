@@ -518,7 +518,8 @@ function historyIndexSeq(key) {
 // 末尾の ?v=... は差し替え時のキャッシュ避け（/api/upload の replace）。
 // 同じキーを指すので、削除対象の判定では無視する
 function localImageId(u) {
-  const m = typeof u === 'string' ? u.match(/^\/api(?:\/krea2)?\/image\/([0-9a-f]{32})(?:\?.*)?$/) : null;
+  const m = typeof u === 'string'
+    ? u.match(/^\/api(?:\/krea2)?\/image\/([0-9a-f]{64}|[0-9a-f]{32})(?:\?.*)?$/) : null;
   return m ? m[1] : null;
 }
 
@@ -534,12 +535,35 @@ function localImageId(u) {
  */
 
 const HISTORY_SOURCE = 'playground'; // この画面が作ったレコードの source
-const HISTORY_MIGRATED_KEY = 'history_migrated';
 const D1_MAX_BIND = 90; // bound parameter の上限 100 に対して少し余裕を取る
 const HISTORY_MIGRATE_BATCH = 60; // 1 度に Durable Object から引き取る件数
-const HISTORY_MIGRATE_BUDGET = 24; // 1 リクエストで移行に使うクエリ数の上限
+const HISTORY_MIGRATE_BUDGET = 20; // 1 リクエストで移行に使うクエリ数の上限
+const HISTORY_LINKS_BUDGET = 24; // 画像参照の作り直しに使うクエリ数の上限
+const HISTORY_LINKS_PAGE = 100;
 const HISTORY_CLEAR_BUDGET = 40; // 全消し 1 リクエストで使うクエリ数の上限
 const HISTORY_CLEAR_PAGE = 200;
+
+// meta の覚書。スキーマ版が上がると、次のアクセスで DDL と作り直しが走る
+const META_SCHEMA = 'schema_version';
+const META_MIGRATED = 'history_migrated';
+const META_LINKS_CURSOR = 'image_links_cursor';
+const META_GC_CURSOR = 'image_gc_cursor';
+const META_GC_STATS = 'image_gc_stats';
+const SCHEMA_VERSION = '2';
+
+// 自分が配信している画像の id。64 桁は内容アドレス（中身の sha256）、
+// 32 桁はそうする前に置いた画像（ランダム UUID）。どちらもそのまま配信する
+const IMAGE_ID_RE = /^([0-9a-f]{64}|[0-9a-f]{32})$/;
+// 掃除の対象にしてよい R2 のキー。許可リストにするのは、このバケットに
+// LoRA 取り込みの一時ファイル（lora-staging/...）も同居しているため。
+// 除外リスト方式だと、将来べつの用途を足したときに巻き添えにする
+const IMAGE_KEY_RE = /^([0-9a-f]{64}|[0-9a-f]{32})\.png$/;
+// 参照が無いと分かってから実際に消すまでの猶予。画像編集は「画像を選んだ瞬間」に
+// アップロードし、履歴に載るのは編集が終わってからなので、その間は参照ゼロになる
+const IMAGE_GC_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+const IMAGE_GC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 便乗実行の間隔
+const IMAGE_GC_BUDGET = 30; // 1 回の掃除で使う D1 クエリ数の上限
+const IMAGE_GC_PAGE = 200; // R2 を 1 度に列挙する件数
 
 const HISTORY_COLS = ['seq', 'id', 'source', 'type', 'created', 'model', 'prompt', 'record', 'mask'];
 
@@ -553,9 +577,19 @@ const HISTORY_SCHEMA = [
      prompt TEXT NOT NULL DEFAULT '', record TEXT NOT NULL, mask TEXT)`,
   'CREATE INDEX IF NOT EXISTS history_source_seq ON history (source, seq DESC)',
   `CREATE TABLE IF NOT EXISTS history_images (
-     url TEXT NOT NULL, history_id TEXT NOT NULL, PRIMARY KEY (url, history_id))`,
+     url TEXT NOT NULL, history_id TEXT NOT NULL, image_id TEXT,
+     PRIMARY KEY (url, history_id))`,
   'CREATE INDEX IF NOT EXISTS history_images_owner ON history_images (history_id)',
+  'CREATE INDEX IF NOT EXISTS history_images_image ON history_images (image_id)',
+  `CREATE TABLE IF NOT EXISTS image_gc (
+     image_id TEXT PRIMARY KEY, marked_at INTEGER NOT NULL)`,
   'CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)',
+];
+
+// 既にある表への追加。列がある場合は「duplicate column name」で失敗するので、
+// それは適用済みとして黙って進む（CREATE TABLE IF NOT EXISTS では足せないため）
+const HISTORY_ALTERS = [
+  'ALTER TABLE history_images ADD COLUMN image_id TEXT',
 ];
 
 // 移行まで済んでいるか。isolate ごとに覚えておけば、平常時の追加コストは
@@ -600,46 +634,115 @@ function recordImageUrls(record) {
   return [...urls];
 }
 
+// history_images に入れる行。image_id は自分が配信している画像のときだけ入る
+//（外部 CDN の URL は null）。掃除はこの列だけを見るので、URL 文字列の形
+//（?v= 付きや旧 /api/krea2/image/...）に振り回されずに済む
+const IMAGE_LINK_COLS = ['url', 'history_id', 'image_id'];
+
+function imageLinks(record) {
+  return recordImageUrls(record).map((url) => [url, record.id, localImageId(url)]);
+}
+
 // 表を用意し、Durable Object に残っている過去のレコードを引き取る。
 // 移行は新しい方から進めるので、途中でもギャラリーの先頭は D1 側に揃っている
+async function getMeta(env, keys) {
+  const marks = keys.map(() => '?').join(',');
+  const { results } = await env.DB.prepare(`SELECT k, v FROM meta WHERE k IN (${marks})`)
+    .bind(...keys).all();
+  return new Map(results.map((row) => [row.k, row.v]));
+}
+
+const setMeta = (env, key, value) => env.DB
+  .prepare('INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)').bind(key, String(value)).run();
+
+// 表を用意し、過去の持ち物を今の形に揃える。済んでしまえば、平常時の追加コストは
+// 「meta を 1 回引く」だけ（それも isolate ごとに 1 度）
 async function ensureHistoryCatalog(env, stub) {
   if (historyCatalogReady) return;
 
-  let done = null;
+  let state = new Map();
   try {
-    done = await env.DB.prepare('SELECT v FROM meta WHERE k = ?').bind(HISTORY_MIGRATED_KEY).first();
+    state = await getMeta(env, [META_MIGRATED, META_SCHEMA]);
   } catch {
     // 表がまだ無い（初回）
   }
-  if (done) {
+  if (state.get(META_MIGRATED) && state.get(META_SCHEMA) === SCHEMA_VERSION) {
     historyCatalogReady = true;
     return;
   }
-  // 移行が終わるまでは毎回スキーマを確かめる。途中で欠けても次のリクエストで直り、
-  // 済んでしまえば上の meta で抜けるので、平常時のコストは 1 クエリだけ
-  for (const sql of HISTORY_SCHEMA) await env.DB.prepare(sql).run();
 
+  // 揃うまでは毎回スキーマを確かめる。途中で欠けても次のリクエストで直る
+  for (const sql of HISTORY_SCHEMA) await env.DB.prepare(sql).run();
+  for (const sql of HISTORY_ALTERS) {
+    try {
+      await env.DB.prepare(sql).run();
+    } catch {
+      // 適用済み
+    }
+  }
+
+  // 1. Durable Object に残っている履歴を引き取る
+  if (!state.get(META_MIGRATED) && !(await migrateHistoryFromDo(env, stub))) return;
+  // 2. 画像参照（history_images）を、レコードから作り直す
+  if (state.get(META_SCHEMA) !== SCHEMA_VERSION) {
+    if (!(await rebuildImageLinks(env))) return;
+    await setMeta(env, META_SCHEMA, SCHEMA_VERSION);
+  }
+  historyCatalogReady = true;
+}
+
+// Durable Object から D1 へ。移し終えたら true。予算切れなら false（次のリクエストで続き）
+async function migrateHistoryFromDo(env, stub) {
   for (let spent = 0; spent < HISTORY_MIGRATE_BUDGET;) {
     const records = await stub.exportHistory(HISTORY_MIGRATE_BATCH);
     if (records.length === 0) {
-      // Durable Object 側が空になった＝移行完了。以後この経路は通らない
-      await env.DB.prepare('INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)')
-        .bind(HISTORY_MIGRATED_KEY, new Date().toISOString()).run();
-      historyCatalogReady = true;
-      return;
+      await setMeta(env, META_MIGRATED, new Date().toISOString());
+      return true;
     }
     // 通し番号は Durable Object が振ったものをそのまま使う（並び順が変わらない）
-    const rows = records.map(historyRow);
-    const links = records.flatMap((r) => recordImageUrls(r).map((url) => [url, r.id]));
     const stmts = [
-      ...insertStatements(env.DB, 'history', HISTORY_COLS, rows, 'INSERT OR REPLACE'),
-      ...insertStatements(env.DB, 'history_images', ['url', 'history_id'], links, 'INSERT OR IGNORE'),
+      ...insertStatements(env.DB, 'history', HISTORY_COLS, records.map(historyRow), 'INSERT OR REPLACE'),
+      ...insertStatements(env.DB, 'history_images', IMAGE_LINK_COLS,
+        records.flatMap(imageLinks), 'INSERT OR IGNORE'),
     ];
     await env.DB.batch(stmts);
     spent += stmts.length;
     await stub.forgetHistory(records.map((r) => r.id));
   }
-  // 予算を使い切った。残りは次のリクエストで続ける（表示は移行済みのぶんだけ）
+  return false; // 表示は移行済みのぶんだけ。残りは次のリクエストで
+}
+
+// history_images をレコードから作り直す。image_id 列を後から足したので、
+// 既存行にはそれが入っていない。URL 文字列を SQL で切り出すより、保存時と
+// まったく同じ JS（recordImageUrls / localImageId）で引き直すほうが確実
+async function rebuildImageLinks(env) {
+  const at = await getMeta(env, [META_LINKS_CURSOR]); // 位置は seq
+  let after = Number(at.get(META_LINKS_CURSOR)) || Infinity;
+
+  for (let spent = 0; spent < HISTORY_LINKS_BUDGET;) {
+    const { results } = await env.DB.prepare(
+      'SELECT id, seq, record FROM history WHERE seq < ? ORDER BY seq DESC LIMIT ?',
+    ).bind(after === Infinity ? Number.MAX_SAFE_INTEGER : after, HISTORY_LINKS_PAGE).all();
+    spent += 1;
+    if (results.length === 0) {
+      return true;
+    }
+    const ids = results.map((row) => row.id);
+    const links = results.flatMap((row) => imageLinks(JSON.parse(row.record)));
+    const stmts = [];
+    for (const part of chunkBatch(ids, D1_MAX_BIND)) {
+      stmts.push(env.DB.prepare(
+        `DELETE FROM history_images WHERE history_id IN (${part.map(() => '?').join(',')})`,
+      ).bind(...part));
+    }
+    stmts.push(...insertStatements(env.DB, 'history_images', IMAGE_LINK_COLS, links, 'INSERT OR IGNORE'));
+    await env.DB.batch(stmts);
+    spent += stmts.length;
+    after = results[results.length - 1].seq;
+    await setMeta(env, META_LINKS_CURSOR, after);
+    spent += 1;
+  }
+  return false;
 }
 
 // 新しい順に 1 ページ。cursor は前のページの最後の seq
@@ -670,12 +773,11 @@ async function historyGet(env, id) {
 async function historySave(env, record) {
   const top = await env.DB.prepare('SELECT COALESCE(MAX(seq), 0) AS top FROM history').first();
   const saved = { ...record, seq: (top?.top ?? 0) + 1 };
-  const links = recordImageUrls(saved).map((url) => [url, saved.id]);
   await env.DB.batch([
     env.DB.prepare('DELETE FROM history WHERE id = ?').bind(saved.id),
     env.DB.prepare('DELETE FROM history_images WHERE history_id = ?').bind(saved.id),
     ...insertStatements(env.DB, 'history', HISTORY_COLS, [historyRow(saved)]),
-    ...insertStatements(env.DB, 'history_images', ['url', 'history_id'], links, 'INSERT OR IGNORE'),
+    ...insertStatements(env.DB, 'history_images', IMAGE_LINK_COLS, imageLinks(saved), 'INSERT OR IGNORE'),
   ]);
   return saved;
 }
@@ -683,23 +785,158 @@ async function historySave(env, record) {
 // 参照が無くなった画像だけ R2 から消す。1 枚が複数の記録に出ることがある
 // （編集の入力に使い回したときなど）ので、消す前に残りの参照を数える
 async function dropOrphanImages(env, stub, urls) {
-  const ids = [];
-  for (const part of chunkBatch(urls, D1_MAX_BIND)) {
+  const candidates = [...new Set(urls.map(localImageId).filter(Boolean))];
+  const orphans = [];
+  for (const part of chunkBatch(candidates, D1_MAX_BIND)) {
     const { results } = await env.DB.prepare(
-      `SELECT DISTINCT url FROM history_images WHERE url IN (${part.map(() => '?').join(',')})`,
+      `SELECT DISTINCT image_id FROM history_images WHERE image_id IN (${part.map(() => '?').join(',')})`,
     ).bind(...part).all();
-    const stillUsed = new Set(results.map((row) => row.url));
-    for (const url of part) {
-      const id = stillUsed.has(url) ? null : localImageId(url);
-      if (id) ids.push(id);
-    }
+    const stillUsed = new Set(results.map((row) => row.image_id));
+    for (const id of part) if (!stillUsed.has(id)) orphans.push(id);
   }
-  if (ids.length === 0) return;
+  await deleteImageObjects(env, stub, orphans);
+}
+
+// 画像の実体を消す。掃除の印も一緒に片付ける（実体が無くなれば印も要らない）
+async function deleteImageObjects(env, stub, ids) {
+  if (ids.length === 0) return 0;
   // R2 の delete は 1 回 1000 キーまで
   for (let i = 0; i < ids.length; i += 1000) {
     await env.IMAGES.delete(ids.slice(i, i + 1000).map((id) => `${id}.png`));
   }
   await stub.deleteImages(ids); // R2 移行前に Durable Object へ入れた画像も掃除する
+  for (const part of chunkBatch(ids, D1_MAX_BIND)) {
+    await env.DB.prepare(
+      `DELETE FROM image_gc WHERE image_id IN (${part.map(() => '?').join(',')})`,
+    ).bind(...part).run();
+  }
+  return ids.length;
+}
+
+// 「今から使う」画像から掃除の印を外す。参照が付く前に消されるのを防ぐ
+const claimImage = (env, id) =>
+  env.DB.prepare('DELETE FROM image_gc WHERE image_id = ?').bind(id).run();
+
+async function sha256Hex(bytes) {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function safeJsonParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/* ---------- 使われなかった画像の回収（マーク&スイープ） ----------
+ *
+ * 画像編集は「画像を選んだ瞬間」に R2 へ上げ、履歴に載るのは編集が終わってから
+ * なので、その間はどこからも参照されない。見つけ次第消すと編集中のものを
+ * 巻き込むので、まず印を付け、IMAGE_GC_GRACE_MS を越えてなお参照が無いものだけを
+ * 消す。アップロードの問い合わせで「持っている」と答えたときも印を外す
+ * （これから使う気配があるので）。
+ */
+
+// 1 日に 1 度、生成の完了に便乗して裏で走らせる
+async function maybeSweepImages(env, stub) {
+  if (!historyCatalogReady) return; // 移行と参照の作り直しが済んでから
+  const last = safeJsonParse((await getMeta(env, [META_GC_STATS])).get(META_GC_STATS));
+  // 見終わっていないぶんが残っているときは、間隔を待たずに続きへ進む
+  if (last?.done && Date.now() - (last.at ?? 0) < IMAGE_GC_INTERVAL_MS) return;
+  try {
+    await sweepImages(env, stub);
+  } catch {
+    // 掃除の失敗は生成の邪魔をしない。次の機会にまた試す
+  }
+}
+
+async function sweepImages(env, stub) {
+  const now = Date.now();
+  const state = await getMeta(env, [META_GC_CURSOR, META_GC_STATS]);
+  const previous = safeJsonParse(state.get(META_GC_STATS));
+  let cursor = state.get(META_GC_CURSOR) || null;
+  let scanned = 0;
+  let marked = 0;
+  let deleted = 0;
+
+  for (let spent = 1; spent < IMAGE_GC_BUDGET;) {
+    const listed = await env.IMAGES.list({ limit: IMAGE_GC_PAGE, ...(cursor ? { cursor } : {}) });
+    const ids = listed.objects.map((obj) => IMAGE_KEY_RE.exec(obj.key)?.[1]).filter(Boolean);
+    scanned += ids.length;
+    cursor = listed.truncated ? listed.cursor : null;
+    spent += 1; // 列挙そのものは D1 を使わないが、際限なく回さないため数える
+    if (ids.length > 0) {
+      const page = await sweepPage(env, stub, ids, now);
+      marked += page.marked;
+      deleted += page.deleted;
+      spent += page.spent;
+    }
+    if (!cursor) break;
+  }
+
+  await setMeta(env, META_GC_CURSOR, cursor ?? '');
+  const stats = {
+    at: now,
+    scanned,
+    marked,
+    deleted,
+    total: (previous?.total ?? 0) + deleted,
+    done: !cursor, // false なら、まだ見ていない画像が残っている
+  };
+  await setMeta(env, META_GC_STATS, JSON.stringify(stats));
+  return stats;
+}
+
+async function sweepPage(env, stub, ids, now) {
+  let spent = 0;
+  const referenced = new Set();
+  const marks = new Map();
+  for (const part of chunkBatch(ids, D1_MAX_BIND)) {
+    const marksSql = part.map(() => '?').join(',');
+    const refs = await env.DB.prepare(
+      `SELECT DISTINCT image_id FROM history_images WHERE image_id IN (${marksSql})`,
+    ).bind(...part).all();
+    const gc = await env.DB.prepare(
+      `SELECT image_id, marked_at FROM image_gc WHERE image_id IN (${marksSql})`,
+    ).bind(...part).all();
+    spent += 2;
+    for (const row of refs.results) referenced.add(row.image_id);
+    for (const row of gc.results) marks.set(row.image_id, row.marked_at);
+  }
+
+  const adopted = []; // 参照が付いた。印を外す
+  const mark = []; // 参照が無い。まだ消さず、印だけ付ける
+  const drop = []; // 印から猶予を越えて、なお参照が無い
+  for (const id of ids) {
+    if (referenced.has(id)) {
+      if (marks.has(id)) adopted.push(id);
+      continue;
+    }
+    const at = marks.get(id);
+    if (at === undefined) mark.push(id);
+    else if (now - at >= IMAGE_GC_GRACE_MS) drop.push(id);
+  }
+
+  const stmts = [];
+  for (const part of chunkBatch(adopted, D1_MAX_BIND)) {
+    stmts.push(env.DB.prepare(
+      `DELETE FROM image_gc WHERE image_id IN (${part.map(() => '?').join(',')})`,
+    ).bind(...part));
+  }
+  stmts.push(...insertStatements(
+    env.DB, 'image_gc', ['image_id', 'marked_at'], mark.map((id) => [id, now]), 'INSERT OR IGNORE',
+  ));
+  if (stmts.length > 0) {
+    await env.DB.batch(stmts);
+    spent += stmts.length;
+  }
+  if (drop.length > 0) {
+    await deleteImageObjects(env, stub, drop);
+    spent += Math.ceil(drop.length / D1_MAX_BIND);
+  }
+  return { spent, marked: mark.length, deleted: drop.length };
 }
 
 async function historyDelete(env, stub, id) {
@@ -2093,7 +2330,7 @@ export class SyncState extends DurableObject {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const stub = env.STATE.get(env.STATE.idFromName('singleton'));
     // 変更系 API は JSON の Content-Type を必須にする（クロスサイトの form 送信対策）
@@ -2413,7 +2650,10 @@ export default {
             }
           }
         }
-        return Response.json(await historySave(env, record));
+        const saved = await historySave(env, record);
+        // 1 日に 1 度、使われなかった画像の回収に便乗させる。応答は先に返る
+        ctx?.waitUntil?.(maybeSweepImages(env, stub));
+        return Response.json(saved);
       }
       if (request.method === 'DELETE') {
         // 1 リクエストで使えるクエリ数に上限があるので、終わらなければ
@@ -2477,9 +2717,14 @@ export default {
       return Response.json({ url: `/api/image/${id}` });
     }
 
-    // クライアント側で生成した画像（部分編集の切り抜き・合成結果など）の保存先。
-    // base64 の JSON で受け取り R2 に置いて /api/image/<id> の URL を返す（README の案 A）。
-    // meta があれば PNG に生成設定として焼き込む（fal 経由の履歴取り込みと同じ扱い）
+    // クライアント側で作った画像（アップロードした入力画像・切り抜き・合成結果など）の
+    // 保存先。キーは中身の sha256（内容アドレス）なので、同じ画像は同じキーに収まる。
+    // そこで 2 段階にして、持っている画像は送らずに済ませる:
+    //   1) { hash } だけ POST → 持っていれば { url }、無ければ { url: null }
+    //   2) 無かったときだけ { image, meta } を POST
+    // 申告されたハッシュは鍵に使わない（サーバーが計算し直すので、嘘をつかれても
+    // 正しいキーに収まるだけ）。meta があれば PNG に生成設定として焼き込むが、
+    // 焼き込みは鍵を決めたあとなので、キーは「送られてきたバイト列」のハッシュになる
     if (url.pathname === '/api/upload') {
       if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
       if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });
@@ -2489,25 +2734,46 @@ export default {
       } catch {
         return new Response('Invalid JSON', { status: 400 });
       }
-      const decoded = decodeImageDataUri(body?.image);
+      await ensureHistoryCatalog(env, stub);
+
+      // 1) 持っているかの問い合わせ（本文に画像を含めない）
+      if (body?.image === undefined) {
+        const hash = typeof body?.hash === 'string' ? body.hash.toLowerCase() : '';
+        if (!/^[0-9a-f]{64}$/.test(hash)) {
+          return new Response('hash must be a sha-256 hex digest', { status: 422 });
+        }
+        if (!(await env.IMAGES.head(`${hash}.png`))) return Response.json({ url: null });
+        await claimImage(env, hash); // これから使うので、掃除の印を外す
+        return Response.json({ url: `/api/image/${hash}` });
+      }
+
+      // 2) 本体を受け取る
+      const decoded = decodeImageDataUri(body.image);
       if (!decoded) return new Response('image must be a base64 image data URI', { status: 422 });
       if (decoded.bytes.length > UPLOAD_MAX_BYTES) {
         return new Response('Image too large', { status: 413 });
       }
+      const id = await sha256Hex(decoded.bytes);
       let buf = decoded.bytes.buffer;
       if (body.meta && typeof body.meta === 'object') {
         buf = embedPngMetadata(buf, JSON.stringify(body.meta));
       }
-      // replace 指定があれば同じキーへ上書きする。画像編集のマスクを後から
-      // 変えたときに、合成画像が 1 回ごとに増えて置き去りになるのを防ぐ。
-      // 配信は immutable キャッシュなので、URL に版を付けて返す
-      const replaceId = localImageId(body?.replace);
-      const id = replaceId ?? randomId();
-      await env.IMAGES.put(`${id}.png`, buf, {
-        httpMetadata: { contentType: decoded.mime },
-      });
-      return Response.json({ url: replaceId ? `/api/image/${id}?v=${Date.now()}` : `/api/image/${id}` });
+      await env.IMAGES.put(`${id}.png`, buf, { httpMetadata: { contentType: decoded.mime } });
+      await claimImage(env, id);
+      return Response.json({ url: `/api/image/${id}` });
     }
+
+    // 使われなかった画像の回収。GET は最後の結果（統計に出す）、POST でその場で実行する
+    if (url.pathname === '/api/images/sweep') {
+      await ensureHistoryCatalog(env, stub);
+      if (request.method === 'GET') {
+        const state = await getMeta(env, [META_GC_STATS]);
+        return Response.json(safeJsonParse(state.get(META_GC_STATS)) ?? { at: null, total: 0 });
+      }
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+      return Response.json(await sweepImages(env, stub));
+    }
+
 
     // Poe（OpenAI 互換 API）での部分AI編集ジョブの投入。API キー（Secret の
     // POE_API_KEY）は Worker で付与し、ブラウザには渡さない。実際の呼び出しは
@@ -2534,7 +2800,7 @@ export default {
       if (typeof prompt !== 'string' || prompt.trim() === '' || prompt.length > 8000) {
         return new Response('prompt is required', { status: 422 });
       }
-      if (typeof imageId !== 'string' || !/^[0-9a-f]{32}$/.test(imageId)) {
+      if (typeof imageId !== 'string' || !IMAGE_ID_RE.test(imageId)) {
         return new Response('imageId is required', { status: 422 });
       }
       if (parameters != null && (typeof parameters !== 'object' || Array.isArray(parameters)
@@ -2681,7 +2947,7 @@ export default {
 
     // 保存済み生成画像の配信（/api/krea2/image/ は旧 URL 互換）。
     // R2 を正とし、見つからなければ旧 DO ストレージ（R2 移行前の画像）を辿る。
-    const imageMatch = url.pathname.match(/^\/api(?:\/krea2)?\/image\/([0-9a-f]{32})$/);
+    const imageMatch = url.pathname.match(/^\/api(?:\/krea2)?\/image\/([0-9a-f]{64}|[0-9a-f]{32})$/);
     if (imageMatch) {
       if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
       const obj = await env.IMAGES.get(`${imageMatch[1]}.png`);

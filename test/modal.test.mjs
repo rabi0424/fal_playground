@@ -84,14 +84,26 @@ async function storedBytes(env, url) {
   return new Response(obj.body).arrayBuffer();
 }
 
-// 保存した PNG に焼き込んだ JSON を読み出す
+// 保存した PNG に焼き込んだ JSON を読み出す。
+//
+// チャンクの構造をたどって長さで切り出す。以前は「iTXt のあとの最初の { から、
+// IDAT の手前の最後の } まで」で拾っていたが、iTXt の CRC 4 バイトに 0x7D（}）が
+// 出ると終端を誤り、JSON のうしろにゴミが付いて時々パースに失敗していた
 function readEmbeddedMeta(buf) {
-  const text = Buffer.from(buf).toString('latin1');
-  const at = text.indexOf('iTXt');
-  assert.ok(at > 0, 'iTXt チャンクがありません');
-  const start = text.indexOf('{', at);
-  const end = text.lastIndexOf('}', text.indexOf('IDAT', at));
-  return JSON.parse(Buffer.from(text.slice(start, end + 1), 'latin1').toString('utf8'));
+  const bytes = new Uint8Array(buf);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let at = 8; at + 8 <= bytes.length;) { // 8 はシグネチャ
+    const len = view.getUint32(at);
+    const type = String.fromCharCode(...bytes.subarray(at + 4, at + 8));
+    if (type === 'iTXt') {
+      const data = bytes.subarray(at + 8, at + 8 + len);
+      // keyword \0 圧縮フラグ 圧縮方式 言語タグ \0 翻訳キーワード \0 本文（= \0 が 5 つ）
+      const body = data.subarray(data.indexOf(0) + 5);
+      return JSON.parse(new TextDecoder().decode(body));
+    }
+    at += 12 + len; // 長さ 4 + 種別 4 + 本体 + CRC 4
+  }
+  return assert.fail('iTXt チャンクがありません');
 }
 
 const tests = [];

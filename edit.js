@@ -136,14 +136,13 @@ async function postJson(url, body) {
   return res.json();
 }
 
-// クライアント側で作った画像を R2 へ置き、/api/image/<id> の URL を得る
-async function uploadImage(dataUri, meta) {
-  const out = await postJson('/api/upload', meta ? { image: dataUri, meta } : { image: dataUri });
-  return out.url;
-}
+// クライアント側で作った画像を R2 へ置き、/api/image/<id> の URL を得る。
+// キーは中身の sha256 なので、同じ画像なら送らずに済む（image-upload.js）
+const uploadImage = (dataUri, meta) => falUpload.put(dataUri, meta);
 
+// 64 桁は内容アドレス（sha256）、32 桁はそうする前に置いた画像
 function imageIdFromUrl(u) {
-  const m = typeof u === 'string' ? u.match(/^\/api\/image\/([0-9a-f]{32})$/) : null;
+  const m = typeof u === 'string' ? u.match(/^\/api\/image\/([0-9a-f]{64}|[0-9a-f]{32})$/) : null;
   return m ? m[1] : null;
 }
 

@@ -1380,6 +1380,14 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
 }
 
 .stats-empty { color: var(--muted); font-size: 13px; }
+/* 未使用画像の回収の結果。モデル別の統計とは別ものなので、区切って小さく出す */
+.stats-sweep {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
 
 .stats-group {
   display: flex;

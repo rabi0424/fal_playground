@@ -170,12 +170,24 @@ export function makeBucket(counters) {
       counters.sub++;
       for (const k of [].concat(keys)) objects.delete(k);
     },
-    async list({ prefix } = {}) {
+    async head(key) {
       counters.sub++;
+      const obj = objects.get(key);
+      return obj ? { key, size: obj.body.length, uploaded: obj.uploaded } : null;
+    },
+    // 本物はキー順に返し、続きがあれば truncated + cursor を付ける。
+    // カーソルの中身は不透明だが、ここでは「最後に返したキー」で代用する
+    async list({ prefix, limit = 1000, cursor } = {}) {
+      counters.sub++;
+      const keys = [...objects.keys()].sort()
+        .filter((k) => (!prefix || k.startsWith(prefix)) && (cursor === undefined || k > cursor));
+      const page = keys.slice(0, limit);
       return {
-        objects: [...objects.entries()]
-          .filter(([k]) => !prefix || k.startsWith(prefix))
-          .map(([key, o]) => ({ key, uploaded: o.uploaded, size: o.body.length })),
+        objects: page.map((key) => ({
+          key, uploaded: objects.get(key).uploaded, size: objects.get(key).body.length,
+        })),
+        truncated: keys.length > page.length,
+        cursor: page.length > 0 ? page[page.length - 1] : undefined,
       };
     },
     async createMultipartUpload(key) {

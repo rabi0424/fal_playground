@@ -38,10 +38,23 @@ CREATE INDEX IF NOT EXISTS history_source_seq ON history (source, seq DESC);
 CREATE TABLE IF NOT EXISTS history_images (
   url        TEXT NOT NULL,
   history_id TEXT NOT NULL,
+  -- 自分が配信している画像（/api/image/<id>）のときだけ id が入る。外部 CDN は NULL。
+  -- 回収はこの列だけを見るので、URL 文字列の形に振り回されずに済む
+  image_id   TEXT,
   PRIMARY KEY (url, history_id)
 );
 
 CREATE INDEX IF NOT EXISTS history_images_owner ON history_images (history_id);
+CREATE INDEX IF NOT EXISTS history_images_image ON history_images (image_id);
+
+-- 使われなかった画像の回収（マーク&スイープ）の印。
+-- 画像編集は「画像を選んだ瞬間」に R2 へ上げ、履歴に載るのは編集が終わってから
+-- なので、参照が無いだけでは消せない。まず印を付け、猶予（既定 1 週間）を越えて
+-- なお参照が無いものだけを消す
+CREATE TABLE IF NOT EXISTS image_gc (
+  image_id  TEXT PRIMARY KEY,
+  marked_at INTEGER NOT NULL
+);
 
 -- 移行済みフラグなど、単発の覚書
 CREATE TABLE IF NOT EXISTS meta (

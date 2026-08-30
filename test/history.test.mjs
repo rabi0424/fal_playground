@@ -260,6 +260,118 @@ test('全消しは実体も画像も消し、終わらなければ done: false �
   assert.deepEqual(await listIds(mod, env), []);
 });
 
+/* ---- 使われなかった画像の回収 ---- */
+
+const sweep = async (mod, env) =>
+  (await call(mod, env, '/api/images/sweep', { method: 'POST' })).json();
+
+const marks = (env) => rows(env, 'SELECT image_id, marked_at FROM image_gc');
+
+const backdate = (env, ms) =>
+  env.d1.db.prepare('UPDATE image_gc SET marked_at = ?').run(Date.now() - ms);
+
+const WEEK = 7 * 24 * 60 * 60 * 1000;
+
+test('使われなかった画像は、印を付けてから猶予を越えたときだけ消える', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  await env.IMAGES.put(`${imageId(1)}.png`, 'png'); // 記録から参照される
+  await env.IMAGES.put(`${imageId(2)}.png`, 'png'); // 誰も使わない
+  await env.IMAGES.put('lora-staging/abc.safetensors', 'x'); // 触ってはいけない
+  await postRecord(mod, env, { id: 'r1', images: [{ url: imageUrl(1) }] });
+
+  // 1 回目は印を付けるだけ。編集中の画像を巻き込まないため、その場では消さない
+  const first = await sweep(mod, env);
+  assert.deepEqual([first.marked, first.deleted], [1, 0]);
+  assert.deepEqual((await marks(env)).map((r) => r.image_id), [imageId(2)]);
+  assert.ok(await env.bucket.get(`${imageId(2)}.png`), '1 回目で消えています');
+
+  // 猶予の内側なら、何度走らせても消えない
+  assert.equal((await sweep(mod, env)).deleted, 0);
+
+  backdate(env, WEEK + 1000);
+  const third = await sweep(mod, env);
+  assert.equal(third.deleted, 1);
+  assert.equal(await env.bucket.get(`${imageId(2)}.png`), null, '猶予を越えても残っています');
+  assert.ok(await env.bucket.get(`${imageId(1)}.png`), '参照されている画像を消しています');
+  assert.ok(await env.bucket.get('lora-staging/abc.safetensors'), 'LoRA の一時ファイルを消しています');
+  assert.equal((await marks(env)).length, 0, '消したのに印が残っています');
+});
+
+test('印が付いたあとで参照が付いたら、印は外れる', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  // 画像編集は「画像を選んだ瞬間」に上げるので、しばらく参照ゼロのまま置かれる
+  await env.IMAGES.put(`${imageId(3)}.png`, 'png');
+  await sweep(mod, env);
+  assert.equal((await marks(env)).length, 1);
+
+  // 編集が終わって履歴に載る
+  await postRecord(mod, env, { id: 'r1', images: [{ url: imageUrl(3) }] });
+  backdate(env, WEEK + 1000); // 猶予は越えているが、もう参照がある
+  const after = await sweep(mod, env);
+  assert.equal(after.deleted, 0, '参照が付いた画像を消しています');
+  assert.equal((await marks(env)).length, 0, '印が外れていません');
+  assert.ok(await env.bucket.get(`${imageId(3)}.png`));
+});
+
+test('アップロードの問い合わせで「持っている」と答えたら、印を外す', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  const hash = 'a'.repeat(64); // 内容アドレス（sha256）のキー
+  await env.IMAGES.put(`${hash}.png`, 'png');
+  await sweep(mod, env);
+  assert.deepEqual((await marks(env)).map((r) => r.image_id), [hash]);
+
+  const probe = await (await call(mod, env, '/api/upload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hash }),
+  })).json();
+  assert.equal(probe.url, `/api/image/${hash}`);
+  assert.equal((await marks(env)).length, 0, '使う気配があるのに印が残っています');
+
+  // 印が無いので、次の掃除は「付け直す」ところからやり直しになる
+  backdate(env, WEEK + 1000);
+  assert.equal((await sweep(mod, env)).deleted, 0, '猶予を待たずに消しています');
+});
+
+test('掃除の結果は meta に残り、累計が積み上がる', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  for (let i = 1; i <= 3; i++) await env.IMAGES.put(`${imageId(i)}.png`, 'png');
+
+  await sweep(mod, env);
+  backdate(env, WEEK + 1000);
+  const run = await sweep(mod, env);
+  assert.deepEqual([run.deleted, run.total, run.done], [3, 3, true]);
+
+  // 最後の結果は GET で読める（統計の表示に使う）
+  const shown = await (await call(mod, env, '/api/images/sweep')).json();
+  assert.equal(shown.total, 3);
+  assert.equal(shown.deleted, 3);
+  assert.ok(shown.at > 0);
+});
+
+test('1 回で見切れないときは、続きから見る', async () => {
+  const mod = await loadWorker([['const IMAGE_GC_PAGE = 200;', 'const IMAGE_GC_PAGE = 2;'],
+    ['const IMAGE_GC_BUDGET = 30;', 'const IMAGE_GC_BUDGET = 4;']]);
+  const env = makeEnv(mod);
+  for (let i = 1; i <= 8; i++) await env.IMAGES.put(`${imageId(i)}.png`, 'png');
+
+  const first = await sweep(mod, env);
+  assert.equal(first.done, false, '一度で見終わったことになっています');
+  assert.ok(first.scanned < 8 && first.scanned > 0, `scanned=${first.scanned}`);
+
+  let seen = first.scanned;
+  for (let guard = 0; guard < 10; guard++) {
+    const next = await sweep(mod, env);
+    seen += next.scanned;
+    if (next.done) break;
+  }
+  assert.equal((await marks(env)).length, 8, `印が付いたのは ${(await marks(env)).length} 件`);
+});
+
 /* ---- Durable Object からの移行 ---- */
 
 // 索引まで作られた状態（前のレイアウト）の Durable Object を用意する
@@ -297,7 +409,7 @@ test('Durable Object に貯まっていた履歴が、並び順そのままで D
 });
 
 test('移行が 1 リクエストで終わらなくても、続きから移り切る', async () => {
-  const mod = await loadWorker([['const HISTORY_MIGRATE_BUDGET = 24;', 'const HISTORY_MIGRATE_BUDGET = 2;'],
+  const mod = await loadWorker([['const HISTORY_MIGRATE_BUDGET = 20;', 'const HISTORY_MIGRATE_BUDGET = 2;'],
     ['const HISTORY_MIGRATE_BATCH = 60;', 'const HISTORY_MIGRATE_BATCH = 5;']]);
   const env = makeEnv(mod, await seedDurableObject(mod, 20));
 
