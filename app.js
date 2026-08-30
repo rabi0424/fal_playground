@@ -1992,6 +1992,18 @@ async function downloadImage(url, filename) {
   }
 }
 
+// 自分が配信している画像か（/api/krea2/image/... は旧 URL 互換）
+const isStoredImage = (url) => typeof url === 'string' && /^\/api(\/krea2)?\/image\//.test(url);
+
+// まだ取り込めていない画像（プロバイダの CDN の URL のまま）を持つ記録。
+// 相手が消せばこちらからは失われるので、ギャラリーでひと目で分かるようにする
+function hasExternalImage(record) {
+  const lists = Array.isArray(record.variants)
+    ? record.variants.map((v) => v.images ?? [])
+    : [record.images ?? []];
+  return lists.some((images) => images.some((img) => img?.url && !isStoredImage(img.url)));
+}
+
 function galleryThumbUrl(record) {
   if (record.type === 'compare') {
     return record.variants.find((v) => v.images?.length)?.images[0]?.url ?? '';
@@ -2078,6 +2090,16 @@ function galleryItemEl(record) {
     const badge = document.createElement('span');
     badge.className = 'compare-badge';
     badge.textContent = `比較 ×${record.variants.length}`;
+    item.appendChild(badge);
+  }
+
+  if (hasExternalImage(record)) {
+    item.classList.add('external');
+    const badge = document.createElement('span');
+    badge.className = 'external-badge';
+    badge.textContent = '未取り込み';
+    badge.title = 'この記録の画像は、まだサーバーに取り込まれていません。'
+      + '提供元の CDN が消すと失われます（しばらく使っていると裏で取り込まれます）。';
     item.appendChild(badge);
   }
 

@@ -38,8 +38,10 @@ CREATE INDEX IF NOT EXISTS history_source_seq ON history (source, seq DESC);
 CREATE TABLE IF NOT EXISTS history_images (
   url        TEXT NOT NULL,
   history_id TEXT NOT NULL,
-  -- 自分が配信している画像（/api/image/<id>）のときだけ id が入る。外部 CDN は NULL。
-  -- 回収はこの列だけを見るので、URL 文字列の形に振り回されずに済む
+  -- 自分が配信している画像（/api/image/<id>）のときだけ id が入る。回収はこの列
+  -- だけを見るので、URL 文字列の形に振り回されずに済む。
+  --   NULL … まだ取り込めていない外部 URL（裏の片付けが拾いに行く）
+  --   ''   … 取り込みを試したが取れなかった（失効済みなど。もう試さない）
   image_id   TEXT,
   PRIMARY KEY (url, history_id)
 );

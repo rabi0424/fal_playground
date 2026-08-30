@@ -55,8 +55,14 @@ const imageUrl = (n) => `/api/image/${imageId(n)}`;
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
+// 裏の片付けは ctx.waitUntil に乗せて応答のあとに走る。本物と同じ形で受けて、
+// settle() で終わるまで待てるようにする
+const pending = [];
 const call = (mod, env, path, init) =>
-  mod.default.fetch(new Request(`https://x${path}`, init), env);
+  mod.default.fetch(new Request(`https://x${path}`, init), env, {
+    waitUntil: (promise) => pending.push(promise),
+  });
+const settle = () => Promise.all(pending.splice(0));
 
 const postRecord = (mod, env, record) => call(mod, env, '/api/history', {
   method: 'POST',
@@ -334,6 +340,97 @@ test('1 リクエストの D1 クエリ数は、無料プランの上限（50）
   }
   // 裏の片付け（スキーマ更新・参照の作り直し）が一覧を巻き添えにしないこと
   assert.ok(worst <= 50, `1 リクエストで ${worst} クエリ使っています`);
+});
+
+/* ---- 外部 URL の取り込み ---- */
+
+// 外部 CDN の画像を返す fetch。取れない URL は 404 にする
+function stubCdn(alive = true) {
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  const asked = [];
+  globalThis.fetch = async (url) => {
+    asked.push(String(url));
+    if (!alive) return new Response('gone', { status: 404 });
+    return new Response(png, { headers: { 'Content-Type': 'image/png' } });
+  };
+  return asked;
+}
+
+const CDN = 'https://d2h7xmz5gqybh9.cloudfront.net/output/a.png';
+
+test('保存のとき、プロバイダのドメインでなくても取り込む', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  const asked = stubCdn();
+
+  // WaveSpeed は出力を別ドメインの CDN で返す。以前はここが許可リストから漏れていた
+  const saved = await (await postRecord(mod, env, {
+    id: 'r1', ts: Date.now(), model: 'wavespeed-ai/qwen-image/edit-2511-lora',
+    images: [{ url: CDN }],
+  })).json();
+
+  assert.equal(asked.length, 1, '取りに行っていません');
+  assert.match(saved.images[0].url, /^\/api\/image\/[0-9a-f]{64}$/, `取り込まれていません: ${saved.images[0].url}`);
+  assert.equal(env.bucket.objects.size, 1);
+  // 参照にも id が入る（＝回収の対象になり、未取り込みの印も消える）
+  assert.equal(rows(env, 'SELECT url FROM history_images WHERE image_id IS NULL').length, 0);
+});
+
+test('相対 URL（取り込み済み）は取りに行かない', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  const asked = stubCdn();
+
+  await postRecord(mod, env, { id: 'r1', images: [{ url: imageUrl(1) }] });
+  assert.deepEqual(asked, [], '保存済みの画像を取りに行っています');
+});
+
+test('取り込み漏れは、あとから裏で拾われる', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  stubCdn();
+
+  // 取り込みの条件を広げる前に保存されたぶん（外部 URL のまま）を作る
+  await postRecord(mod, env, { id: 'r1', images: [{ url: CDN }, { url: imageUrl(1) }] });
+  env.d1.db.prepare('UPDATE history SET record = ? WHERE id = ?')
+    .run(JSON.stringify({ id: 'r1', images: [{ url: CDN }, { url: imageUrl(1) }] }), 'r1');
+  env.d1.db.prepare('DELETE FROM history_images').run();
+  env.d1.db.prepare('INSERT INTO history_images (url, history_id, image_id) VALUES (?,?,NULL),(?,?,?)')
+    .run(CDN, 'r1', imageUrl(1), 'r1', imageId(1));
+  env.bucket.objects.clear();
+
+  // 一覧の取得に便乗して片付けが走る（応答は先に返るので、ここでは直接呼ぶ）
+  await call(mod, env, '/api/history');
+  await settle();
+
+  const record = await (await call(mod, env, '/api/history/r1')).json();
+  assert.match(record.images[0].url, /^\/api\/image\/[0-9a-f]{64}$/, 'レコードの URL が差し替わっていません');
+  assert.equal(record.images[1].url, imageUrl(1), 'ほかの画像まで書き換えています');
+  assert.equal(rows(env, 'SELECT url FROM history_images WHERE image_id IS NULL').length, 0);
+  assert.equal(rows(env, `SELECT url FROM history_images WHERE url = '${CDN}'`).length, 0,
+    '差し替え前の参照が残っています');
+});
+
+test('もう取れない URL は、印を付けて何度も試さない', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  stubCdn();
+  await postRecord(mod, env, { id: 'r1', images: [{ url: imageUrl(1) }] });
+  // 失効した外部 URL を 1 件だけ足す
+  env.d1.db.prepare('INSERT INTO history_images (url, history_id, image_id) VALUES (?,?,NULL)')
+    .run(CDN, 'r1');
+
+  const asked = stubCdn(false); // 404 が返る
+  await call(mod, env, '/api/history');
+  await settle();
+  assert.equal(asked.length, 1, '取りに行っていません');
+
+  await call(mod, env, '/api/history');
+  await settle();
+  assert.equal(asked.length, 1, '取れない URL を何度も試しています');
 });
 
 /* ---- 使われなかった画像の回収 ---- */

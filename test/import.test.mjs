@@ -544,10 +544,15 @@ async function testCaptureEndpoint() {
   // 引くので、一覧を返すだけのモックでは経路が変わってしまう
   const stub = new mod.SyncState({ storage: makeStorage() }, { IMAGES: bucket });
   const d1 = makeD1();
+  // 保存のときは取りに行けなかった（相手の CDN が落ちていた）ことにして、
+  // 外部 URL のまま履歴に残った状態を作る。あとから /api/capture で拾う経路の確認
   const fetched = [];
+  let cdnAlive = false;
   globalThis.fetch = async (u) => {
     fetched.push(String(u));
-    return new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'image/png' } });
+    return cdnAlive
+      ? new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'image/png' } })
+      : new Response('down', { status: 503 });
   };
   const env = {
     IMAGES: bucket,
@@ -568,17 +573,22 @@ async function testCaptureEndpoint() {
     body: JSON.stringify(body),
   }), env);
 
+  assert.equal(fetched.length, 1, '保存のときに取りに行っていない');
+  assert.equal(bucket.objects.size, 0, '取れなかったのに保存されている');
+
+  cdnAlive = true;
   const ok = await call({ url: 'https://cdn.example.com/a.png' });
   assert.equal(ok.status, 200);
-  assert.match((await ok.json()).url, /^\/api\/image\/[0-9a-f]{32}$/);
+  // キーは中身の sha256（内容アドレス）
+  assert.match((await ok.json()).url, /^\/api\/image\/[0-9a-f]{64}$/);
   assert.equal(bucket.objects.size, 1, 'R2 に取り込まれていない');
-  assert.equal(fetched.length, 1);
+  assert.equal(fetched.length, 2);
 
   // 履歴に無い URL は取り込まない（任意の URL を取りに行かせない）
   assert.equal((await call({ url: 'https://cdn.example.com/other.png' })).status, 403);
   assert.equal((await call({ url: 'http://cdn.example.com/a.png' })).status, 403);
   assert.equal((await call({ url: 'not a url' })).status, 422);
-  assert.equal(fetched.length, 1, '拒否したはずの URL を取りに行っている');
+  assert.equal(fetched.length, 2, '拒否したはずの URL を取りに行っている');
   console.log('✓ capture: 履歴にある外部画像だけを R2 へ取り込む');
 }
 

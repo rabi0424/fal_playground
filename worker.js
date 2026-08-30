@@ -61,10 +61,15 @@ const JOB_MAX_SUBMIT_ATTEMPTS = 2; // 送信自体の再試行上限（多重生
 // 画像に焼き込む「何で作ったか」。ジョブの kind から引く（既定は生成）
 const JOB_SOURCES = { edit: 'wan-vace-edit', inpaint: 'lanpaint-inpaint' };
 
-// 履歴追加時に取り込む外部画像のホスト（fal / WaveSpeed / Runware の CDN）。
-// それ以外は取り込まず URL のまま残す。プロバイダ側の URL は失効しうるので、
-// 履歴に残すものは自分の R2 に持ってくる
-const CAPTURE_HOSTS = /(^|\.)(fal\.(media|ai|run)|wavespeed\.ai|runware\.ai)$/;
+// プロバイダ側の URL は失効しうるので、履歴に残す画像はすべて自分の R2 に取り込む。
+//
+// 以前はホストの許可リスト（fal / WaveSpeed / Runware のドメイン）で絞っていたが、
+// WaveSpeed は出力を別ドメインの CDN（CloudFront）から配信するため漏れていて、
+// 編集結果が相手の CDN にしか無い状態で履歴に残っていた。そして許可リストは
+// 踏み台対策としても効いていない（任意の URL を含むレコードを保存してから
+// /api/capture を呼べば取り込めるので、所有者にとっての制限になっていない）。
+// このアプリは Cloudflare Access の内側にあり、対象は自分が保存するレコードに
+// 載っている URL だけなので、https の画像はすべて取り込む
 
 // Poe の OpenAI 互換 API（部分AI編集で使用）。キーは Worker の Secret（POE_API_KEY）
 const POE_API_URL = 'https://api.poe.com/v1/chat/completions';
@@ -567,6 +572,9 @@ const IMAGE_GC_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 const IMAGE_GC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 便乗実行の間隔
 const IMAGE_GC_BUDGET = 30; // 1 回の掃除で使う D1 クエリ数の上限
 const IMAGE_GC_PAGE = 200; // R2 を 1 度に列挙する件数
+// 取り込み漏れを 1 回で何枚拾うか。1 枚につき外部への取得・R2 への保存・
+// D1 の書き換えが要るので、無料プランの 1 リクエスト 50 クエリに収まる数にする
+const HISTORY_CAPTURE_BUDGET = 6;
 
 const HISTORY_COLS = ['seq', 'id', 'source', 'type', 'created', 'model', 'prompt', 'record', 'mask'];
 
@@ -839,6 +847,25 @@ async function deleteImageObjects(env, stub, ids) {
 const claimImage = (env, id) =>
   env.DB.prepare('DELETE FROM image_gc WHERE image_id = ?').bind(id).run();
 
+// 外部にある画像を R2 へ取り込んで、同一オリジンの URL を返す（取れなければ null）。
+// キーは中身の sha256 なので、同じ画像を二度取り込んでも 1 つに収まる
+async function captureExternalImage(env, src, meta = null) {
+  const res = await fetch(src, { signal: apiSignal() });
+  if (!res.ok) return null;
+  const type = (res.headers.get('Content-Type') ?? '').split(';')[0].trim();
+  if (!type.startsWith('image/')) return null;
+  const buf = await res.arrayBuffer();
+  if (buf.byteLength > UPLOAD_MAX_BYTES) return null;
+
+  // 鍵は「取ってきたバイト列」のハッシュ。meta の焼き込みはそのあとなので、
+  // 保存されたファイル自身のハッシュとは一致しない（/api/upload と揃えてある）
+  const id = await sha256Hex(new Uint8Array(buf));
+  const body = meta ? embedPngMetadata(buf, JSON.stringify(meta)) : buf;
+  await env.IMAGES.put(`${id}.png`, body, { httpMetadata: { contentType: type } });
+  await claimImage(env, id);
+  return `/api/image/${id}`;
+}
+
 async function sha256Hex(bytes) {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -861,7 +888,75 @@ function safeJsonParse(text) {
  * （これから使う気配があるので）。
  */
 
-// 1 日に 1 度、生成の完了に便乗して裏で走らせる
+// 一覧の取得や生成の完了に便乗して、裏で片付けを進める（応答は先に返っている）。
+// 取り込み漏れを片付けてから、使われなかった画像の回収へ進む。
+//
+// 「もう漏れは無い」を覚え込ませないこと。保存のときに相手の CDN が一時的に
+// 落ちていれば、あとから漏れが増える。残りの確認は 1 クエリで済むので、
+// 毎回聞き直すほうが安い
+async function runHousekeeping(env, stub) {
+  if (!historyCatalogReady) return; // 引き取りと参照の作り直しが済んでから
+  try {
+    if (!(await captureMissingImages(env))) return; // 残っているうちはそちらを優先
+    await maybeSweepImages(env, stub);
+  } catch {
+    // 片付けの失敗で表の動きを止めない。次の機会にまた試す
+  }
+}
+
+// 履歴に残っている外部 URL を R2 へ取り込む。取り込みの条件を広げる前に保存した
+// ぶん（プロバイダの CDN が別ドメインで、許可リストから漏れていた）が対象。
+// 残りが無くなったら true
+async function captureMissingImages(env) {
+  const { results } = await env.DB.prepare(
+    'SELECT DISTINCT url FROM history_images WHERE image_id IS NULL LIMIT ?',
+  ).bind(HISTORY_CAPTURE_BUDGET).all();
+  if (results.length === 0) return true;
+
+  for (const { url } of results) {
+    let local = null;
+    try {
+      const src = new URL(url);
+      if (src.protocol === 'https:') local = await captureExternalImage(env, src);
+    } catch {
+      local = null; // URL として読めない・取得できない
+    }
+    if (local) {
+      await replaceHistoryImageUrl(env, url, local);
+      continue;
+    }
+    // もう取れない URL（失効済みなど）。毎回試し続けないよう、空文字を
+    // 「試したが取り込めなかった」印として置く（id としては何にも一致しない）
+    await env.DB.prepare("UPDATE history_images SET image_id = '' WHERE url = ?").bind(url).run();
+  }
+  return false; // まだ残っているかもしれないので、次の機会に続ける
+}
+
+// 取り込んだ画像の URL を、それを載せているレコードすべてで差し替える
+async function replaceHistoryImageUrl(env, from, to) {
+  const { results } = await env.DB.prepare(
+    'SELECT h.id AS id, h.record AS record FROM history h'
+    + ' JOIN history_images i ON i.history_id = h.id WHERE i.url = ?',
+  ).bind(from).all();
+
+  const stmts = [];
+  for (const row of results) {
+    const record = JSON.parse(row.record);
+    for (const { images } of recordImageLists(record)) {
+      for (const img of images) if (img?.url === from) img.url = to;
+    }
+    stmts.push(env.DB.prepare('UPDATE history SET record = ? WHERE id = ?')
+      .bind(JSON.stringify(record), row.id));
+  }
+  stmts.push(env.DB.prepare('DELETE FROM history_images WHERE url = ?').bind(from));
+  stmts.push(...insertStatements(
+    env.DB, 'history_images', IMAGE_LINK_COLS,
+    results.map((row) => [to, row.id, localImageId(to)]), 'INSERT OR IGNORE',
+  ));
+  await env.DB.batch(stmts);
+}
+
+// 1 日に 1 度、裏で走らせる
 async function maybeSweepImages(env, stub) {
   if (!historyCatalogReady) return; // 移行と参照の作り直しが済んでから
   const last = safeJsonParse((await getMeta(env, [META_GC_STATS])).get(META_GC_STATS));
@@ -2623,6 +2718,8 @@ export default {
         // 続きの位置はヘッダで返し、本文は今までどおり配列のままにしておく。
         // デプロイ直後にまだ古い JS を持っているタブでも、直近の 1 ページぶんは
         // そのまま表示できる（読み込み直せば続きも追うようになる）
+        // 片付けは裏で。一覧はページごとに来るので、先頭ページのときだけ乗せる
+        if (!url.searchParams.get('cursor')) ctx?.waitUntil?.(runHousekeeping(env, stub));
         return Response.json(records, {
           headers: cursor ? { 'X-Next-Cursor': String(cursor) } : {},
         });
@@ -2647,34 +2744,27 @@ export default {
             } catch {
               continue; // 相対 URL（取り込み済みのローカル画像）はそのまま
             }
-            if (src.protocol !== 'https:' || !CAPTURE_HOSTS.test(src.hostname)) continue;
+            if (src.protocol !== 'https:') continue;
             try {
-              const res = await fetch(src);
-              if (!res.ok) continue;
-              const meta = {
+              const local = await captureExternalImage(env, src, {
                 app: 'fal playground',
-                source: 'fal',
+                source: 'capture',
                 model: record.model,
                 prompt: record.prompt,
                 seed: record.seed ?? null,
                 ...(loras?.length ? { loras } : {}),
                 ...(record.input ? { input: record.input } : {}),
                 created: new Date(record.ts || Date.now()).toISOString(),
-              };
-              const buf = embedPngMetadata(await res.arrayBuffer(), JSON.stringify(meta));
-              const id = randomId();
-              await env.IMAGES.put(`${id}.png`, buf, {
-                httpMetadata: { contentType: 'image/png' },
               });
-              img.url = `/api/image/${id}`;
+              if (local) img.url = local;
             } catch {
-              // 取得できなければ元の URL のまま残す（表示は CDN の失効まで可能）
+              // 取得できなければ元の URL のまま残す（表示は CDN の失効まで可能）。
+              // 取りこぼしは captureMissingImages があとから拾う
             }
           }
         }
         const saved = await historySave(env, record);
-        // 1 日に 1 度、使われなかった画像の回収に便乗させる。応答は先に返る
-        ctx?.waitUntil?.(maybeSweepImages(env, stub));
+        ctx?.waitUntil?.(runHousekeeping(env, stub)); // 片付けは裏で。応答は先に返る
         return Response.json(saved);
       }
       if (request.method === 'DELETE') {
@@ -2728,15 +2818,9 @@ export default {
         return new Response('Unknown image', { status: 403 });
       }
 
-      const res = await fetch(src, { signal: apiSignal() });
-      if (!res.ok) return new Response('Upstream error', { status: 502 });
-      const buf = await res.arrayBuffer();
-      if (buf.byteLength > UPLOAD_MAX_BYTES) return new Response('Image too large', { status: 413 });
-      const id = randomId();
-      await env.IMAGES.put(`${id}.png`, buf, {
-        httpMetadata: { contentType: res.headers.get('Content-Type') || 'image/png' },
-      });
-      return Response.json({ url: `/api/image/${id}` });
+      const local = await captureExternalImage(env, src);
+      if (!local) return new Response('Upstream error', { status: 502 });
+      return Response.json({ url: local });
     }
 
     // クライアント側で作った画像（アップロードした入力画像・切り抜き・合成結果など）の
