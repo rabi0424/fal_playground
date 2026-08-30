@@ -738,6 +738,22 @@ details.lora-accordion { display: block; }
 
 .compare-col .ghost-btn { align-self: flex-start; }
 
+/* 実行中に出ているのは前回の結果。新しいものと取り違えないよう、
+   薄くして見出しに印を出す（出来上がったら元に戻る） */
+.edit-result .stale-badge { display: none; }
+.edit-result.stale .stale-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--warn);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+.edit-result.stale img { opacity: 0.55; }
+
 /* まだサーバーに取り込めていない画像を持つ記録。提供元の CDN が消したら
    失われるので、枠と印で見分けられるようにする。裏の片付けで取り込まれれば、
    次にギャラリーを取り直したときに消える */

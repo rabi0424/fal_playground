@@ -853,6 +853,8 @@ function updateExecState() {
     || els.editPrompt.value.trim() === ''
     || !/^[\w.-]{1,64}$/.test(model);
   els.btnExec.textContent = running ? '実行中…' : '実行する';
+  // 実行中に出ているのは前回の結果。新しいものと取り違えないよう印を出す
+  els.resultPanel.classList.toggle('stale', running && !els.resultPanel.hidden);
 }
 
 async function execute() {
@@ -869,7 +871,9 @@ async function execute() {
   }
 
   setEditError('');
-  hideResult();
+  // 前回の結果は消さない。新しいものが出来上がるまで出したままにして、
+  // 見比べられるようにする（失敗したときも、直前の結果が残る）。
+  // 実行中は「前回の結果」と分かるようにする
   running = true;
   updateExecState();
 
