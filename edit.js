@@ -1413,6 +1413,6 @@ els.btnExec.addEventListener('click', execute);
 updateOrientVis();
 updateExecState();
 restoreWorkspace();
-fetchHistory();
+if (falBoot.requireShared(['falHistory', 'falUpload'])) fetchHistory();
 // タブに戻ってきたら他画面・他端末での変更を取り込む
 document.addEventListener('visibilitychange', () => { if (!document.hidden) fetchHistory(); });

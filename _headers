@@ -13,23 +13,34 @@
 # 起点で、ここが返るまで CSS も JS も要求できないため、この 1 往復がメニューを
 # 移るたびの待ち時間にそのまま乗っていた。
 #
-# ただし窓は HTML だけ 1 日と短くする。それを過ぎたら今までどおり再検証を待つ。
-# 続けて行き来している間（＝この往復が効く場面）は窓の内側に収まるので速さは
-# そのままで、しばらくぶりに開いたときは新しい版から始められる。
-# 代償は、デプロイ直後の 1 回だけ古い HTML が出ること。次の 1 回で追いつく。
+# ただし窓は HTML だけ 60 秒と短くする。それを過ぎたら今までどおり再検証を待つ。
+# 続けて画面を行き来している間（＝この往復が効く場面）は数秒〜十数秒の話なので、
+# 60 秒あれば速さはそのまま取れる。
+#
+# 以前ここは 1 日にしていたが、それだと「デプロイ直後の 1 回だけ古い HTML が出る」
+# では済まなかった。新しく共有スクリプトを足すと、古い HTML にはその script タグが
+# 無いので、それを使う機能だけが丸 1 日、黙って壊れる（実際に、履歴の取得だけが
+# 失敗して表示キャッシュの 60 件しか出ない状態になった。ホーム画面に追加した
+# アプリだと特に長く古い HTML を持ち続ける）。60 秒なら被害はその場限りで済む。
+# 取りこぼしの検出そのものは store.js の falBoot.requireShared が受け持つ。
+#
+# CSS / JS も同じ 60 秒にする。以前は 7 日にしていたが、ファイル名に版が入って
+# いない以上、窓が長いほど「別々のコミットの JS が混ざって動く」時間が延びる
+# （app.js だけ昨日の版、history-feed.js は今日の版、といった組み合わせ）。
+# JS の再検証は HTML と違って互いに並行して走るので、待ちは 1 往復ぶんで済む。
 #
 # 注意: パターンに splat（*）は 1 つだけ。複数のルールに当たると値がカンマで
 # 連結されるので、ルール同士が重ならないようにすること
 # （/*.html と /*.css と /*.js は互いに重ならず、"/" はどれにも当たらない）。
 
 /
-  Cache-Control: public, max-age=0, stale-while-revalidate=86400
+  Cache-Control: public, max-age=0, stale-while-revalidate=60
 
 /*.html
-  Cache-Control: public, max-age=0, stale-while-revalidate=86400
+  Cache-Control: public, max-age=0, stale-while-revalidate=60
 
 /*.css
-  Cache-Control: public, max-age=0, stale-while-revalidate=604800
+  Cache-Control: public, max-age=0, stale-while-revalidate=60
 
 /*.js
-  Cache-Control: public, max-age=0, stale-while-revalidate=604800
+  Cache-Control: public, max-age=0, stale-while-revalidate=60

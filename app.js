@@ -200,6 +200,14 @@ function applyServerHistory(server, startedAt) {
 // 履歴に件数の上限は無いので、サーバーはページごとに返す。取れたぶんから順に
 // 描いて、続きは裏で追う（最初の 1 ページで画面が出る）
 async function fetchHistoryFromServer() {
+  // 古い HTML だと history-feed.js が読まれておらず、ここだけが黙って失敗して
+  // 表示キャッシュのぶん（60 件）しか出ない状態になる。読み直して直す
+  if (!window.falHistory) {
+    if (!falBoot.requireShared(['falHistory'])) {
+      setError('アプリの読み込みが古いままです。ページを再読み込みしてください。');
+    }
+    return;
+  }
   const startedAt = Date.now();
   const server = [];
   const got = await falHistory.fetchAll((page) => {
@@ -207,7 +215,12 @@ async function fetchHistoryFromServer() {
     server.push(...page);
     applyServerHistory(server, startedAt);
   });
-  if (!got.ok) return; // オフラインなどは、取れたぶんを出したままにする
+  if (!got.ok) {
+    // 取れたぶんは出したままにするが、それが全部ではないことは知らせる。
+    // 黙って途中までを出すと、履歴が消えたようにしか見えない
+    setError('履歴をサーバーから取得しきれませんでした（表示は取得できたぶんだけです）。');
+    return;
+  }
 
   // 旧バージョンのローカル履歴が残っていてサーバーが空なら、一度だけ取り込む
   if (server.length === 0 && historyCache.length > 0 && !falStore.get(LS_HISTORY_MIGRATED)) {

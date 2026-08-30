@@ -320,7 +320,7 @@ node test/import.test.mjs        # Civitai 取り込みパイプライン
 node test/modal.test.mjs         # Modal（modal_comfy）ジョブ・ポーリングの扱い
 node test/history.test.mjs       # 履歴 API（一覧の軽量化と 1 件取得）
 node test/lora-library.test.mjs  # LoRA ライブラリ（Modal へ渡す識別子など）
-node test/store.test.mjs         # localStorage のラッパー（容量あふれの扱い）
+node test/store.test.mjs         # localStorage のラッパー（容量あふれの扱い）と古い HTML の検出
 node test/gallery-pager.test.mjs # ギャラリーの分割描画
 node test/history-feed.test.mjs # 履歴のページ送り取得
 node test/image-upload.test.mjs # 画像アップロード（内容アドレスによる省略）
@@ -517,9 +517,11 @@ LanPaint 版は、画像編集の「Modal 自前ホスト（LanPaint インペ�
 
 `_headers` で HTML・CSS・JS に `stale-while-revalidate` を付けています。既定の `max-age=0, must-revalidate` のままだと、画面を移るたびに 1 つずつ再検証の往復が入り、中身が変わっていなくてもそのぶん遅れます。
 
-- CSS / JS は 7 日、**HTML は 1 日**の窓です。HTML は遷移の起点で、これが返るまで CSS も JS も要求できないため、この 1 往復がメニューを移るたびの待ち時間にそのまま乗っていました
-- HTML の窓を短くしてあるのは、続けて行き来している間（＝往復が効く場面）だけ速さを取り、しばらくぶりに開いたときは新しい版から始めるためです
-- `max-age` は 0 のままなので更新は必ず次の 1 回で反映されます。代償は**デプロイ直後の 1 回だけ古い HTML が出る**ことです
+- 窓は HTML・CSS・JS とも **60 秒**です。HTML は遷移の起点で、これが返るまで CSS も JS も要求できないため、この 1 往復がメニューを移るたびの待ち時間にそのまま乗っていました。続けて画面を行き来している間は数秒〜十数秒の話なので、60 秒あれば速さはそのまま取れます
+- **以前は HTML 1 日・CSS/JS 7 日にしていましたが、短くしました。** ファイル名に版が入っていない以上、窓が長いほど「別々のコミットのファイルが混ざって動く」時間が延びます。実際、新しく共有スクリプト（`history-feed.js`）を足したときに、古い HTML にはその script タグが無いため**履歴の取得だけが黙って失敗し、表示キャッシュの 60 件しか出ない**状態が起きました（ホーム画面に追加したアプリは特に長く古い HTML を持ち続けます）
+- 取りこぼしそのものは `store.js` の `falBoot.requireShared` が検出します。読めているはずの共有スクリプトが無ければ、**1 度だけ問い合わせを変えて読み直し**（`?r=…`）、それでも駄目なら画面にその旨を出します。`store.js` に置いてあるのは、どの画面の HTML にも最初期から入っていて古い HTML でも必ず読まれるからで、新しいファイルに置くと意味がありません
+- 履歴をサーバーから取得しきれなかったときは、**その旨を画面に出します**。黙って途中までを出すと、履歴が消えたようにしか見えないためです
+- `max-age` は 0 のままなので更新は必ず次の 1 回で反映されます
 - `_headers` のパターンは互いに重ならないようにしてください。複数のルールに当たると値がカンマで連結されます
 
 ## 開発メモ

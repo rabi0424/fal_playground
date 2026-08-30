@@ -4229,7 +4229,11 @@ syncRwAddLoraBtn();
 applyRunwareRecommended();
 syncProviderFields();
 restoreForm();
-fetchHistory().then(resumeJobs);
+// 古い HTML を掴んでいると、あとから足した共有スクリプトが読まれない。
+// falUpload が無いまま編集を始めると結果を保存できないので、ここで見て読み直す
+if (falBoot.requireShared(['falHistory', 'falUpload'])) {
+  fetchHistory().then(resumeJobs);
+}
 
 // 実行バーは順番待ちの件数で高さが変わる。本文の下余白をその実測値に合わせて、
 // 一番下の内容がバーに隠れないようにする
