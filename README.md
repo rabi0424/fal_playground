@@ -324,9 +324,12 @@ node test/store.test.mjs         # localStorage のラッパー（容量あふ�
 node test/gallery-pager.test.mjs # ギャラリーの分割描画
 node test/history-feed.test.mjs # 履歴の取得（ページ送り・絞り込み）
 node test/image-upload.test.mjs # 画像アップロード（内容アドレスによる省略）
+node test/browser-refs.test.mjs # 画面用スクリプトの、定義が無い呼び出しの検出
 ```
 
-前の 3 つは `worker.js` をそのまま Node に読み込み、Civitai / Hugging Face / R2 / Modal / D1 をモックして流します。**D1 のモックは `node:sqlite` で本物の SQLite を動かします**（並び替え・ページ送り・参照の数え上げが SQL に乗っているので、作り物にすると肝心なところが検証できません）。取り込みのテストはサイズ関連の定数を小さくパッチするので、1 MB のダミーファイルでも「複数回の alarm 実行に分割される」実際の経路を確認できます。`DEBUG_ERRORS=1` を付けると、再試行のために握りつぶしている例外を表示します。後ろの 5 つはブラウザ用の `lora-library.js` / `store.js` / `gallery-pager.js` / `history-feed.js` / `image-upload.js` を `node:vm` や最小の DOM スタブで読み込み、`localStorage` や `IntersectionObserver`・`fetch` だけ差し替えて確かめます。
+前の 3 つは `worker.js` をそのまま Node に読み込み、Civitai / Hugging Face / R2 / Modal / D1 をモックして流します。**D1 のモックは `node:sqlite` で本物の SQLite を動かします**（並び替え・ページ送り・参照の数え上げが SQL に乗っているので、作り物にすると肝心なところが検証できません）。取り込みのテストはサイズ関連の定数を小さくパッチするので、1 MB のダミーファイルでも「複数回の alarm 実行に分割される」実際の経路を確認できます。`DEBUG_ERRORS=1` を付けると、再試行のために握りつぶしている例外を表示します。`browser-refs.test.mjs` は、画面用のスクリプトを構文解析までせずに走査して「`name(` の形で呼んでいるのに、そのファイルにもほかのスクリプトの `window.*` にも定義が無いもの」を挙げます。これらの画面は Node からそのままは動かせないので、**読み込み時に落ちる類の間違いがテストをすり抜ける**ためです（実際、統計まわりを書き換えたときに `renderSweepStats` を巻き込んで消し、`openStats` がそれを呼び続けて「統計ボタンを押しても何も開かない」状態を作りました）。
+
+そのほかのブラウザ用の `lora-library.js` / `store.js` / `gallery-pager.js` / `history-feed.js` / `image-upload.js` を `node:vm` や最小の DOM スタブで読み込み、`localStorage` や `IntersectionObserver`・`fetch` だけ差し替えて確かめます。
 
 ## LoRA 比較アリーナ
 

@@ -916,6 +916,29 @@ async function renderStats() {
   }
 }
 
+// 使われなかった画像の回収の結果。サーバー側が 1 日に 1 度、生成の完了や
+// 一覧の取得に便乗して走らせている（画像編集は「画像を選んだ瞬間」に R2 へ
+// 上げるので、編集せずに閉じたぶんがどうしても残る）
+async function renderSweepStats() {
+  let res;
+  try {
+    res = await fetch('/api/images/sweep');
+  } catch {
+    return; // オフラインなら出さないだけ
+  }
+  if (!res.ok || isHtmlResponse(res)) return;
+  const sweep = await res.json().catch(() => null);
+  if (!sweep?.at) return;
+
+  const line = document.createElement('div');
+  line.className = 'stats-sweep';
+  const when = new Date(sweep.at).toLocaleString('ja-JP');
+  line.textContent = `未使用画像の回収: ${when} に ${sweep.deleted} 枚削除`
+    + `（累計 ${sweep.total} 枚）`
+    + (sweep.done ? '' : '・まだ見ていない画像が残っています');
+  els.statsBody.appendChild(line);
+}
+
 function openStats() {
   renderStats();
   renderSweepStats(); // 取れたら後から足す（統計の表示は待たせない）

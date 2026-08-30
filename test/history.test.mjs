@@ -344,17 +344,23 @@ test('検索の絞り込みでもページ送りが続く', async () => {
   assert.deepEqual((await second.json()).map((r) => r.id), ['r3', 'r2']);
 });
 
-test('search 列は既存の行にも埋め戻される', async () => {
+test('search 列は既存の行にも埋め戻される（1 リクエストで終わらなくても続く）', async () => {
   const mod = await loadWorker();
   const env = makeEnv(mod);
-  seedOldCatalog(env, 30);
-  // 旧レイアウトには search 列が無い。ALTER で足り、あとから埋まる
-  for (let guard = 0; guard < 30; guard++) {
+  // 1 リクエストで埋まる量より多くする。ここを少なくすると、
+  // 「1 回走って以後まったく進まない」不具合を取り逃がす
+  seedOldCatalog(env, 250);
+
+  const pending = () => rows(env, "SELECT id FROM history WHERE search = ''").length;
+  let requests = 0;
+  for (let guard = 0; guard < 60; guard++) {
     await listIds(mod, env);
-    if (rows(env, "SELECT id FROM history WHERE search = ''").length === 0) break;
+    requests += 1;
+    if (pending() === 0) break;
   }
-  assert.equal(rows(env, "SELECT id FROM history WHERE search = ''").length, 0, '埋まっていません');
-  assert.equal((await listIds(mod, env, '?q=krea2')).length, 30, '埋め戻したぶんが検索に出ません');
+  assert.equal(pending(), 0, '埋め戻しが途中で止まっています');
+  assert.ok(requests > 1, '1 リクエストで終わってしまい、続きの経路を確かめられていません');
+  assert.equal((await listIds(mod, env, '?q=krea2&limit=500')).length, 250, '検索に出ません');
 });
 
 /* ---- 生成時間の統計 ---- */

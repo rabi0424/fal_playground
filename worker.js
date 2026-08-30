@@ -754,11 +754,14 @@ async function ensureHistoryCatalog(env, stub) {
 
   let state = new Map();
   try {
-    state = await getMeta(env, [META_MIGRATED, META_SCHEMA, META_LINKS]);
+    state = await getMeta(env, [META_MIGRATED, META_SCHEMA, META_LINKS, META_SEARCH]);
   } catch {
     // 表がまだ無い（初回）
   }
-  if (state.get(META_MIGRATED) && state.get(META_LINKS) && state.get(META_SCHEMA) === SCHEMA_VERSION) {
+  // 片付けの段どりを増やしたら、ここの条件にも足すこと。入れ忘れると
+  // 「1 回だけ走って、次からは早期 return で二度と進まない」状態になる
+  if (state.get(META_MIGRATED) && state.get(META_LINKS) && state.get(META_SEARCH)
+      && state.get(META_SCHEMA) === SCHEMA_VERSION) {
     historyCatalogReady = true;
     return;
   }
