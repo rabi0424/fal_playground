@@ -44,11 +44,15 @@ npx wrangler r2 bucket create fal-playground-images
 
 ### 4. D1 データベースを作成する（生成履歴のカタログ）
 
-生成履歴（プロンプト・設定・画像への参照）は D1 に置きます。作成して、出力された `database_id` を `wrangler.jsonc` の `d1_databases` に貼ってください（未設定だとデプロイに失敗します）。
+生成履歴（プロンプト・設定・画像への参照）は D1 に置きます。**このリポジトリの `wrangler.jsonc` には作成済みの `database_id` が入っているので、通常この手順は不要です。** 別のアカウントで一から立てるときだけ、作成して `database_id` を差し替えてください（未設定だとデプロイに失敗します）。
+
+ダッシュボードなら **Storage & Databases → D1 SQL Database → Create Database**（名前は `fal-playground`）。CLI なら次のとおりです。
 
 ```
 npx wrangler d1 create fal-playground
 ```
+
+`database_id` はダッシュボードでデータベースを開いたときの URL の末尾（`.../databases/<ここ>/...`）にも出ています。
 
 表は Worker が最初に履歴へ触れたときに作ります（Git 連携デプロイでは wrangler の migrations が走らないため）。定義は `schema.sql` にも置いてあるので、手で流したい場合は次のとおりです。
 
