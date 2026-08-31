@@ -1,6 +1,6 @@
 # fal playground
 
-[fal.ai](https://fal.ai) と Modal 自前ホスト版 Krea 2（[modal_comfy](https://github.com/rabi0424/modal_comfy)）の画像生成 API を使う個人用プレイグラウンド。Cloudflare Workers（Git 連携デプロイ）でのホストを前提に、認証は Cloudflare Access（メール認証）、API キー類はすべて Worker の Secret に置きます。ブラウザ側でのキー入力・保存はありません。
+[fal.ai](https://fal.ai) と Modal 自前ホスト版 Krea 2（[modal_comfy](https://github.com/rabi0424/modal_comfy)）の画像生成 API を使う個人用プレイグラウンド。Cloudflare Workers（Git 連携デプロイ）でのホストを前提に、認証は Cloudflare Access（Google ログイン）、API キー類はすべて Worker の Secret に置きます。ブラウザ側でのキー入力・保存はありません。
 
 ## 初期設定
 
@@ -8,12 +8,53 @@
 
 > **重要**: この設定をせずにデプロイすると、fal プロキシなどの API が URL を知っている全員に開放された状態になります（fal キーの無断利用につながる）。必ず最初に設定してください。
 
+アプリ自身は認証を持ちません。Cloudflare Access で丸ごと囲い、**ログイン方法を Google にします**（One-time PIN のようにメールを開いて PIN を写す手間がなくなります）。
+
+#### 1-1. Worker に Access をかける
+
 1. Cloudflare ダッシュボード → **Workers & Pages** → 対象の Worker → **Settings** → **Domains & Routes**
 2. workers.dev の行の **Enable Cloudflare Access**（Cloudflare Access を有効化）をオン
-3. 自動作成された Zero Trust アプリケーションのポリシーを編集し、**自分のメールアドレスのみ許可**（ログイン方法: One-time PIN）にする
-4. セッション期間は好みで（例: 1 か月。切れたら再度メール認証するだけ）
 
-以後、どの端末からでも「URL を開く → メールに届く PIN を入力」だけで使えます。
+これで Zero Trust にアプリケーションが自動作成されます（ポリシーは 1-3 で設定します）。
+
+#### 1-2. Google をログイン方法として追加する
+
+Access のログインを Google に取り次ぐには、Google 側で OAuth クライアントを 1 つ作り、その ID と秘密鍵を Cloudflare に渡します。
+
+**チーム名を確認する。** Zero Trust の **Settings** で **Team domain**（`https://<チーム名>.cloudflareaccess.com`）を控えます。次の手順で 2 回使います。
+
+**Google Cloud Console 側**（[console.cloud.google.com](https://console.cloud.google.com/)）
+
+1. プロジェクトを作る（既存のものでも可）
+2. **APIs & Services → Credentials → Configure Consent Screen**。まだ作っていなければ作ります
+   - Audience（User type）は **External**
+   - 公開ステータスは **Testing** のままで構いません。その場合は **Test users** に自分の Google アカウントを追加してください（追加していないアカウントはログインできません）
+3. **Create OAuth client**（**Credentials → Create Credentials → OAuth client ID**）
+   - Application type: **Web application**
+   - **Authorized JavaScript origins**: `https://<チーム名>.cloudflareaccess.com`
+   - **Authorized redirect URIs**: `https://<チーム名>.cloudflareaccess.com/cdn-cgi/access/callback`
+4. 発行された **Client ID** と **Client secret** を控えます
+
+**Cloudflare 側**
+
+5. **Zero Trust → Integrations → Identity providers → Add new identity provider**
+6. **Google** を選ぶ（Google Workspace のドメインを管理していて、組織のユーザーやグループで絞りたい場合だけ **Google Workspace** を選びます。個人の Gmail アカウントなら **Google**）
+7. **App ID** に Client ID、**Client Secret** に Client secret を入れて **Save**（**Proof of Key Exchange (PKCE)** は有効にして構いません）
+8. 一覧の **Test** で疎通を確かめます
+
+#### 1-3. ポリシーとログイン方法を決める
+
+1. **Zero Trust → Access controls → Applications** で、1-1 で自動作成されたアプリケーション（Worker の URL のもの）を編集
+2. ポリシーを **Include → Emails → 自分の Google アカウントのアドレス** にする
+   （**Login Methods** で絞るのではなく、必ずメールアドレスで絞ってください。ログイン方法だけの指定だと、Google アカウントを持つ全員が入れてしまいます）
+3. **Configure how users will authenticate** で **Google だけ**を選ぶ（One-time PIN のチェックは外す）
+4. **Apply instant authentication** をオンにすると、Access のログイン画面を挟まず直接 Google へ飛びます
+5. セッション期間は好みで（例: 1 か月。切れたらもう一度 Google でログインするだけ）
+
+以後、どの端末からでも「URL を開く → Google でログイン」だけで使えます。
+
+- **One-time PIN を残しておくのも手です。** Google 側の設定を触って入れなくなったときの逃げ道になります（その場合はログイン画面で方法を選ぶことになるので、**Apply instant authentication** は使えません）
+- 同意画面を **Testing** のままにする場合、ログインできるのは **Test users** に登録したアカウントだけです。使う人を増やすときは、Access のポリシー（Emails）と Test users の両方に足してください。自分だけで使うなら Testing のままで支障ありません
 
 ### 2. Secret を設定する
 
