@@ -589,6 +589,18 @@ details.lora-accordion { display: block; }
 
 .lora-accordion > summary::-webkit-details-marker { display: none; }
 
+/* 畳めること自体に意味があるアコーディオン（詳細設定など）は、PC でも
+   summary を押せるようにする。上の pointer-events: none は「PC では常に開いた
+   まま見せる」ための指定で、open が付いていない details に効くと二度と
+   開けなくなる */
+.lora-accordion.collapsible > summary {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.lora-accordion.collapsible > summary::before { content: "\25B8 "; }
+.lora-accordion.collapsible[open] > summary::before { content: "\25BE "; }
+
 .lora-accordion > :not(summary) { margin-top: 8px; }
 
 .lora-list {
