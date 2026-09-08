@@ -660,6 +660,26 @@ details.lora-accordion { display: block; }
   min-width: 0;
 }
 
+/* 有効 / 無効の切り替え。押すたびに入れ替わるので、ボタンには「今の状態」を出す */
+.lora-onoff {
+  flex-shrink: 0;
+  min-width: 3.6em;
+}
+
+.lora-onoff[aria-pressed="false"] {
+  color: var(--muted);
+  border-style: dashed;
+}
+
+/* 無効にした行は薄くする。行も重みも残っているが、効いていないことが分かるように */
+.lora-row.lora-off > :not(.lora-head) {
+  opacity: 0.45;
+}
+
+.lora-row.lora-off .lora-select {
+  color: var(--muted);
+}
+
 /* ---------- lora compare ---------- */
 .compare-toggle {
   display: flex;
@@ -1254,6 +1274,28 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
   border-radius: 8px;
   box-shadow: var(--shadow-floating);
   animation: rise-in var(--dur-move) var(--spring) backwards;
+  transition: transform var(--dur-move) var(--spring);
+  /* ブラウザ側のダブルタップ拡大に取られないようにする（こちらで拡大するため） */
+  touch-action: manipulation;
+}
+
+/* ダブルタップで拡大したあと。指の動きは画像を動かすためのものなので、
+   ブラウザ側のスクロールやズームには渡さない（touch-action: none） */
+.lightbox.zoomed {
+  cursor: zoom-in;
+}
+
+.lightbox.zoomed img {
+  touch-action: none;
+  cursor: grab;
+  border-radius: 0;
+  will-change: transform;
+}
+
+/* 引きずっている間は追従を優先する（transition が入ると指から遅れる） */
+.lightbox.panning img {
+  transition: none;
+  cursor: grabbing;
 }
 
 .lightbox-close {
@@ -2261,6 +2303,8 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
   .hf-item:active:not(.registered) {
     transform: none;
   }
+
+  .lightbox img { transition: none; }
 
   .detail-images .image-card,
   .lightbox,
