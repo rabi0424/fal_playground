@@ -359,7 +359,7 @@ function refreshLoraRows() {
   syncAddLoraBtn();
 }
 
-function addLoraRow(path = '', scale) {
+function addLoraRow(path = '', scale, off = false) {
   const library = sortedLoraLibrary();
   // 名前で指定できるプロバイダなら、ライブラリが空でも行は作れる
   const byName = !!provider().loraByName;
@@ -371,6 +371,13 @@ function addLoraRow(path = '', scale) {
 
   const head = document.createElement('div');
   head.className = 'lora-head';
+
+  // 有効 / 無効のワンタップ切り替え（生成画面と同じ）。scale を 0 に落として
+  // 戻す代わりに使う。無効の行は送らないので、LoRA 個数の上限も消費しない
+  const onoffBtn = document.createElement('button');
+  onoffBtn.className = 'ghost-btn small lora-onoff';
+  onoffBtn.type = 'button';
+  head.appendChild(onoffBtn);
 
   const select = document.createElement('select');
   select.className = 'lora-select';
@@ -388,6 +395,20 @@ function addLoraRow(path = '', scale) {
   });
   head.appendChild(delBtn);
   row.appendChild(head);
+
+  const setEnabled = (on) => {
+    // 重みは触らない。無効にしているあいだも値はそのまま残す
+    row.dataset.off = on ? '' : '1';
+    row.classList.toggle('lora-off', !on);
+    onoffBtn.textContent = on ? '有効' : '無効';
+    onoffBtn.setAttribute('aria-pressed', String(on));
+    onoffBtn.title = on ? 'この LoRA を一時的に外す（重みはそのまま残る）' : 'この LoRA を使う';
+  };
+  onoffBtn.addEventListener('click', () => {
+    setEnabled(row.dataset.off === '1');
+    saveForm();
+  });
+  setEnabled(!off);
 
   // ライブラリに無いものは名前で直接指定する（Modal Volume 内のファイル名。
   // 無ければ Modal が初回リクエスト時に取り込む）
@@ -513,8 +534,15 @@ function pruneLoraRows() {
   syncAddLoraBtn();
 }
 
+// LoRA 行の一覧（送信用・下書き用の両方から使う）
+function loraRows() {
+  return [...els.loraList.querySelectorAll('.lora-row')];
+}
+
 function collectLoras() {
-  return [...els.loraList.querySelectorAll('.lora-row')]
+  return loraRows()
+    // 無効にした行は送らない（行と重みは画面に残したまま外せるように）
+    .filter((row) => row.dataset.off !== '1')
     .map((row) => {
       const select = row.querySelector('.lora-select');
       // 「名前を直接入力…」の行は、選択値ではなく打った名前が識別子になる
@@ -524,6 +552,21 @@ function collectLoras() {
     })
     // scale 0 は効果ゼロなのに LoRA 枠を消費するので送らない
     .filter((l) => l.path && l.scale > 0);
+}
+
+// 下書き用。無効にした行も含めて全行をそのまま書き出す
+// （collectLoras は送信用なので、無効の行が落ちて次に開いたときに消えてしまう）
+function serializeLoraRows() {
+  return loraRows().map((row) => {
+    const select = row.querySelector('.lora-select');
+    const path = select.value === LORA_NAME_OPTION
+      ? row.querySelector('.lora-path').value.trim() : select.value;
+    return {
+      path,
+      scale: Number(row.querySelector('input[type="number"]').value) || 0,
+      ...(row.dataset.off === '1' ? { off: true } : {}),
+    };
+  }).filter((l) => l.path);
 }
 
 /* ---------- Runware の LoRA 行 ---------- */
@@ -2533,6 +2576,7 @@ function openRecordLightbox(record) {
 }
 
 function showLightboxImage() {
+  lightboxZoom.reset(); // 前の画像のズームを持ち越さない
   const item = lightboxItems[lightboxIndex];
   els.lightbox.querySelector('img').src = item?.url ?? '';
   els.lightboxCounter.hidden = !item;
@@ -2548,6 +2592,7 @@ function lightboxNav(dir) {
 }
 
 function closeLightbox() {
+  lightboxZoom.reset();
   els.lightbox.hidden = true;
   els.lightbox.querySelector('img').src = '';
 }
@@ -3892,7 +3937,7 @@ function saveForm() {
     seed: els.seed.value,
     seedLock: els.seedLock.checked,
     negativePrompt: els.negativePrompt.value,
-    loras: collectLoras(),
+    loras: serializeLoraRows(),
     rwLoras: rwLoraRows(),
     // 画像本体は大きすぎるので保存しない。R2 の URL から読み直す
     source: source ? { url: source.url, from: source.from } : null,
@@ -3956,7 +4001,7 @@ async function restoreForm() {
   els.seed.value = s.seed || '';
   els.seedLock.checked = !!s.seedLock;
   els.negativePrompt.value = s.negativePrompt || '';
-  for (const l of s.loras || []) addLoraRow(l.path, l.scale);
+  for (const l of s.loras || []) addLoraRow(l.path, l.scale, l.off);
   for (const l of s.rwLoras || []) addRwLoraRow(l.air, l.weight);
   els.maskToggle.checked = !!s.maskOn;
   els.alignToggle.checked = s.align !== false;
@@ -4183,6 +4228,9 @@ els.runBtn.addEventListener('click', run);
 
 /* ---------- 拡大表示・サムネイルのメニュー ---------- */
 
+// 画像のダブルタップで拡大、ドラッグで移動（生成画面と同じ）
+const lightboxZoom = falLightboxZoom.attach(els.lightbox, { onTap: closeLightbox });
+
 let lightboxTouchX = 0;
 let lightboxTouchY = 0;
 let lightboxSwiped = false;
@@ -4200,6 +4248,7 @@ els.lightbox.addEventListener('touchstart', (e) => {
 }, { passive: true });
 
 els.lightbox.addEventListener('touchend', (e) => {
+  if (lightboxZoom.zoomed) return; // ズーム中の指の動きは画像を動かすためのもの
   const dx = e.changedTouches[0].clientX - lightboxTouchX;
   const dy = e.changedTouches[0].clientY - lightboxTouchY;
   if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {

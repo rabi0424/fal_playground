@@ -117,6 +117,8 @@ npx wrangler d1 execute fal-playground --remote --file=schema.sql
 - 開閉式の左サイドバー（全画面共通のナビゲーション。畳むとアイコンだけのレールになる・Cmd/Ctrl + B で開閉・スマホでは引き出し）
 - ダークモード（自動 / ライト / ダーク切替。サイドバー下部の 3 択）
 - Cmd/Ctrl + Enter で生成
+- LoRA 行の**有効 / 無効をワンタップで切り替え**（重みは残したまま外せる。無効の行は送らないので LoRA の個数上限も消費しません）
+- 拡大表示の**ダブルタップ（PC はダブルクリック）でズーム**。触った点を軸に 2.5 倍にし、ドラッグで動かせます（`lightbox-zoom.js`）
 - スマホ対応（iPhone 16 想定・下部固定の生成バー・ライトボックスのスワイプ切替・左端からの払いでサイドバーを開く）
 
 ## Civitai からの LoRA 取り込み
@@ -193,7 +195,7 @@ Krea 2 のインペイントです（modal_comfy の `lanpaint-api` の `/inpain
 - 実行バーに**費用の目安**を出します。fal は解像度から、WaveSpeed は枚数から計算します。Runware は単価を事前に出せないので、代わりに `includeCost` で返る**実額を結果に表示**します
 - fal で安全性チェックに引っかかった画像は塗り潰されて返るため、その旨を表示します（WaveSpeed の API にはこのフラグがありません）
 - 結果は生成履歴（`type: 'imgedit'`）に保存され、生成画面のギャラリーにも並びます。入力画像も一緒に残るので、後から何を編集したか分かります
-- 画面下の**編集履歴のサムネイルは、押すと拡大表示**になります（合成結果 → 生成結果そのまま → 入力画像の順に、← → とスワイプで送れます）。入力画像への転用や「マスクを調整」は**右上の ⋯ から**選びます（押しただけで入力画像が入れ替わると、見比べたいだけのときに戻せないため）
+- 画面下の**編集履歴のサムネイルは、押すと拡大表示**になります（合成結果 → 生成結果そのまま → 入力画像の順に、← → とスワイプで送れます。**ダブルタップで拡大**し、ドラッグで見たい所へ動かせます）。入力画像への転用や「マスクを調整」は**右上の ⋯ から**選びます（押しただけで入力画像が入れ替わると、見比べたいだけのときに戻せないため）
 - 「この結果を編集」で、出力をそのまま次の入力にできます
 
 #### 切り抜いて送る（LanPaint）
@@ -366,12 +368,13 @@ node test/gallery-pager.test.mjs # ギャラリーの分割描画
 node test/history-feed.test.mjs # 履歴の取得（ページ送り・絞り込み）
 node test/image-upload.test.mjs # 画像アップロード（内容アドレスによる省略）
 node test/image-meta.test.mjs   # 画像メタデータの正規化と読み書き（ComfyUI / A1111 を含む）
+node test/lightbox-zoom.test.mjs # 拡大表示のズーム（ダブルタップ・ドラッグ・タップの見分け）
 node test/browser-refs.test.mjs # 画面用スクリプトの、定義が無い呼び出しの検出
 ```
 
 前の 3 つは `worker.js` をそのまま Node に読み込み、Civitai / Hugging Face / R2 / Modal / D1 をモックして流します。**D1 のモックは `node:sqlite` で本物の SQLite を動かします**（並び替え・ページ送り・参照の数え上げが SQL に乗っているので、作り物にすると肝心なところが検証できません）。取り込みのテストはサイズ関連の定数を小さくパッチするので、1 MB のダミーファイルでも「複数回の alarm 実行に分割される」実際の経路を確認できます。`DEBUG_ERRORS=1` を付けると、再試行のために握りつぶしている例外を表示します。`browser-refs.test.mjs` は、画面用のスクリプトを構文解析までせずに走査して「`name(` の形で呼んでいるのに、そのファイルにもほかのスクリプトの `window.*` にも定義が無いもの」を挙げます。これらの画面は Node からそのままは動かせないので、**読み込み時に落ちる類の間違いがテストをすり抜ける**ためです（実際、統計まわりを書き換えたときに `renderSweepStats` を巻き込んで消し、`openStats` がそれを呼び続けて「統計ボタンを押しても何も開かない」状態を作りました）。
 
-そのほかのブラウザ用の `lora-library.js` / `store.js` / `gallery-pager.js` / `history-feed.js` / `image-upload.js` を `node:vm` や最小の DOM スタブで読み込み、`localStorage` や `IntersectionObserver`・`fetch` だけ差し替えて確かめます。
+そのほかのブラウザ用の `lora-library.js` / `store.js` / `gallery-pager.js` / `history-feed.js` / `image-upload.js` / `lightbox-zoom.js` を `node:vm` や最小の DOM スタブで読み込み、`localStorage` や `IntersectionObserver`・`fetch`・ポインタ操作だけ差し替えて確かめます。
 
 ## LoRA 比較アリーナ
 
