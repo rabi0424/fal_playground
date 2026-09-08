@@ -366,19 +366,31 @@ function hfAuthHeaders(env) {
   return env.HF_TOKEN ? { Authorization: `Bearer ${env.HF_TOKEN}` } : {};
 }
 
-// HF リポジトリのファイル一覧（LFS の oid 付き）。expand 付きの応答はページング
-// されるので Link ヘッダの rel="next" を辿って全件集める。
-// 失敗時は { status } を投げる（404 = リポジトリなし等をルート側で区別するため）
-async function fetchHfTree(repo, env) {
+// 一覧は 1 ページ 1000 件（expand を付けると 50 件に落ちる。下記参照）
+const HF_TREE_PAGE_SIZE = 1000;
+const HF_TREE_MAX_PAGES = 20;
+// 最終コミット日時を取りに行く範囲。候補ファイルのあるディレクトリだけを見る
+const HF_DATE_MAX_DIRS = 8;
+const HF_DATE_MAX_PAGES = 12;
+const HF_DATE_PAGES_PER_DIR = 4;
+// 日時を付ける対象（= 一覧の画面がチェックポイント / LoRA の候補として出すもの）
+const HF_MODEL_FILE_RE = /\.(safetensors|gguf)$/i;
+
+// HF のツリー API を Link ヘッダの rel="next" で辿る。
+// 失敗時は { status } を投げる（404 = リポジトリなし等をルート側で区別するため）。
+// ただし 2 ページ目以降で失敗したら、取れた分だけ返す
+async function fetchHfTreePages(url, maxPages, env) {
   const entries = [];
-  let next = `${HF_BASE}/api/models/${repo}/tree/main?recursive=true&expand=true`;
-  for (let page = 0; page < 20 && next; page++) {
+  let next = url;
+  let pages = 0;
+  while (next && pages < maxPages) {
     const res = await fetch(next, {
       headers: { 'User-Agent': 'fal-playground', ...hfAuthHeaders(env) },
       signal: apiSignal(),
     });
+    pages++;
     if (!res.ok) {
-      if (entries.length > 0) break; // 途中で失敗したら取れた分だけ返す
+      if (entries.length > 0) break;
       const err = new Error(`HF tree error ${res.status}`);
       err.status = res.status;
       err.body = await res.text();
@@ -389,7 +401,65 @@ async function fetchHfTree(repo, env) {
     const link = res.headers.get('Link') || '';
     next = link.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
   }
+  return { entries, pages };
+}
+
+/*
+ * 候補ファイルに最終コミット日時（lastCommit.date）を後から付ける。
+ *
+ * 日時は expand=true でしか返らないが、expand を付けるとページが 1000 件から
+ * 50 件に縮む。全体を expand で舐めると、履歴画像を大量に置いたリポジトリでは
+ * ページ数の上限が先に来て、名前が後ろのファイルが一覧から丸ごと落ちる
+ * （`_archive/` の下だけで打ち切られ、直下の .safetensors が候補に出なかった）。
+ * そこで一覧は expand 無しで全件取り、日時は候補ファイルのあるディレクトリだけ
+ * 非再帰の expand で取りに行く。取れなくても一覧は出す（日時は並べ替えの材料）。
+ */
+async function addHfCommitDates(repo, entries, env) {
+  const counts = new Map();
+  for (const e of entries) {
+    if (e.type !== 'file' || !HF_MODEL_FILE_RE.test(e.path)) continue;
+    const slash = e.path.lastIndexOf('/');
+    const dir = slash < 0 ? '' : e.path.slice(0, slash);
+    counts.set(dir, (counts.get(dir) ?? 0) + 1);
+  }
+  if (counts.size === 0) return entries;
+  const byPath = new Map(entries.map((e) => [e.path, e]));
+  const dirs = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1]) // 候補の多いディレクトリから。上限で切られても損が小さい
+    .slice(0, HF_DATE_MAX_DIRS)
+    .map(([dir]) => dir);
+
+  let budget = HF_DATE_MAX_PAGES;
+  for (const dir of dirs) {
+    if (budget <= 0) break;
+    const path = dir === '' ? '' : `/${dir.split('/').map(encodeURIComponent).join('/')}`;
+    try {
+      const { entries: dated, pages } = await fetchHfTreePages(
+        `${HF_BASE}/api/models/${repo}/tree/main${path}?expand=true`,
+        Math.min(budget, HF_DATE_PAGES_PER_DIR),
+        env,
+      );
+      budget -= pages;
+      for (const d of dated) {
+        const hit = byPath.get(d.path);
+        if (hit && d.lastCommit) hit.lastCommit = d.lastCommit;
+      }
+    } catch {
+      budget--; // 日時が取れないディレクトリがあっても、ほかの候補まで諦めない
+    }
+  }
   return entries;
+}
+
+// HF リポジトリのファイル一覧（LFS の oid 付き）。候補ファイルには最終コミット
+// 日時も付ける。失敗時は { status } を投げる（ルート側で 404 等を区別するため）
+async function fetchHfTree(repo, env) {
+  const { entries } = await fetchHfTreePages(
+    `${HF_BASE}/api/models/${repo}/tree/main?recursive=true&limit=${HF_TREE_PAGE_SIZE}`,
+    HF_TREE_MAX_PAGES,
+    env,
+  );
+  return await addHfCommitDates(repo, entries, env);
 }
 
 /* ---------- PNG メタデータ焼き込み ---------- */
@@ -3028,7 +3098,7 @@ export default {
       if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
       const repo = url.searchParams.get('repo') || '';
       if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return new Response('Invalid repo', { status: 400 });
-      // expand=true で各ファイルの最終コミット日時（lastCommit.date）も取得する
+      // 候補ファイルには最終コミット日時（lastCommit.date）も付く
       //（クライアント側で「追加日の新しい順」に並べるため）
       try {
         return Response.json(await fetchHfTree(repo, env));
