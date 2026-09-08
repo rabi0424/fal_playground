@@ -411,6 +411,89 @@ async function testWavespeedProxy() {
 
 // Civitai の解決: repo を省くと HF を見に行かず、AIR の材料だけ返す
 //（Runware は civitai:モデルID@バージョンID でモデルを参照する）
+/*
+ * HF のファイル一覧（/api/hf/tree）。
+ *
+ * 履歴画像を大量に置いたリポジトリで、直下の .safetensors が候補に出ない
+ * ことがあった。expand=true を付けると 1 ページが 1000 件から 50 件に縮み、
+ * 再帰一覧が `_archive/` の下だけでページ上限に達していたため。
+ * ここでは本物と同じページの縮み方を再現して、直下のファイルが最後まで
+ * 出ること・日時が付くこと・呼び出し回数が増えすぎないことを見る。
+ */
+function hfTreeMock(entries, { status = 200 } = {}) {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    const u = new URL(String(url));
+    calls.push(u.pathname + u.search);
+    if (status !== 200) return new Response('nope', { status });
+    const m = u.pathname.match(/^\/api\/models\/[^/]+\/[^/]+\/tree\/main\/?(.*)$/);
+    if (!m) return new Response('nope', { status: 404 });
+    const dir = decodeURIComponent(m[1]);
+    const expand = u.searchParams.get('expand') === 'true';
+    const recursive = u.searchParams.get('recursive') === 'true';
+    // 本物と同じ: expand を付けると 1 ページ 50 件、付けなければ limit（最大 1000）
+    const size = expand ? 50 : Math.min(Number(u.searchParams.get('limit')) || 1000, 1000);
+    const offset = Number(u.searchParams.get('cursor') || 0);
+    let list = entries.filter((e) => (dir === '' ? true : e.path.startsWith(`${dir}/`)));
+    if (!recursive) {
+      const depth = dir === '' ? 0 : dir.split('/').length;
+      list = list.filter((e) => e.path.split('/').length === depth + 1);
+    }
+    const page = list.slice(offset, offset + size).map((e) => (expand
+      ? { ...e, lastCommit: { id: 'c', title: 't', date: `2026-08-${String((offset % 28) + 1).padStart(2, '0')}T00:00:00.000Z` } }
+      : e));
+    const headers = {};
+    if (offset + size < list.length) {
+      u.searchParams.set('cursor', String(offset + size));
+      headers.Link = `<${u.href}>; rel="next"`;
+    }
+    return Response.json(page, { headers });
+  };
+  return { calls, fetchImpl };
+}
+
+async function testHfTreeEndpoint() {
+  const mod = await loadWorker();
+  const entries = [
+    // 名前順で先に来る、候補ではないファイルの山（サムネイル等）
+    ...Array.from({ length: 2000 }, (_, i) => ({ type: 'file', path: `_archive/thumbs/img${i}.jpg`, size: 10 })),
+    ...Array.from({ length: 3 }, (_, i) => ({ type: 'file', path: `_archive/checkpoints/old${i}.safetensors`, size: 20 })),
+    { type: 'file', path: 'README.md', size: 1 },
+    { type: 'file', path: 'krea2_turbo_4step_rank_64_lora.safetensors', size: 438160440 },
+    { type: 'file', path: 'krea2_turbo_4step_rank_64_lora_comfyui.safetensors', size: 438160440 },
+    { type: 'file', path: 'sub/extra.safetensors', size: 30 },
+  ];
+  const { calls, fetchImpl } = hfTreeMock(entries);
+  globalThis.fetch = fetchImpl;
+  const env = { HF_TOKEN: 'hf_test', STATE: { idFromName: (n) => n, get: () => ({}) } };
+  const res = await mod.default.fetch(
+    new Request('https://app.example/api/hf/tree?repo=me%2Frepo'), env);
+  assert.equal(res.status, 200);
+  const tree = await res.json();
+  const paths = new Set(tree.map((e) => e.path));
+
+  for (const p of ['krea2_turbo_4step_rank_64_lora.safetensors', 'sub/extra.safetensors']) {
+    assert.ok(paths.has(p), `直下・サブフォルダの候補が一覧に無い: ${p}`);
+  }
+  assert.equal(tree.length, entries.length, `全件返っていない: ${tree.length} / ${entries.length}`);
+  // 候補には日時が付く（画面はこれで「追加日の新しい順」に並べる）
+  const root = tree.find((e) => e.path === 'krea2_turbo_4step_rank_64_lora.safetensors');
+  assert.ok(root.lastCommit?.date, '候補に最終コミット日時が付いていない');
+  assert.ok(tree.find((e) => e.path === 'sub/extra.safetensors').lastCommit?.date,
+    'サブフォルダの候補に日時が付いていない');
+  // 候補の無いディレクトリまで日時を取りに行かない（subrequest の無駄）
+  assert.ok(!calls.some((c) => c.includes('thumbs')), `候補の無い場所を見に行っている: ${calls.join(' ')}`);
+  assert.ok(calls.length <= 8, `HF への呼び出しが多すぎる: ${calls.length} 回`);
+  console.log(`✓ hf tree: ${tree.length} 件を ${calls.length} 回の呼び出しで取得`);
+
+  // 404（ID の誤りや非公開）はそのまま返す
+  const missing = hfTreeMock(entries, { status: 404 });
+  globalThis.fetch = missing.fetchImpl;
+  const bad = await mod.default.fetch(
+    new Request('https://app.example/api/hf/tree?repo=me%2Fnope'), env);
+  assert.equal(bad.status, 404, '見つからないリポジトリの状態が伝わっていない');
+}
+
 async function testCivitaiResolveWithoutRepo() {
   const mod = await loadWorker();
   const calls = [];
@@ -607,6 +690,7 @@ await testLoraMetaEndpoint();
 await testWavespeedProxy();
 await testRunwareProxy();
 await testCivitaiResolveWithoutRepo();
+await testHfTreeEndpoint();
 await testUploadContentAddressed();
 await testCaptureEndpoint();
 rmSync(OUT, { force: true });
