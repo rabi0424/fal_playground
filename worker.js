@@ -1904,7 +1904,8 @@ export class SyncState extends DurableObject {
       // 編集では入力サイズが 32 の倍数へ丸められる。合成側が元画像に戻すために要る
       width: job.width ?? null,
       height: job.height ?? null,
-      elapsedMs: job.elapsedMs ?? null, // 実処理時間（DO のキュー待ちを含まない）
+      elapsedMs: job.elapsedMs ?? null, // 投げてから受け取るまで（Modal 側の順番待ち込み）
+      execMs: job.execMs ?? null,       // サーバーが測った純生成時間（待ち時間を含まない）
       error: job.error ?? null,
     };
   }
@@ -2150,6 +2151,11 @@ export class SyncState extends DurableObject {
 
       const seedHeader = Number(res.headers.get('X-Seed'));
       const seed = Number.isFinite(seedHeader) ? seedHeader : null;
+      // サーバーが測った純生成時間。Modal は同時 1 コンテナなので、複数枚を
+      // まとめて投げると 2 枚目以降は Modal 側で順番待ちになり、こちらで測る
+      // elapsedMs（投げてから受け取るまで）にその待ちが乗る。1 枚あたりの
+      // 所要時間として意味があるのはこちら
+      const execSeconds = Number(res.headers.get('X-Exec-Seconds'));
       // 実際に生成された解像度（編集では 32 の倍数に丸められる）
       const width = Number(res.headers.get('X-Width'));
       const height = Number(res.headers.get('X-Height'));
@@ -2184,6 +2190,9 @@ export class SyncState extends DurableObject {
       if (Number.isFinite(width) && width > 0) job.width = width;
       if (Number.isFinite(height) && height > 0) job.height = height;
       job.elapsedMs = job.submittedAt ? Date.now() - job.submittedAt : null;
+      job.execMs = Number.isFinite(execSeconds) && execSeconds > 0
+        ? Math.round(execSeconds * 1000)
+        : null;
       await this.ctx.storage.put(key, job);
     } catch (err) {
       // ネットワーク断など。pending のまま次の alarm で再試行する

@@ -157,6 +157,72 @@ test('編集: 303 を追って完了し、seed と実際の解像度を拾う', 
   assert.deepEqual(meta.loras, [{ path: 'distill', scale: 0.4 }]);
 });
 
+/*
+ * 1 枚あたりの所要時間。
+ *
+ * Modal は同時 1 コンテナなので、複数枚をまとめて投げると 2 枚目以降は
+ * 生成が始まるまで Modal 側で順番待ちになる（ポーリングに 202 が返り続ける）。
+ * こちらで測る elapsedMs にはその待ちが乗るため、統計に使うのは
+ * サーバーが返す純生成時間（X-Exec-Seconds）のほう。
+ */
+test('生成: 純生成時間は Modal 側の順番待ちに引きずられない', async () => {
+  const mod = await loadWorker();
+  const { stub, storage } = makeDo(mod);
+
+  let queued = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (!u.includes('/poll/')) {
+      return new Response(null, {
+        status: 303,
+        headers: { Location: `https://x--y.modal.run/poll/${JSON.parse(init.body).prompt}` },
+      });
+    }
+    // 2 枚目は 1 枚目が終わるまで動き出さない
+    if (u.endsWith('/second')) {
+      queued += 1;
+      if (queued <= 3) return new Response(null, { status: 202 });
+    }
+    return new Response(PNG_1X1, {
+      status: 200,
+      headers: { 'Content-Type': 'image/png', 'X-Seed': '7', 'X-Exec-Seconds': '7.5' },
+    });
+  };
+
+  const first = 'b'.repeat(32);
+  const second = 'c'.repeat(32);
+  const url = 'https://x--y.modal.run/generate';
+  await stub.startKrea2Job(first, { prompt: 'first' }, url, 'generate', 'exp');
+  await stub.startKrea2Job(second, { prompt: 'second' }, url, 'generate', 'exp');
+  await runAlarms(stub, storage, 20);
+
+  const a = await stub.getKrea2Job(first);
+  const b = await stub.getKrea2Job(second);
+  assert.equal(a.status, 'done', a.error ?? '');
+  assert.equal(b.status, 'done', b.error ?? '');
+  // 待たされた 2 枚目も、純生成時間は 1 枚目と同じ
+  assert.equal(a.execMs, 7500);
+  assert.equal(b.execMs, 7500, `順番待ちが乗っている: ${b.execMs}`);
+  assert.ok(queued >= 3, '2 枚目が順番待ちする筋書きになっていない');
+});
+
+// 純生成時間を返さない相手（古いデプロイなど）では、統計はこれまで通り
+// elapsedMs に落ちる。null を 0 などに丸めると、無かった標本が混ざってしまう
+test('生成: X-Exec-Seconds が無ければ execMs は null', async () => {
+  const mod = await loadWorker();
+  const { stub, storage } = makeDo(mod);
+  globalThis.fetch = makeModal().fetch;
+
+  const id = 'd'.repeat(32);
+  await stub.startKrea2Job(id, { prompt: 'x' }, 'https://x--y.modal.run/generate', 'generate', 'exp');
+  await runAlarms(stub, storage);
+
+  const job = await stub.getKrea2Job(id);
+  assert.equal(job.status, 'done', job.error ?? '');
+  assert.equal(job.execMs, null);
+  assert.ok(job.elapsedMs >= 0);
+});
+
 // Modal は結果 URL のポーリングに対して、関数が終わるまで 202 を返す。
 // res.ok は 202 でも true なので、分けずに扱うと空の本文を画像として保存し、
 // 壊れた結果が「完了」になってしまう

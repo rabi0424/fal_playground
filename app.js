@@ -1540,7 +1540,9 @@ async function runModalJobFrom(job) {
     } finally {
       clearInterval(ticker);
     }
-    entry.result = { url: r.url, seed: r.seed, elapsedMs: r.elapsedMs ?? null };
+    entry.result = {
+      url: r.url, seed: r.seed, elapsedMs: r.elapsedMs ?? null, execMs: r.execMs ?? null,
+    };
     saveActiveJob(job);
   }
 
@@ -1552,9 +1554,16 @@ function finishModal(job) {
   removeActiveJob(job);
   const done = job.entries.filter((e) => e.result);
   if (done.length === 0) return;
-  // サーバーが記録した実処理時間（DO のキュー待ちを含まない）。統計で使う。
-  // elapsed（クライアント計測・待ち時間込み）は表示互換のためそのまま残す
-  const procMs = done.map((e) => e.result.elapsedMs).filter((v) => Number.isFinite(v) && v > 0);
+  // 1 枚あたりの生成時間。統計で使う。
+  //
+  // Modal が返す純生成時間（X-Exec-Seconds）を優先する。elapsedMs は Worker が
+  // 投げてから受け取るまでなので、複数枚をまとめて投げると Modal は同時 1 コンテナで
+  // 順に処理する都合上、2 枚目以降に「生成が始まるまでの待ち」が乗ってしまう。
+  // 純生成時間を返さない相手のために elapsedMs へ落とす。
+  // elapsed（クライアント計測・ジョブ全体の実時間）は表示互換のためそのまま残す
+  const procMs = done
+    .map((e) => e.result.execMs ?? e.result.elapsedMs)
+    .filter((v) => Number.isFinite(v) && v > 0);
   const record = {
     id: `modal_${Date.now()}`,
     ts: Date.now(),
