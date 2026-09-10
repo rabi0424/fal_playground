@@ -73,6 +73,8 @@ const JOB_META_KINDS = { edit: 'edit', inpaint: 'inpaint' };
 
 // Poe の OpenAI 互換 API（部分AI編集で使用）。キーは Worker の Secret（POE_API_KEY）
 const POE_API_URL = 'https://api.poe.com/v1/chat/completions';
+// 1 回のリクエストに載せる画像の枚数。切り抜き 1 枚と、ヘッドスワップの顔写真 1 枚
+const POE_MAX_IMAGES = 2;
 
 // /api/upload で受け付ける画像の上限（デコード後のバイト数）
 const UPLOAD_MAX_BYTES = 40 * 1024 * 1024;
@@ -1950,7 +1952,8 @@ export class SyncState extends DurableObject {
   /* ---- Poe 部分AI編集ジョブ ---- */
   // krea2 ジョブと同じ考え方: ジョブを登録してすぐ応答し、Poe API の呼び出しは
   // alarm で行う。生成中にタブを閉じても結果を取りこぼさない。
-  // 入力画像（切り抜き）は事前に /api/upload で R2 へ置き、その id を参照する
+  // 入力画像（切り抜き、ヘッドスワップなら顔写真も）は事前に /api/upload で
+  // R2 へ置き、その id を順番どおり参照する
 
   async startPoeJob(id, payload) {
     const key = `poe:job:${id}`;
@@ -1994,18 +1997,24 @@ export class SyncState extends DurableObject {
       job.attempts += 1;
       await this.ctx.storage.put(key, job);
 
-      const { model, prompt, imageId, parameters } = job.payload;
+      const { model, prompt, parameters } = job.payload;
+      // 積んだ時点の形（1 枚だけの imageId）で残っているジョブも読めるようにしておく
+      const imageIds = job.payload.imageIds ?? [job.payload.imageId];
 
-      // 入力画像（切り抜き）を R2 から読み出して data URI にする
-      const obj = await this.env.IMAGES.get(`${imageId}.png`);
-      if (!obj) {
-        job.status = 'error';
-        job.error = '入力画像が見つかりませんでした（アップロードからやり直してください）';
-        await this.ctx.storage.put(key, job);
-        return;
+      // 入力画像（切り抜き、ヘッドスワップならそのあとに顔写真）を R2 から
+      // 読み出して data URI にする。並びはそのまま Poe に渡す順になる
+      const dataUris = [];
+      for (const imageId of imageIds) {
+        const obj = await this.env.IMAGES.get(`${imageId}.png`);
+        if (!obj) {
+          job.status = 'error';
+          job.error = '入力画像が見つかりませんでした（アップロードからやり直してください）';
+          await this.ctx.storage.put(key, job);
+          return;
+        }
+        const mime = obj.httpMetadata?.contentType || 'image/png';
+        dataUris.push(`data:${mime};base64,${bytesToBase64(new Uint8Array(await obj.arrayBuffer()))}`);
       }
-      const mime = obj.httpMetadata?.contentType || 'image/png';
-      const dataUri = `data:${mime};base64,${bytesToBase64(new Uint8Array(await obj.arrayBuffer()))}`;
 
       const res = await fetch(POE_API_URL, {
         method: 'POST',
@@ -2019,7 +2028,7 @@ export class SyncState extends DurableObject {
             role: 'user',
             content: [
               { type: 'text', text: prompt },
-              { type: 'image_url', image_url: { url: dataUri } },
+              ...dataUris.map((url) => ({ type: 'image_url', image_url: { url } })),
             ],
           }],
           stream: false,
@@ -3511,7 +3520,7 @@ export default {
       } catch {
         return new Response('Invalid JSON', { status: 400 });
       }
-      const { jobId, model, prompt, imageId, parameters } = payload ?? {};
+      const { jobId, model, prompt, imageId, imageIds, parameters } = payload ?? {};
       if (typeof jobId !== 'string' || !/^[0-9a-f]{32}$/.test(jobId)) {
         return new Response('jobId is required', { status: 422 });
       }
@@ -3521,14 +3530,18 @@ export default {
       if (typeof prompt !== 'string' || prompt.trim() === '' || prompt.length > 8000) {
         return new Response('prompt is required', { status: 422 });
       }
-      if (typeof imageId !== 'string' || !IMAGE_ID_RE.test(imageId)) {
-        return new Response('imageId is required', { status: 422 });
+      // 入力画像。ヘッドスワップのように複数枚渡すときは imageIds に順番どおり入れる
+      //（1 枚目が切り抜き、2 枚目が顔写真）。imageId は 1 枚だけのときの書き方
+      const ids = imageIds ?? (imageId === undefined ? undefined : [imageId]);
+      if (!Array.isArray(ids) || ids.length === 0 || ids.length > POE_MAX_IMAGES
+        || !ids.every((id) => typeof id === 'string' && IMAGE_ID_RE.test(id))) {
+        return new Response(`imageId is required（画像は ${POE_MAX_IMAGES} 枚まで）`, { status: 422 });
       }
       if (parameters != null && (typeof parameters !== 'object' || Array.isArray(parameters)
         || JSON.stringify(parameters).length > 2000)) {
         return new Response('Invalid parameters', { status: 422 });
       }
-      await stub.startPoeJob(jobId, { model, prompt, imageId, parameters: parameters ?? {} });
+      await stub.startPoeJob(jobId, { model, prompt, imageIds: ids, parameters: parameters ?? {} });
       return Response.json({ queued: true, jobId });
     }
 

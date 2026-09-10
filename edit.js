@@ -11,22 +11,30 @@ const BOTS = [
   { id: '__custom__', name: 'カスタム…' },
 ];
 
-// 名前欄の初期候補（アルファベット順）。datalist なので入力で絞り込まれ、
-// 自由入力もできる。候補は固定で、過去の入力が増えていくことはない
+// 名前欄の候補（アルファベット順）。入力中は候補リストに出て、選ばずに
+// 自由入力もできる。候補は固定で、過去の入力が増えていくことはない。
+// keys は名前そのもの以外の引き当て方（読み・ローマ字）で、日本語名を
+// IME で打っている最中（変換前のかな）でも候補に出せるようにするためのもの
 const NAME_PRESETS = [
-  'Asher Angel',
-  'Chris Pratt',
-  'Henry Cavill',
-  'Jaehyun (NCT)',
-  'Jay (ENHYPEN)',
-  'Jeno (NCT)',
-  'Robert Pattinson',
-  'Taeyong (NCT)',
-  'Tom Holland',
-  'Vinnie Hacker',
-  '新田真剣佑',
-  '吉沢亮',
+  { name: 'Asher Angel', keys: ['アッシャー・エンジェル', 'あっしゃー'] },
+  { name: 'Chris Pratt', keys: ['クリス・プラット', 'くりすぷらっと'] },
+  { name: 'Henry Cavill', keys: ['ヘンリー・カヴィル', 'へんりーかゔぃる'] },
+  { name: 'Jaehyun (NCT)', keys: ['ジェヒョン', 'じぇひょん'] },
+  { name: 'Jay (ENHYPEN)', keys: ['ジェイ', 'じぇい'] },
+  { name: 'Jeno (NCT)', keys: ['ジェノ', 'じぇの'] },
+  { name: 'Robert Pattinson', keys: ['ロバート・パティンソン', 'ろばーとぱてぃんそん'] },
+  { name: 'Taeyong (NCT)', keys: ['テヨン', 'てよん'] },
+  { name: 'Tom Holland', keys: ['トム・ホランド', 'とむほらんど'] },
+  { name: 'Vinnie Hacker', keys: ['ヴィニー・ハッカー', 'ゔぃにーはっかー'] },
+  { name: '新田真剣佑', keys: ['にったまっけんゆう', 'まっけん', 'Mackenyu'] },
+  { name: '吉沢亮', keys: ['よしざわりょう', 'Ryo Yoshizawa'] },
 ];
+
+// ヘッドスワップの既定の指示。切り抜き（1 枚目）の頭部を、別に読み込んだ
+// 顔写真（2 枚目）の人物に置き換えさせる。編集プロンプトの代わりに送る
+const HEAD_SWAP_PROMPT = `Replace the head of the person in the first image with the head of the person in the second image.
+Keep the first image's body, pose, clothing, background and lighting exactly as they are.
+Match the original head size, angle and skin tone, and blend the neck and hairline seamlessly.`;
 
 // 選択枠の比率プリセット。orient（縦/横）で w:h を入れ替えて使う
 const RATIOS = {
@@ -56,6 +64,7 @@ const LS_STATE = 'fal_edit_state'; // 選択範囲・アップロード済み元
 const IDB_NAME = 'fal_edit';
 const IDB_STORE = 'state';
 const IDB_IMAGE_KEY = 'image';
+const IDB_FACE_KEY = 'face'; // ヘッドスワップ用の顔写真（元画像と同じく再読み込みで復元する）
 
 const POLL_INTERVAL_MS = 2000;
 const SEND_MIN_PX = 512; // AI に送る切り抜きの最小長辺（小さすぎると編集品質が落ちる）
@@ -80,7 +89,19 @@ const els = {
   promptPreview: $('#promptPreview'),
   extraPrompt: $('#extraPrompt'),
   nameInput: $('#nameInput'),
-  namePresets: $('#namePresets'),
+  nameSuggest: $('#nameSuggest'),
+  headSwapToggle: $('#headSwapToggle'),
+  headSwapPanel: $('#headSwapPanel'),
+  headSwapPrompt: $('#headSwapPrompt'),
+  headSwapPreview: $('#headSwapPreview'),
+  btnHeadSwapReset: $('#btnHeadSwapReset'),
+  faceFileInput: $('#faceFileInput'),
+  faceDrop: $('#faceDrop'),
+  faceEmpty: $('#faceEmpty'),
+  facePreview: $('#facePreview'),
+  faceThumb: $('#faceThumb'),
+  btnFaceChange: $('#btnFaceChange'),
+  btnFaceClear: $('#btnFaceClear'),
   botSelect: $('#botSelect'),
   customBotField: $('#customBotField'),
   customBot: $('#customBot'),
@@ -195,6 +216,7 @@ async function idbGet(key) {
 
 let img = null; // 元画像（自然サイズで合成に使う）
 let imgDataUri = null; // 元画像の data URI（初回実行時のアップロード用）
+let faceDataUri = null; // ヘッドスワップ用の顔写真（実行のたびにアップロードするが、中身が同じなら送られない）
 let origUrl = null; // アップロード済み元画像の URL（画像を変えるまで再利用）
 let displayScale = 1; // 表示幅 / 自然幅
 let sel = { x: 0, y: 0, w: 0, h: 0 }; // 表示座標での選択範囲
@@ -781,6 +803,198 @@ function createOverlay(cropCanvas, aiImgEl) {
   return c;
 }
 
+/* ---------- 名前の候補リスト ---------- */
+// datalist はブラウザによって出方が違ううえ、IME の変換中は絞り込みが効かない。
+// 登録済みの名前が打っている最中にそのまま出てほしいので、自前で組む
+
+let suggestItems = []; // 今出している候補（名前の文字列）
+let suggestIndex = -1; // キーで選んでいる位置。-1 は未選択
+
+// カタカナはひらがなに寄せる。「トム」と打っても「とむ」で引けるようにするため
+const foldKana = (t) => t.replace(/[\u30a1-\u30f6]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60));
+const suggestKey = (t) => foldKana(t.toLowerCase().replace(/[\s・]/g, ''));
+
+// 名前そのものと読み（keys）のどれかに含まれていれば候補に出す。
+// 先頭一致を先に並べて、打ち始めた文字から素直に絞れるようにする
+function matchNames(query) {
+  const q = suggestKey(query.trim());
+  if (!q) return NAME_PRESETS.map((p) => p.name);
+  const head = [];
+  const rest = [];
+  for (const preset of NAME_PRESETS) {
+    const keys = [preset.name, ...(preset.keys ?? [])].map(suggestKey);
+    if (keys.some((k) => k.startsWith(q))) head.push(preset.name);
+    else if (keys.some((k) => k.includes(q))) rest.push(preset.name);
+  }
+  return [...head, ...rest];
+}
+
+function closeSuggest() {
+  suggestItems = [];
+  suggestIndex = -1;
+  els.nameSuggest.hidden = true;
+  els.nameSuggest.replaceChildren();
+  els.nameInput.setAttribute('aria-expanded', 'false');
+  els.nameInput.removeAttribute('aria-activedescendant');
+}
+
+function highlightSuggest() {
+  const opts = els.nameSuggest.children;
+  for (let i = 0; i < opts.length; i += 1) {
+    const on = i === suggestIndex;
+    opts[i].classList.toggle('active', on);
+    opts[i].setAttribute('aria-selected', on ? 'true' : 'false');
+    if (on) opts[i].scrollIntoView({ block: 'nearest' });
+  }
+  if (suggestIndex >= 0) els.nameInput.setAttribute('aria-activedescendant', `nameSuggest-${suggestIndex}`);
+  else els.nameInput.removeAttribute('aria-activedescendant');
+}
+
+function openSuggest() {
+  const names = matchNames(els.nameInput.value);
+  // 候補が入力そのものだけなら出しても選ぶものがない
+  if (names.length === 0 || (names.length === 1 && names[0] === els.nameInput.value.trim())) {
+    closeSuggest();
+    return;
+  }
+  suggestItems = names;
+  suggestIndex = -1;
+  els.nameSuggest.replaceChildren(...names.map((name, i) => {
+    const li = document.createElement('li');
+    li.id = `nameSuggest-${i}`;
+    li.setAttribute('role', 'option');
+    li.setAttribute('aria-selected', 'false');
+    li.textContent = name;
+    // クリックで input のフォーカスが外れて閉じてしまわないよう mousedown で決める
+    li.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      commitSuggest(name);
+    });
+    return li;
+  }));
+  els.nameSuggest.hidden = false;
+  els.nameInput.setAttribute('aria-expanded', 'true');
+  highlightSuggest();
+}
+
+function commitSuggest(name) {
+  els.nameInput.value = name;
+  closeSuggest();
+  saveForm();
+  els.nameInput.focus();
+}
+
+function moveSuggest(step) {
+  if (els.nameSuggest.hidden) {
+    openSuggest();
+    if (els.nameSuggest.hidden) return;
+  }
+  const n = suggestItems.length;
+  if (n === 0) return;
+  suggestIndex = suggestIndex < 0
+    ? (step > 0 ? 0 : n - 1)
+    : (suggestIndex + step + n) % n;
+  highlightSuggest();
+}
+
+function initNameSuggest() {
+  els.nameInput.addEventListener('input', openSuggest);
+  els.nameInput.addEventListener('focus', openSuggest);
+  els.nameInput.addEventListener('blur', closeSuggest);
+  els.nameInput.addEventListener('keydown', (e) => {
+    // 変換中のキーは IME のもの。候補の操作に横取りしない
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); moveSuggest(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); moveSuggest(-1); }
+    else if (e.key === 'Enter' && suggestIndex >= 0) { e.preventDefault(); commitSuggest(suggestItems[suggestIndex]); }
+    else if (e.key === 'Escape' && !els.nameSuggest.hidden) { e.preventDefault(); closeSuggest(); }
+  });
+}
+
+/* ---------- ヘッドスワップ（顔写真の差し替え） ---------- */
+// チェックしている間は、切り抜きと一緒に顔写真を送り、編集プロンプトの代わりに
+// ヘッドスワップの指示を送る。顔写真は元画像とは別枠で読み込む
+
+function headSwapOn() {
+  return els.headSwapToggle.checked;
+}
+
+function setFace(dataUri) {
+  faceDataUri = dataUri;
+  // src='' はページ自身を取りに行く実装があるので、消すときは属性ごと外す
+  if (dataUri) els.faceThumb.src = dataUri;
+  else els.faceThumb.removeAttribute('src');
+  els.facePreview.hidden = !dataUri;
+  els.faceEmpty.hidden = !!dataUri;
+  updateExecState();
+}
+
+function loadFaceFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    setFace(e.target.result);
+    // 再読み込みでも残るよう端末内（IndexedDB）に置く。失敗しても機能自体は使える
+    idbSet(IDB_FACE_KEY, { dataUri: faceDataUri }).catch(() => {});
+  };
+  reader.readAsDataURL(file);
+}
+
+function updateHeadSwapUI() {
+  els.headSwapPanel.hidden = !headSwapOn();
+  updatePromptPreview();
+  updateHeadSwapPreview();
+  updateExecState();
+}
+
+function updateHeadSwapPreview() {
+  const t = els.headSwapPrompt.value.trim();
+  els.headSwapPreview.textContent = t ? (t.length > 42 ? `${t.slice(0, 42)}…` : t) : '（未入力）';
+}
+
+function initHeadSwap() {
+  els.headSwapToggle.addEventListener('change', () => { updateHeadSwapUI(); saveForm(); });
+  els.headSwapPrompt.addEventListener('input', () => { updateHeadSwapPreview(); updateExecState(); saveForm(); });
+  els.btnHeadSwapReset.addEventListener('click', () => {
+    els.headSwapPrompt.value = HEAD_SWAP_PROMPT;
+    updateHeadSwapPreview();
+    updateExecState();
+    saveForm();
+  });
+
+  els.faceEmpty.addEventListener('click', () => els.faceFileInput.click());
+  els.btnFaceChange.addEventListener('click', () => {
+    els.faceFileInput.value = '';
+    els.faceFileInput.click();
+  });
+  els.btnFaceClear.addEventListener('click', () => {
+    els.faceFileInput.value = '';
+    setFace(null);
+    idbSet(IDB_FACE_KEY, { dataUri: null }).catch(() => {});
+  });
+  els.faceFileInput.addEventListener('change', () => loadFaceFile(els.faceFileInput.files?.[0]));
+
+  els.faceDrop.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    els.faceDrop.classList.add('dragover');
+  });
+  els.faceDrop.addEventListener('dragleave', () => els.faceDrop.classList.remove('dragover'));
+  els.faceDrop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    els.faceDrop.classList.remove('dragover');
+    loadFaceFile(e.dataTransfer.files?.[0]);
+  });
+}
+
+// 端末内に残っている顔写真を戻す（元画像の復元とは独立して行う）
+async function restoreFace() {
+  let saved = null;
+  try {
+    saved = await idbGet(IDB_FACE_KEY);
+  } catch { /* IndexedDB が使えない環境では復元しない */ }
+  if (typeof saved?.dataUri === 'string' && !faceDataUri) setFace(saved.dataUri);
+}
+
 /* ---------- pipeline ---------- */
 
 // プロンプト中の {NAME}（カッコ含む）を名前欄の入力で置換する。
@@ -790,10 +1004,16 @@ function applyNameToPrompt(prompt) {
   return name ? prompt.replaceAll('{NAME}', name) : prompt;
 }
 
+// 送る指示のもとになる文。ふだんは編集プロンプトだが、ヘッドスワップ中は
+// 顔写真の差し替えが指示そのものなので、そちらに差し替える
+function basePromptText() {
+  return (headSwapOn() ? els.headSwapPrompt.value : els.editPrompt.value).trim();
+}
+
 // 実際に送るプロンプト。{NAME} を置換した編集プロンプトの末尾に、
 // 追加プロンプト欄に入力があれば改行でつないで足す（そのつどの書き足し用）
 function buildPrompt() {
-  const base = applyNameToPrompt(els.editPrompt.value.trim());
+  const base = applyNameToPrompt(basePromptText());
   const extra = applyNameToPrompt(els.extraPrompt.value.trim());
   return extra ? `${base}\n${extra}` : base;
 }
@@ -850,7 +1070,9 @@ function updateExecState() {
   const model = currentModel();
   els.btnExec.disabled = running
     || !hasSel
-    || els.editPrompt.value.trim() === ''
+    || basePromptText() === ''
+    // ヘッドスワップ中は置き換え先の顔写真がそろうまで実行できない
+    || (headSwapOn() && !faceDataUri)
     || !/^[\w.-]{1,64}$/.test(model);
   els.btnExec.textContent = running ? '実行中…' : '実行する';
   // 実行中に出ているのは前回の結果。新しいものと取り違えないよう印を出す
@@ -862,7 +1084,12 @@ async function execute() {
   const bot = currentBot();
   const model = currentModel();
   const prompt = buildPrompt();
+  const headSwap = headSwapOn();
   if (!prompt || !/^[\w.-]{1,64}$/.test(model)) return;
+  if (headSwap && !faceDataUri) {
+    setEditError('ヘッドスワップに使う顔写真を読み込んでください');
+    return;
+  }
 
   // {NAME} タグがあるのに名前欄が空のときだけ、置換されないまま送ってよいか確認する
   if (prompt.includes('{NAME}') && els.nameInput.value.trim() === '') {
@@ -889,10 +1116,19 @@ async function execute() {
     setStatus('切り抜きをアップロード中…');
     const cropUrl = await uploadImage(buildSendImage(rect), null);
 
+    // ヘッドスワップ中は顔写真も送る。中身が同じなら送信は省かれる（内容アドレス）
+    let faceUrl = null;
+    if (headSwap) {
+      setStatus('顔写真をアップロード中…');
+      faceUrl = await uploadImage(faceDataUri, null);
+    }
+
     const job = {
       jobId: makeJobId(),
       origUrl,
       cropUrl,
+      faceUrl,
+      headSwap,
       rect,
       model,
       prompt,
@@ -905,7 +1141,8 @@ async function execute() {
       jobId: job.jobId,
       model,
       prompt,
-      imageId: imageIdFromUrl(cropUrl),
+      // 1 枚目が切り抜き、2 枚目が顔写真。プロンプトはこの順を前提に書いてある
+      imageIds: [cropUrl, faceUrl].filter(Boolean).map(imageIdFromUrl),
       parameters: job.parameters,
     });
     // ここまで来ればサーバー側で完結するので、タブを閉じても次回再開できる
@@ -961,21 +1198,32 @@ async function awaitAndComposite(job) {
     blend: job.blend,
     colorMatch: job.color,
     parameters: job.parameters,
+    ...(job.headSwap ? { headSwap: true } : {}),
     created: new Date(job.startedAt).toISOString(),
   });
 
   // 生成履歴に保存する（トップのギャラリーに表示される）。
   // 画像は [合成結果, AI編集後, 切り抜き, 元画像] の順で、削除時に一括で消える
+  //（ヘッドスワップのときは末尾に顔写真も残す）
   const record = {
     id: job.jobId,
     ts: Date.now(),
     type: 'edit',
     model: `poe/${job.model}`,
     prompt: job.prompt,
-    input: { rect: job.rect, blend: job.blend, colorMatch: job.color, parameters: job.parameters },
+    input: {
+      rect: job.rect,
+      blend: job.blend,
+      colorMatch: job.color,
+      parameters: job.parameters,
+      ...(job.headSwap ? { headSwap: true } : {}),
+    },
     seed: null,
     elapsed: ((Date.now() - job.startedAt) / 1000).toFixed(1),
-    images: [{ url: compUrl }, { url: result.url }, { url: job.cropUrl }, { url: job.origUrl }],
+    images: [
+      { url: compUrl }, { url: result.url }, { url: job.cropUrl }, { url: job.origUrl },
+      ...(job.faceUrl ? [{ url: job.faceUrl }] : []),
+    ],
   };
   try {
     await postJson('/api/history', record);
@@ -1253,6 +1501,8 @@ function saveForm() {
     prompt: els.editPrompt.value,
     extraPrompt: els.extraPrompt.value,
     name: els.nameInput.value,
+    headSwap: els.headSwapToggle.checked,
+    headSwapPrompt: els.headSwapPrompt.value,
     bot: els.botSelect.value,
     customBot: els.customBot.value,
     quality: els.qualitySelect.value,
@@ -1272,6 +1522,10 @@ function restoreForm() {
   if (typeof saved.prompt === 'string') els.editPrompt.value = saved.prompt;
   if (typeof saved.extraPrompt === 'string') els.extraPrompt.value = saved.extraPrompt;
   if (typeof saved.name === 'string') els.nameInput.value = saved.name;
+  els.headSwapToggle.checked = saved.headSwap === true;
+  if (typeof saved.headSwapPrompt === 'string' && saved.headSwapPrompt.trim() !== '') {
+    els.headSwapPrompt.value = saved.headSwapPrompt;
+  }
   if (BOTS.some((b) => b.id === saved.bot)) els.botSelect.value = saved.bot;
   if (typeof saved.customBot === 'string') els.customBot.value = saved.customBot;
   if (['low', 'medium', 'high'].includes(saved.quality)) els.qualitySelect.value = saved.quality;
@@ -1289,8 +1543,13 @@ function restoreForm() {
   updateLockedClass();
 }
 
-// 折りたたみサマリーに現在のプロンプトの先頭を表示する
+// 折りたたみサマリーに現在のプロンプトの先頭を表示する。
+// ヘッドスワップ中は送られないので、そうと分かる文言に差し替える
 function updatePromptPreview() {
+  if (headSwapOn()) {
+    els.promptPreview.textContent = '（ヘッドスワップ中は送信しません）';
+    return;
+  }
   const t = els.editPrompt.value.trim();
   els.promptPreview.textContent = t ? (t.length > 42 ? `${t.slice(0, 42)}…` : t) : '（未入力）';
 }
@@ -1348,14 +1607,10 @@ function initForm() {
     opt.textContent = b.name;
     els.botSelect.appendChild(opt);
   }
-  for (const n of NAME_PRESETS) {
-    const opt = document.createElement('option');
-    opt.value = n;
-    els.namePresets.appendChild(opt);
-  }
+  els.headSwapPrompt.value = HEAD_SWAP_PROMPT; // 下書きがあれば restoreForm が上書きする
   restoreForm();
   updateBotFields();
-  updatePromptPreview();
+  updateHeadSwapUI(); // プロンプトのプレビューもここで整う
   els.blendVal.textContent = els.blendSlider.value;
   els.colorVal.textContent = els.colorSlider.value;
 
@@ -1429,6 +1684,8 @@ function initSelection() {
 }
 
 initForm();
+initNameSuggest();
+initHeadSwap();
 initUpload();
 initSelection();
 initLightbox();
@@ -1436,6 +1693,7 @@ els.btnExec.addEventListener('click', execute);
 updateOrientVis();
 updateExecState();
 restoreWorkspace();
+restoreFace();
 if (falBoot.requireShared(['falHistory', 'falUpload'])) fetchHistory();
 // タブに戻ってきたら他画面・他端末での変更を取り込む
 document.addEventListener('visibilitychange', () => { if (!document.hidden) fetchHistory(); });
