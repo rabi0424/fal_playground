@@ -2242,6 +2242,90 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 /* 追加プロンプトは書き足し用なので、編集プロンプトより浅く見せる */
 .extra-prompt-field textarea { min-height: 56px; }
 
+/* 名前欄の候補リスト（登録済みの名前を入力中に出す）。
+   入力欄のすぐ下に浮かせる。項目数が多いときはこの中でスクロールさせる */
+.suggest-wrap { position: relative; }
+
+.suggest-list {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-raised);
+  max-height: 224px;
+  overflow-y: auto;
+}
+
+.suggest-list li {
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.suggest-list li:hover { background: var(--nav-hover); }
+.suggest-list li.active { background: var(--nav-active); }
+
+/* ヘッドスワップ: 切り抜きとは別に顔写真を読み込ませる */
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+/* 全体規則の input { width: 100% } に負けてチェックボックスが横幅を食わないようにする */
+.check-row input[type="checkbox"] {
+  width: auto;
+  flex: none;
+  margin: 0;
+}
+
+.head-swap-field { gap: 6px; }
+
+.head-swap-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.face-drop {
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  text-align: center;
+  transition: border-color 0.15s;
+}
+
+.face-drop.dragover { border-color: var(--accent); }
+.face-empty { cursor: pointer; }
+.face-empty .upload-icon { font-size: 20px; margin-bottom: 4px; }
+.face-empty .upload-text { font-size: 13px; }
+
+.face-preview { display: flex; align-items: center; gap: 12px; }
+/* 白っぽい写真でも輪郭が分かるよう、枠と下地を敷く */
+.face-preview img {
+  flex: none;
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.face-preview-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
 /* ---------- アクセシビリティ ---------- */
 /* 動きを減らす設定: スライドやスケールは行わず、短いフェードに置き換える
    （フィードバックそのものは残す） */

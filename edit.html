@@ -87,9 +87,51 @@
       </label>
       <label class="field">
         <span class="label">名前 <em>（プロンプト中の {NAME} をこの名前で置換して送信します）</em></span>
-        <input id="nameInput" type="text" list="namePresets" placeholder="例: Tom Holland" spellcheck="false">
-        <datalist id="namePresets"></datalist>
+        <!-- 登録済みの名前は datalist ではなく自前の候補リストで出す。入力中（IME の変換中も）
+             そのまま絞り込まれ、読みからも引ける -->
+        <div class="suggest-wrap">
+          <input id="nameInput" type="text" placeholder="例: Tom Holland" spellcheck="false"
+                 autocomplete="off" role="combobox" aria-expanded="false"
+                 aria-autocomplete="list" aria-controls="nameSuggest">
+          <ul id="nameSuggest" class="suggest-list" role="listbox" aria-label="登録済みの名前" hidden></ul>
+        </div>
       </label>
+
+      <div class="field head-swap-field">
+        <label class="check-row">
+          <input type="checkbox" id="headSwapToggle">
+          <span>ヘッドスワップ（顔写真の頭部に置き換える）</span>
+        </label>
+        <div class="hint">アップロード画像とは別に顔写真を読み込み、切り抜きと一緒に AI へ送って頭部だけを差し替えます。編集プロンプトの代わりに下の指示を送ります</div>
+      </div>
+
+      <div id="headSwapPanel" class="head-swap-panel" hidden>
+        <input type="file" id="faceFileInput" accept="image/*" hidden>
+        <div class="face-drop" id="faceDrop">
+          <div class="face-empty" id="faceEmpty">
+            <div class="upload-icon">＋</div>
+            <div class="upload-text">顔写真を読み込む</div>
+            <div class="upload-hint">クリックまたはドラッグ＆ドロップ。顔がはっきり写っている 1 枚を選んでください</div>
+          </div>
+          <div class="face-preview" id="facePreview" hidden>
+            <img id="faceThumb" alt="顔写真">
+            <div class="face-preview-actions">
+              <button id="btnFaceChange" class="ghost-btn" type="button">別の顔写真</button>
+              <button id="btnFaceClear" class="ghost-btn" type="button">取り消す</button>
+            </div>
+          </div>
+        </div>
+        <details class="advanced">
+          <summary>ヘッドスワップの指示 <span class="prompt-preview" id="headSwapPreview"></span></summary>
+          <div class="advanced-body">
+            <textarea id="headSwapPrompt" rows="4" spellcheck="false"></textarea>
+            <div class="hint">1 枚目に切り抜き、2 枚目に顔写真の順で送ります。{NAME} は名前欄の値で置換されます</div>
+            <div>
+              <button id="btnHeadSwapReset" class="ghost-btn" type="button">既定の指示に戻す</button>
+            </div>
+          </div>
+        </details>
+      </div>
       <div class="row">
         <label class="field">
           <span class="label">AI モデル（Poe ボット）</span>
