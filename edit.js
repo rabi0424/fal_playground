@@ -52,8 +52,11 @@ const NANO_RATIOS = [
   { label: '3:4', value: 3 / 4 }, { label: '4:3', value: 4 / 3 }, { label: '2:3', value: 2 / 3 },
   { label: '3:2', value: 3 / 2 }, { label: '9:16', value: 9 / 16 }, { label: '16:9', value: 16 / 9 },
 ];
-const GPT_RATIOS = [
-  { label: '1:1', value: 1 }, { label: '3:2', value: 3 / 2 }, { label: '2:3', value: 2 / 3 },
+// GPT Image 2 の aspect は比率ではなく WIDTHxHEIGHT を受け取る
+//（'3:2' を送ると「Invalid size '3:2'. Expected WIDTHxHEIGHT」で失敗する）。
+// 対応する比率は 1:1 / 3:2 / 2:3 の 3 つなので、その実寸を候補にする
+const GPT_SIZES = [
+  { label: '1024x1024', value: 1 }, { label: '1536x1024', value: 3 / 2 }, { label: '1024x1536', value: 2 / 3 },
 ];
 
 const LS_FORM = 'fal_edit_form';
@@ -1031,7 +1034,7 @@ function currentModel() {
 function botParameters(bot, rect) {
   if (bot.id === '__custom__') return {};
   if (bot.gpt) {
-    return { aspect: nearestRatio(GPT_RATIOS, rect.w / rect.h), quality: els.qualitySelect.value };
+    return { aspect: nearestRatio(GPT_SIZES, rect.w / rect.h), quality: els.qualitySelect.value };
   }
   return { aspect_ratio: nearestRatio(NANO_RATIOS, rect.w / rect.h) };
 }
