@@ -402,7 +402,7 @@ function updateCustomSize() {
 
 /* ---------- LoRA ---------- */
 
-function addLoraRow(path = '', scale, listEl = els.loraList) {
+function addLoraRow(path = '', scale, listEl = els.loraList, off = false) {
   // 履歴の再利用などで未登録の URL が来たら自動登録する。
   // ベースモデルは今選んでいるモデルのものとして控える（候補の絞り込みに使う）
   if (path) registerLora(path, currentBaseMeta());
@@ -416,6 +416,13 @@ function addLoraRow(path = '', scale, listEl = els.loraList) {
   const head = document.createElement('div');
   head.className = 'lora-head';
 
+  // 有効 / 無効のワンタップ切り替え。scale を 0 に落として戻す代わりに使う
+  // （無効の行は送らないので、モデルごとの LoRA 個数の上限も消費しない）
+  const onoffBtn = document.createElement('button');
+  onoffBtn.className = 'ghost-btn small lora-onoff';
+  onoffBtn.type = 'button';
+  head.appendChild(onoffBtn);
+
   const select = document.createElement('select');
   select.className = 'lora-select';
   head.appendChild(select);
@@ -427,6 +434,20 @@ function addLoraRow(path = '', scale, listEl = els.loraList) {
   delBtn.title = 'この行を削除';
   delBtn.addEventListener('click', () => row.remove());
   head.appendChild(delBtn);
+
+  const setEnabled = (on) => {
+    // 重みは触らない。無効にしているあいだも値はそのまま残す
+    row.dataset.off = on ? '' : '1';
+    row.classList.toggle('lora-off', !on);
+    onoffBtn.textContent = on ? '有効' : '無効';
+    onoffBtn.setAttribute('aria-pressed', String(on));
+    onoffBtn.title = on ? 'この LoRA を一時的に外す（重みはそのまま残る）' : 'この LoRA を使う';
+  };
+  onoffBtn.addEventListener('click', () => {
+    setEnabled(row.dataset.off === '1');
+    scheduleSaveForm(); // ボタンは input/change を出さないので、ここで下書きを更新する
+  });
+  setEnabled(!off);
 
   row.appendChild(head);
 
@@ -645,6 +666,8 @@ function insertTriggerWords(words) {
 
 function collectLorasFrom(listEl) {
   return [...listEl.querySelectorAll('.lora-row')]
+    // 無効にした行は送らない（行と重みは画面に残したまま外せるように）
+    .filter((row) => row.dataset.off !== '1')
     .map((row) => {
       const select = row.querySelector('.lora-select');
       const path = select.value === LORA_URL_OPTION
@@ -1035,7 +1058,7 @@ function addVariant(ownLoras = [], addStarterRow = true) {
   els.variantList.appendChild(block);
 
   if (ownLoras.length > 0) {
-    for (const l of ownLoras) addLoraRow(l.path, l.scale, list);
+    for (const l of ownLoras) addLoraRow(l.path, l.scale, list, l.off);
   } else if (addStarterRow) {
     addLoraRow('', undefined, list);
   }
@@ -1540,7 +1563,9 @@ async function runModalJobFrom(job) {
     } finally {
       clearInterval(ticker);
     }
-    entry.result = { url: r.url, seed: r.seed, elapsedMs: r.elapsedMs ?? null };
+    entry.result = {
+      url: r.url, seed: r.seed, elapsedMs: r.elapsedMs ?? null, execMs: r.execMs ?? null,
+    };
     saveActiveJob(job);
   }
 
@@ -1552,9 +1577,16 @@ function finishModal(job) {
   removeActiveJob(job);
   const done = job.entries.filter((e) => e.result);
   if (done.length === 0) return;
-  // サーバーが記録した実処理時間（DO のキュー待ちを含まない）。統計で使う。
-  // elapsed（クライアント計測・待ち時間込み）は表示互換のためそのまま残す
-  const procMs = done.map((e) => e.result.elapsedMs).filter((v) => Number.isFinite(v) && v > 0);
+  // 1 枚あたりの生成時間。統計で使う。
+  //
+  // Modal が返す純生成時間（X-Exec-Seconds）を優先する。elapsedMs は Worker が
+  // 投げてから受け取るまでなので、複数枚をまとめて投げると Modal は同時 1 コンテナで
+  // 順に処理する都合上、2 枚目以降に「生成が始まるまでの待ち」が乗ってしまう。
+  // 純生成時間を返さない相手のために elapsedMs へ落とす。
+  // elapsed（クライアント計測・ジョブ全体の実時間）は表示互換のためそのまま残す
+  const procMs = done
+    .map((e) => e.result.execMs ?? e.result.elapsedMs)
+    .filter((v) => Number.isFinite(v) && v > 0);
   const record = {
     id: `modal_${Date.now()}`,
     ts: Date.now(),
@@ -1934,6 +1966,7 @@ function openLightbox(urls, index = 0) {
 }
 
 function showLightboxImage() {
+  lightboxZoom.reset(); // 前の画像のズームを持ち越さない
   els.lightbox.querySelector('img').src = lightboxUrls[lightboxIndex] ?? '';
   els.lightboxCounter.hidden = lightboxUrls.length < 2;
   els.lightboxCounter.textContent = `${lightboxIndex + 1} / ${lightboxUrls.length}`;
@@ -1947,6 +1980,7 @@ function lightboxNav(dir) {
 }
 
 function closeLightbox() {
+  lightboxZoom.reset();
   els.lightbox.hidden = true;
   els.lightbox.querySelector('img').src = '';
 }
@@ -2133,7 +2167,7 @@ function reuseRecord(record) {
 
 /* ---------- form persistence ---------- */
 
-// LoRA リストの全行を（scale 0 や未登録も含めて）そのまま書き出す
+// LoRA リストの全行を（scale 0 や未登録・無効にしたものも含めて）そのまま書き出す
 function serializeLoraList(listEl) {
   return [...listEl.querySelectorAll('.lora-row')]
     .map((row) => {
@@ -2141,7 +2175,11 @@ function serializeLoraList(listEl) {
       const path = select.value === LORA_URL_OPTION
         ? row.querySelector('.lora-path').value.trim()
         : select.value;
-      return { path, scale: Number(row.querySelector('input[type="number"]').value) || 0 };
+      return {
+        path,
+        scale: Number(row.querySelector('input[type="number"]').value) || 0,
+        ...(row.dataset.off === '1' ? { off: true } : {}),
+      };
     })
     .filter((l) => l.path !== '');
 }
@@ -2202,7 +2240,7 @@ function restoreFormState() {
   updateCustomSize();
 
   els.loraList.innerHTML = '';
-  for (const l of s.common || []) addLoraRow(l.path, l.scale, els.loraList);
+  for (const l of s.common || []) addLoraRow(l.path, l.scale, els.loraList, l.off);
 
   // 比較モードは LoRA 対応モデルのときだけ復元する
   if (s.compare && !els.loraField.hidden) {
@@ -2303,6 +2341,10 @@ els.addLoraBtn.addEventListener('click', () => addLoraRow());
 els.compareToggle.addEventListener('change', () => setCompareMode(els.compareToggle.checked));
 els.addVariantBtn.addEventListener('click', () => addVariant());
 
+// 画像のダブルタップで拡大、ドラッグで移動（画像の上のタップはこの中で始末される）。
+// 背景のタップで閉じる経路は今までどおり
+const lightboxZoom = falLightboxZoom.attach(els.lightbox, { onTap: closeLightbox });
+
 // スワイプ直後は click（背景タップで閉じる）を無効化して、意図しないクローズを防ぐ
 let lightboxTouchX = 0;
 let lightboxTouchY = 0;
@@ -2321,6 +2363,7 @@ els.lightbox.addEventListener('touchstart', (e) => {
 }, { passive: true });
 
 els.lightbox.addEventListener('touchend', (e) => {
+  if (lightboxZoom.zoomed) return; // ズーム中の指の動きは画像を動かすためのもの
   const dx = e.changedTouches[0].clientX - lightboxTouchX;
   const dy = e.changedTouches[0].clientY - lightboxTouchY;
   if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {

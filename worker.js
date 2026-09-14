@@ -73,6 +73,8 @@ const JOB_META_KINDS = { edit: 'edit', inpaint: 'inpaint' };
 
 // Poe の OpenAI 互換 API（部分AI編集で使用）。キーは Worker の Secret（POE_API_KEY）
 const POE_API_URL = 'https://api.poe.com/v1/chat/completions';
+// 1 回のリクエストに載せる画像の枚数。切り抜き 1 枚と、ヘッドスワップの顔写真 1 枚
+const POE_MAX_IMAGES = 2;
 
 // /api/upload で受け付ける画像の上限（デコード後のバイト数）
 const UPLOAD_MAX_BYTES = 40 * 1024 * 1024;
@@ -366,19 +368,31 @@ function hfAuthHeaders(env) {
   return env.HF_TOKEN ? { Authorization: `Bearer ${env.HF_TOKEN}` } : {};
 }
 
-// HF リポジトリのファイル一覧（LFS の oid 付き）。expand 付きの応答はページング
-// されるので Link ヘッダの rel="next" を辿って全件集める。
-// 失敗時は { status } を投げる（404 = リポジトリなし等をルート側で区別するため）
-async function fetchHfTree(repo, env) {
+// 一覧は 1 ページ 1000 件（expand を付けると 50 件に落ちる。下記参照）
+const HF_TREE_PAGE_SIZE = 1000;
+const HF_TREE_MAX_PAGES = 20;
+// 最終コミット日時を取りに行く範囲。候補ファイルのあるディレクトリだけを見る
+const HF_DATE_MAX_DIRS = 8;
+const HF_DATE_MAX_PAGES = 12;
+const HF_DATE_PAGES_PER_DIR = 4;
+// 日時を付ける対象（= 一覧の画面がチェックポイント / LoRA の候補として出すもの）
+const HF_MODEL_FILE_RE = /\.(safetensors|gguf)$/i;
+
+// HF のツリー API を Link ヘッダの rel="next" で辿る。
+// 失敗時は { status } を投げる（404 = リポジトリなし等をルート側で区別するため）。
+// ただし 2 ページ目以降で失敗したら、取れた分だけ返す
+async function fetchHfTreePages(url, maxPages, env) {
   const entries = [];
-  let next = `${HF_BASE}/api/models/${repo}/tree/main?recursive=true&expand=true`;
-  for (let page = 0; page < 20 && next; page++) {
+  let next = url;
+  let pages = 0;
+  while (next && pages < maxPages) {
     const res = await fetch(next, {
       headers: { 'User-Agent': 'fal-playground', ...hfAuthHeaders(env) },
       signal: apiSignal(),
     });
+    pages++;
     if (!res.ok) {
-      if (entries.length > 0) break; // 途中で失敗したら取れた分だけ返す
+      if (entries.length > 0) break;
       const err = new Error(`HF tree error ${res.status}`);
       err.status = res.status;
       err.body = await res.text();
@@ -389,7 +403,65 @@ async function fetchHfTree(repo, env) {
     const link = res.headers.get('Link') || '';
     next = link.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
   }
+  return { entries, pages };
+}
+
+/*
+ * 候補ファイルに最終コミット日時（lastCommit.date）を後から付ける。
+ *
+ * 日時は expand=true でしか返らないが、expand を付けるとページが 1000 件から
+ * 50 件に縮む。全体を expand で舐めると、履歴画像を大量に置いたリポジトリでは
+ * ページ数の上限が先に来て、名前が後ろのファイルが一覧から丸ごと落ちる
+ * （`_archive/` の下だけで打ち切られ、直下の .safetensors が候補に出なかった）。
+ * そこで一覧は expand 無しで全件取り、日時は候補ファイルのあるディレクトリだけ
+ * 非再帰の expand で取りに行く。取れなくても一覧は出す（日時は並べ替えの材料）。
+ */
+async function addHfCommitDates(repo, entries, env) {
+  const counts = new Map();
+  for (const e of entries) {
+    if (e.type !== 'file' || !HF_MODEL_FILE_RE.test(e.path)) continue;
+    const slash = e.path.lastIndexOf('/');
+    const dir = slash < 0 ? '' : e.path.slice(0, slash);
+    counts.set(dir, (counts.get(dir) ?? 0) + 1);
+  }
+  if (counts.size === 0) return entries;
+  const byPath = new Map(entries.map((e) => [e.path, e]));
+  const dirs = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1]) // 候補の多いディレクトリから。上限で切られても損が小さい
+    .slice(0, HF_DATE_MAX_DIRS)
+    .map(([dir]) => dir);
+
+  let budget = HF_DATE_MAX_PAGES;
+  for (const dir of dirs) {
+    if (budget <= 0) break;
+    const path = dir === '' ? '' : `/${dir.split('/').map(encodeURIComponent).join('/')}`;
+    try {
+      const { entries: dated, pages } = await fetchHfTreePages(
+        `${HF_BASE}/api/models/${repo}/tree/main${path}?expand=true`,
+        Math.min(budget, HF_DATE_PAGES_PER_DIR),
+        env,
+      );
+      budget -= pages;
+      for (const d of dated) {
+        const hit = byPath.get(d.path);
+        if (hit && d.lastCommit) hit.lastCommit = d.lastCommit;
+      }
+    } catch {
+      budget--; // 日時が取れないディレクトリがあっても、ほかの候補まで諦めない
+    }
+  }
   return entries;
+}
+
+// HF リポジトリのファイル一覧（LFS の oid 付き）。候補ファイルには最終コミット
+// 日時も付ける。失敗時は { status } を投げる（ルート側で 404 等を区別するため）
+async function fetchHfTree(repo, env) {
+  const { entries } = await fetchHfTreePages(
+    `${HF_BASE}/api/models/${repo}/tree/main?recursive=true&limit=${HF_TREE_PAGE_SIZE}`,
+    HF_TREE_MAX_PAGES,
+    env,
+  );
+  return await addHfCommitDates(repo, entries, env);
 }
 
 /* ---------- PNG メタデータ焼き込み ---------- */
@@ -1834,7 +1906,8 @@ export class SyncState extends DurableObject {
       // 編集では入力サイズが 32 の倍数へ丸められる。合成側が元画像に戻すために要る
       width: job.width ?? null,
       height: job.height ?? null,
-      elapsedMs: job.elapsedMs ?? null, // 実処理時間（DO のキュー待ちを含まない）
+      elapsedMs: job.elapsedMs ?? null, // 投げてから受け取るまで（Modal 側の順番待ち込み）
+      execMs: job.execMs ?? null,       // サーバーが測った純生成時間（待ち時間を含まない）
       error: job.error ?? null,
     };
   }
@@ -1879,7 +1952,8 @@ export class SyncState extends DurableObject {
   /* ---- Poe 部分AI編集ジョブ ---- */
   // krea2 ジョブと同じ考え方: ジョブを登録してすぐ応答し、Poe API の呼び出しは
   // alarm で行う。生成中にタブを閉じても結果を取りこぼさない。
-  // 入力画像（切り抜き）は事前に /api/upload で R2 へ置き、その id を参照する
+  // 入力画像（切り抜き、ヘッドスワップなら顔写真も）は事前に /api/upload で
+  // R2 へ置き、その id を順番どおり参照する
 
   async startPoeJob(id, payload) {
     const key = `poe:job:${id}`;
@@ -1923,18 +1997,24 @@ export class SyncState extends DurableObject {
       job.attempts += 1;
       await this.ctx.storage.put(key, job);
 
-      const { model, prompt, imageId, parameters } = job.payload;
+      const { model, prompt, parameters } = job.payload;
+      // 積んだ時点の形（1 枚だけの imageId）で残っているジョブも読めるようにしておく
+      const imageIds = job.payload.imageIds ?? [job.payload.imageId];
 
-      // 入力画像（切り抜き）を R2 から読み出して data URI にする
-      const obj = await this.env.IMAGES.get(`${imageId}.png`);
-      if (!obj) {
-        job.status = 'error';
-        job.error = '入力画像が見つかりませんでした（アップロードからやり直してください）';
-        await this.ctx.storage.put(key, job);
-        return;
+      // 入力画像（切り抜き、ヘッドスワップならそのあとに顔写真）を R2 から
+      // 読み出して data URI にする。並びはそのまま Poe に渡す順になる
+      const dataUris = [];
+      for (const imageId of imageIds) {
+        const obj = await this.env.IMAGES.get(`${imageId}.png`);
+        if (!obj) {
+          job.status = 'error';
+          job.error = '入力画像が見つかりませんでした（アップロードからやり直してください）';
+          await this.ctx.storage.put(key, job);
+          return;
+        }
+        const mime = obj.httpMetadata?.contentType || 'image/png';
+        dataUris.push(`data:${mime};base64,${bytesToBase64(new Uint8Array(await obj.arrayBuffer()))}`);
       }
-      const mime = obj.httpMetadata?.contentType || 'image/png';
-      const dataUri = `data:${mime};base64,${bytesToBase64(new Uint8Array(await obj.arrayBuffer()))}`;
 
       const res = await fetch(POE_API_URL, {
         method: 'POST',
@@ -1948,7 +2028,7 @@ export class SyncState extends DurableObject {
             role: 'user',
             content: [
               { type: 'text', text: prompt },
-              { type: 'image_url', image_url: { url: dataUri } },
+              ...dataUris.map((url) => ({ type: 'image_url', image_url: { url } })),
             ],
           }],
           stream: false,
@@ -2080,6 +2160,11 @@ export class SyncState extends DurableObject {
 
       const seedHeader = Number(res.headers.get('X-Seed'));
       const seed = Number.isFinite(seedHeader) ? seedHeader : null;
+      // サーバーが測った純生成時間。Modal は同時 1 コンテナなので、複数枚を
+      // まとめて投げると 2 枚目以降は Modal 側で順番待ちになり、こちらで測る
+      // elapsedMs（投げてから受け取るまで）にその待ちが乗る。1 枚あたりの
+      // 所要時間として意味があるのはこちら
+      const execSeconds = Number(res.headers.get('X-Exec-Seconds'));
       // 実際に生成された解像度（編集では 32 の倍数に丸められる）
       const width = Number(res.headers.get('X-Width'));
       const height = Number(res.headers.get('X-Height'));
@@ -2114,6 +2199,9 @@ export class SyncState extends DurableObject {
       if (Number.isFinite(width) && width > 0) job.width = width;
       if (Number.isFinite(height) && height > 0) job.height = height;
       job.elapsedMs = job.submittedAt ? Date.now() - job.submittedAt : null;
+      job.execMs = Number.isFinite(execSeconds) && execSeconds > 0
+        ? Math.round(execSeconds * 1000)
+        : null;
       await this.ctx.storage.put(key, job);
     } catch (err) {
       // ネットワーク断など。pending のまま次の alarm で再試行する
@@ -3028,7 +3116,7 @@ export default {
       if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
       const repo = url.searchParams.get('repo') || '';
       if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return new Response('Invalid repo', { status: 400 });
-      // expand=true で各ファイルの最終コミット日時（lastCommit.date）も取得する
+      // 候補ファイルには最終コミット日時（lastCommit.date）も付く
       //（クライアント側で「追加日の新しい順」に並べるため）
       try {
         return Response.json(await fetchHfTree(repo, env));
@@ -3432,7 +3520,7 @@ export default {
       } catch {
         return new Response('Invalid JSON', { status: 400 });
       }
-      const { jobId, model, prompt, imageId, parameters } = payload ?? {};
+      const { jobId, model, prompt, imageId, imageIds, parameters } = payload ?? {};
       if (typeof jobId !== 'string' || !/^[0-9a-f]{32}$/.test(jobId)) {
         return new Response('jobId is required', { status: 422 });
       }
@@ -3442,14 +3530,18 @@ export default {
       if (typeof prompt !== 'string' || prompt.trim() === '' || prompt.length > 8000) {
         return new Response('prompt is required', { status: 422 });
       }
-      if (typeof imageId !== 'string' || !IMAGE_ID_RE.test(imageId)) {
-        return new Response('imageId is required', { status: 422 });
+      // 入力画像。ヘッドスワップのように複数枚渡すときは imageIds に順番どおり入れる
+      //（1 枚目が切り抜き、2 枚目が顔写真）。imageId は 1 枚だけのときの書き方
+      const ids = imageIds ?? (imageId === undefined ? undefined : [imageId]);
+      if (!Array.isArray(ids) || ids.length === 0 || ids.length > POE_MAX_IMAGES
+        || !ids.every((id) => typeof id === 'string' && IMAGE_ID_RE.test(id))) {
+        return new Response(`imageId is required（画像は ${POE_MAX_IMAGES} 枚まで）`, { status: 422 });
       }
       if (parameters != null && (typeof parameters !== 'object' || Array.isArray(parameters)
         || JSON.stringify(parameters).length > 2000)) {
         return new Response('Invalid parameters', { status: 422 });
       }
-      await stub.startPoeJob(jobId, { model, prompt, imageId, parameters: parameters ?? {} });
+      await stub.startPoeJob(jobId, { model, prompt, imageIds: ids, parameters: parameters ?? {} });
       return Response.json({ queued: true, jobId });
     }
 
