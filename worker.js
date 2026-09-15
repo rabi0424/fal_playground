@@ -3312,7 +3312,11 @@ export default {
       } catch {
         return new Response('Invalid target url', { status: 400 });
       }
-      if (target.protocol !== 'https:' || target.hostname !== 'queue.fal.run') {
+      // 生成のキュー API に加えて、料金 API（コストの見積もり用・読み取りのみ）を通す
+      const isQueue = target.hostname === 'queue.fal.run';
+      const isPricing = target.hostname === 'api.fal.ai'
+        && target.pathname === '/v1/models/pricing' && request.method === 'GET';
+      if (target.protocol !== 'https:' || !(isQueue || isPricing)) {
         return new Response('Target not allowed', { status: 403 });
       }
       if (!env.FAL_KEY) {
