@@ -2106,6 +2106,66 @@ a.ghost-btn {
 /* 試合数が目安未満のチェックポイントは薄く表示する */
 .lb-table .low { color: var(--muted); opacity: 0.7; }
 
+/* グラフの点にホバーしている行 */
+.lb-table tr.hl td { background: var(--nav-active); }
+
+/* ---- Elo グラフ ---- */
+.lb-chart-wrap { margin-bottom: 10px; }
+
+.lb-chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
+.lb-order .seg-btn { padding: 3px 9px; font-size: 12px; }
+
+.lb-chart {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.lb-chart-svg {
+  display: block;
+  max-width: 100%;
+  overflow: visible;
+  touch-action: pan-y;
+}
+
+.lb-chart .lb-grid { stroke: var(--border); stroke-width: 1; }
+.lb-chart .lb-tick,
+.lb-chart .lb-xlabel { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.lb-chart .lb-band { fill: var(--accent); opacity: 0.12; }
+.lb-chart .lb-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.lb-chart .lb-dot { fill: var(--accent); stroke: var(--panel); stroke-width: 2; }
+.lb-chart .lb-dot.low { fill: var(--panel); stroke: var(--accent); }
+.lb-chart .lb-dot.active { r: 5.5; }
+.lb-chart .lb-cross { stroke: var(--muted); stroke-width: 1; pointer-events: none; }
+.lb-chart .lb-best { fill: var(--text); font-size: 11px; font-weight: 600; }
+
+.lb-tip {
+  position: absolute;
+  z-index: 2;
+  max-width: 220px;
+  padding: 6px 9px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-raised);
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+.lb-tip-value { font-weight: 600; color: var(--text); }
+.lb-tip-name { color: var(--muted); word-break: break-all; }
+.lb-tip-meta { color: var(--muted); font-variant-numeric: tabular-nums; }
+
 /* ---------- 部分AI編集（edit.html） ---------- */
 .edit-main {
   max-width: 760px;
