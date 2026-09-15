@@ -19,6 +19,7 @@
 <script src="store.js" defer></script>
 <script src="lora-library.js" defer></script>
 <script src="device-sync.js" defer></script>
+<script src="arena-chart.js" defer></script>
 <script src="arena.js" defer></script>
 </head>
 <body>
@@ -117,6 +118,16 @@
           <div class="lb-head">
             <h3>リーダーボード（Elo）</h3>
             <select id="lbScope"></select>
+          </div>
+          <div id="lbChartWrap" class="lb-chart-wrap" hidden>
+            <div class="lb-chart-head">
+              <span class="meta">Elo と 90% 区間（点にホバーで詳細）</span>
+              <div id="lbOrder" class="seg lb-order" role="group" aria-label="グラフの並び順">
+                <button type="button" class="seg-btn active" data-order="step">ステップ順</button>
+                <button type="button" class="seg-btn" data-order="elo">Elo 順</button>
+              </div>
+            </div>
+            <div id="lbChart" class="lb-chart"></div>
           </div>
           <table class="lb-table">
             <thead>

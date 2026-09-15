@@ -34,6 +34,7 @@ const SIZES = [
 const LS_LORAS = 'fal_lora_library';
 const LS_CKPTS = 'fal_ckpt_library'; // 本体のチェックポイントライブラリ（同期のためここでも扱う）
 const LS_ARENA = 'fal_arena';
+const LS_CHART_ORDER = 'fal_arena_chart_order'; // グラフの並び順（'step' | 'elo'）
 
 // 20〜30 件を並行ポーリングするため、本体（900ms）より間隔を空ける
 const POLL_INTERVAL_MS = 2000;
@@ -84,6 +85,9 @@ const els = {
   voteUndoBtn: $('#voteUndoBtn'),
   voteLog: $('#voteLog'),
   lbScope: $('#lbScope'),
+  lbChartWrap: $('#lbChartWrap'),
+  lbChart: $('#lbChart'),
+  lbOrder: $('#lbOrder'),
   lbBody: $('#lbBody'),
   lbStatus: $('#lbStatus'),
   lbEmpty: $('#lbEmpty'),
@@ -790,6 +794,7 @@ function renderLeaderboard(session) {
   els.lbEmpty.hidden = matches.length > 0;
   order.forEach((p, i) => {
     const tr = document.createElement('tr');
+    tr.dataset.pid = p.id;
     const st = stats[p.id];
 
     const rank = document.createElement('td');
@@ -822,7 +827,76 @@ function renderLeaderboard(session) {
     els.lbBody.appendChild(tr);
   });
 
+  renderEloChart(session, matches, ratings, stats, shortNames);
   renderSufficiency(session, matches, scope);
+}
+
+/* ---------- Elo グラフ ---------- */
+
+// グラフの並び順。ステップ順（参加順）が既定で、Elo 降順にも切り替えられる
+let chartOrder = falStore.get(LS_CHART_ORDER) === 'elo' ? 'elo' : 'step';
+// 幅が変わったときに描き直すため、直近の描画に使った材料を覚えておく
+let chartInput = null;
+
+function setChartOrder(order) {
+  chartOrder = order;
+  falStore.set(LS_CHART_ORDER, order);
+  for (const btn of els.lbOrder.querySelectorAll('.seg-btn')) {
+    btn.classList.toggle('active', btn.dataset.order === order);
+  }
+  if (chartInput) drawEloChart();
+}
+
+// リーダーボードと同じ集計結果から、チェックポイント順の Elo 折れ線を描く。
+// 帯（90% 区間）は投票を復元抽出して Elo を計算し直したもの
+function renderEloChart(session, matches, ratings, stats, shortNames) {
+  els.lbChartWrap.hidden = matches.length === 0;
+  if (matches.length === 0) {
+    chartInput = null;
+    els.lbChart.innerHTML = '';
+    return;
+  }
+  const bands = falArenaChart.bootstrapBands(
+    session.participants, matches, (ms) => computeStandings(session, ms));
+  chartInput = {
+    rows: session.participants.map((p) => {
+      const st = stats[p.id];
+      return {
+        id: p.id,
+        label: shortNames[p.id],
+        title: loraLabel(p.path),
+        elo: ratings[p.id],
+        lo: bands?.[p.id]?.lo ?? null,
+        hi: bands?.[p.id]?.hi ?? null,
+        games: st.games,
+        w: st.w,
+        d: st.d,
+        l: st.l,
+        plotted: st.games > 0,
+      };
+    }),
+  };
+  drawEloChart();
+}
+
+function drawEloChart() {
+  if (!chartInput) return;
+  const width = Math.max(240, Math.floor(els.lbChart.clientWidth) || 340);
+  const lay = falArenaChart.layout({
+    rows: chartInput.rows,
+    order: chartOrder,
+    width,
+    minGamesOk: MIN_GAMES_OK,
+  });
+  chartInput.width = width;
+  falArenaChart.render(els.lbChart, lay, {
+    // グラフの点と表の行を対応付けて見られるようにする
+    onHover(pid) {
+      for (const tr of els.lbBody.querySelectorAll('tr')) {
+        tr.classList.toggle('hl', pid !== null && tr.dataset.pid === pid);
+      }
+    },
+  });
 }
 
 // 「あと何票くらい必要か / もう十分か」の目安をリーダーボード下に表示する
@@ -1152,6 +1226,19 @@ els.lbScope.addEventListener('change', () => {
   const session = getSession(currentSessionId);
   if (session) renderLeaderboard(session);
 });
+
+els.lbOrder.addEventListener('click', (e) => {
+  const btn = e.target.closest('.seg-btn');
+  if (btn) setChartOrder(btn.dataset.order);
+});
+setChartOrder(chartOrder);
+
+// 列幅が変わったら（画面幅の変化・サイドバーの開閉）グラフを描き直す
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => {
+    if (chartInput && Math.floor(els.lbChart.clientWidth) !== chartInput.width) drawEloChart();
+  }).observe(els.lbChart);
+}
 
 els.lightbox.addEventListener('click', closeLightbox);
 els.lightboxClose.addEventListener('click', closeLightbox);
