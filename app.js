@@ -19,7 +19,8 @@ const MODAL_KREA2_WAN_ID = 'modal/krea2-turbo-wan';
 const MODAL_KREA2_LANPAINT_ID = 'modal/krea2-turbo-lanpaint';
 
 const MODELS = [
-  { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA', sizeParam: 'image_size', lora: true, loraBase: 'krea2', maxLoras: 3 },
+  // safetyChecker: fal 側の安全チェッカー（enable_safety_checker）を持つモデル。常に切って送る
+  { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA', sizeParam: 'image_size', lora: true, loraBase: 'krea2', maxLoras: 3, safetyChecker: true },
   { id: MODAL_KREA2_EXP_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 実験版）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'exp' },
   { id: MODAL_KREA2_GPUSNAP_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal GPUスナップ版）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'gpusnap' },
   { id: MODAL_KREA2_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 本番）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'prod' },
@@ -1106,6 +1107,8 @@ function buildInput({ loras, seed, numImages } = {}) {
   if (els.guidance.value !== '') input.guidance_scale = Number(els.guidance.value);
   const effLoras = loras ?? (!els.loraField.hidden ? collectLoras() : []);
   if (effLoras.length > 0) input.loras = effLoras;
+  // 安全チェッカーは誤検知で真っ黒な画像が返る（そのぶんも課金される）ので切る
+  if (model.safetyChecker) input.enable_safety_checker = false;
   return input;
 }
 
@@ -1263,6 +1266,95 @@ async function falFetch(url, options = {}) {
   return res.json();
 }
 
+/* ---------- fal の料金（かかったコストの見積もり） ---------- */
+// fal は生成結果にコストを返さないので、料金 API（api.fal.ai/v1/models/pricing）の
+// 単価と、返ってきた画像の大きさ・枚数から自前で算出する。単価は日単位で
+// キャッシュし、取れなくても生成そのものは止めない（コスト欄が出ないだけ）
+const LS_FAL_PRICES = 'fal_prices';
+const FAL_PRICE_TTL_MS = 24 * 60 * 60 * 1000;
+const falPricePromises = new Map();
+
+function loadFalPriceCache() {
+  try {
+    const parsed = JSON.parse(falStore.get(LS_FAL_PRICES));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+// 単価 { unitPrice, unit, currency } を返す。取れなければ null
+async function falUnitPrice(modelId) {
+  const cache = loadFalPriceCache();
+  const hit = cache[modelId];
+  if (hit && Date.now() - hit.fetchedAt < FAL_PRICE_TTL_MS) return hit;
+  if (!falPricePromises.has(modelId)) {
+    const promise = (async () => {
+      try {
+        const res = await falFetch(`https://api.fal.ai/v1/models/pricing?endpoint_id=${encodeURIComponent(modelId)}`);
+        const row = (res.prices ?? []).find((p) => p.endpoint_id === modelId) ?? res.prices?.[0];
+        if (!row || !Number.isFinite(row.unit_price)) return null;
+        const entry = { unitPrice: row.unit_price, unit: row.unit, currency: row.currency ?? 'USD', fetchedAt: Date.now() };
+        const latest = loadFalPriceCache();
+        latest[modelId] = entry;
+        falStore.set(LS_FAL_PRICES, JSON.stringify(latest));
+        return entry;
+      } catch {
+        return hit ?? null; // 期限切れでも手元にあれば古い単価で見積もる
+      } finally {
+        falPricePromises.delete(modelId);
+      }
+    })();
+    falPricePromises.set(modelId, promise);
+  }
+  return falPricePromises.get(modelId);
+}
+
+// 画像の大きさが返ってこなかったときは、送った image_size から補う
+function imageMegapixels(img, input) {
+  const w = img?.width ?? input?.image_size?.width;
+  const h = img?.height ?? input?.image_size?.height;
+  if (!Number.isFinite(w) || !Number.isFinite(h)) return null;
+  return (w * h) / 1_000_000;
+}
+
+// 1 回の生成のコスト。{ amount, currency, unit, unitPrice, quantity } か、算出できなければ null
+async function estimateFalCost(modelId, images, input) {
+  const price = await falUnitPrice(modelId);
+  if (!price) return null;
+  let quantity;
+  if (price.unit === 'megapixel') {
+    const mps = images.map((img) => imageMegapixels(img, input));
+    if (mps.some((v) => v === null)) return null;
+    quantity = mps.reduce((a, b) => a + b, 0);
+  } else if (price.unit === 'image') {
+    quantity = images.length;
+  } else {
+    return null; // 秒課金など、枚数と大きさから出せない単位
+  }
+  return { amount: price.unitPrice * quantity, currency: price.currency, unit: price.unit, unitPrice: price.unitPrice, quantity };
+}
+
+function formatCost(cost) {
+  if (!cost || !Number.isFinite(cost.amount)) return '';
+  const symbol = cost.currency === 'USD' ? '$' : `${cost.currency} `;
+  // 1 枚 1 セント程度なので、小数 4 桁まで（末尾の 0 は落とす）
+  const amount = cost.amount.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+  return `${symbol}${amount}`;
+}
+
+// メタ行に足す「 ・ 約 $0.01（1.05 MP × $0.01/MP）」。コストが無い記録では空文字。
+// 画像編集（imgedit.js）の記録は Runware が返した実額を数値で持つので、そのまま出す
+function costText(cost) {
+  if (typeof cost === 'number') return Number.isFinite(cost) ? ` ・ ${formatCost({ amount: cost, currency: 'USD' })}` : '';
+  const amount = formatCost(cost);
+  if (!amount) return '';
+  const basis = cost.unit === 'megapixel'
+    ? `${cost.quantity.toFixed(2)} MP × ${formatCost({ amount: cost.unitPrice, currency: cost.currency })}/MP`
+    : `${cost.quantity} 枚 × ${formatCost({ amount: cost.unitPrice, currency: cost.currency })}`;
+  return ` ・ 約 ${amount}（${basis}）`;
+}
+
 // 保留中ジョブ（生成完了待ち）の永続化。再読み込み/クローズしても再開できる。
 // 並行生成に対応するため配列で保存する（このタブの activeJobs が正）
 let activeJobs = [];
@@ -1357,9 +1449,10 @@ async function generate() {
   try {
     job.submitted = await submitJob(modelId, input);
     saveActiveJob(job);
+    falUnitPrice(modelId); // 生成中に単価を取っておく（完了時の見積もりを待たせない）
 
     const r = await awaitJob(job, job.submitted, (status) => pollStatusText(job, status));
-    finishSingle(job, r);
+    await finishSingle(job, r);
     endJobRow(job);
   } catch (err) {
     removeActiveJob(job);
@@ -1367,7 +1460,9 @@ async function generate() {
   }
 }
 
-function finishSingle(job, r) {
+async function finishSingle(job, r) {
+  const elapsed = ((Date.now() - job.startedAt) / 1000).toFixed(1);
+  const cost = await estimateFalCost(job.modelId, r.images, job.input);
   const record = {
     id: r.requestId,
     ts: Date.now(),
@@ -1376,8 +1471,9 @@ function finishSingle(job, r) {
     input: job.input ?? null, // 生成設定（サーバー側で画像への焼き込みにも使う）
     loras: job.loras ?? [],
     seed: r.seed,
-    elapsed: ((Date.now() - job.startedAt) / 1000).toFixed(1),
+    elapsed,
     images: r.images,
+    ...(cost ? { cost } : {}), // fal の単価から見積もったコスト
   };
   addHistoryRecord(record);
   renderDetail(record);
@@ -1666,13 +1762,14 @@ async function runCompareFrom(job) {
     if (!submitted) {
       const input = buildInput({ loras, seed: job.seed, numImages: 1 });
       submitted = await submitJob(job.modelId, input);
-      job.current = { index: i, submitted };
+      job.current = { index: i, submitted, input };
       saveActiveJob(job);
     }
 
     try {
       const r = await awaitJob(job, submitted, (status) => pollStatusText(job, status, `試行 ${i + 1}/${total} `));
-      job.results.push({ ownLoras: own, loras, images: r.images, seed: r.seed, elapsed: null, error: null });
+      const cost = await estimateFalCost(job.modelId, r.images, job.current?.input ?? null);
+      job.results.push({ ownLoras: own, loras, images: r.images, seed: r.seed, elapsed: null, error: null, ...(cost ? { cost } : {}) });
     } catch (err) {
       // キャンセルは試行の失敗としてではなく比較全体の中断として扱う
       if (job.cancelled) throw err;
@@ -1692,6 +1789,17 @@ async function runCompareFrom(job) {
     common: job.common,
     variants: job.results,
   };
+  // 試行ごとの見積もりを合計する（1 つでも出せなかったら合計も出さない）
+  const costs = job.results.map((v) => v.cost);
+  if (costs.length > 0 && costs.every((c) => c && Number.isFinite(c.amount))) {
+    record.cost = {
+      amount: costs.reduce((a, c) => a + c.amount, 0),
+      currency: costs[0].currency,
+      unit: costs[0].unit,
+      unitPrice: costs[0].unitPrice,
+      quantity: costs.reduce((a, c) => a + c.quantity, 0),
+    };
+  }
   addHistoryRecord(record);
   renderDetail(record);
   scrollToDetail();
@@ -1714,7 +1822,7 @@ async function resumeJob(job) {
   try {
     if (job.kind === 'single') {
       const r = await awaitJob(job, job.submitted, (status) => pollStatusText(job, status));
-      finishSingle(job, r);
+      await finishSingle(job, r);
       endJobRow(job);
     } else if (job.kind === 'compare') {
       await runCompareFrom(job);
@@ -1857,7 +1965,7 @@ function renderDetail(record) {
   const loraText = record.loras?.length
     ? ` ・ LoRA: ${record.loras.map((l) => loraLabel(l.path)).join(', ')}`
     : '';
-  metaLine.textContent = `${record.model}${loraText} ・ ${record.elapsed}s${record.seed !== null ? ` ・ seed: ${record.seed}` : ''}`;
+  metaLine.textContent = `${record.model}${loraText} ・ ${record.elapsed}s${record.seed !== null ? ` ・ seed: ${record.seed}` : ''}${costText(record.cost)}`;
   meta.appendChild(metaLine);
 
   const detailActions = document.createElement('div');
@@ -1938,7 +2046,7 @@ function renderCompareDetail(record) {
     : '';
   const metaLine = document.createElement('div');
   metaLine.className = 'meta-line';
-  metaLine.textContent = `${record.model} ・ ${commonText}seed: ${record.seed}`;
+  metaLine.textContent = `${record.model} ・ ${commonText}seed: ${record.seed}${costText(record.cost)}`;
   meta.appendChild(metaLine);
 
   const detailActions = document.createElement('div');
