@@ -301,8 +301,8 @@ function maxLoras() {
   return provider().maxLoras ?? MAX_LORAS;
 }
 
-function sortedLoraLibrary() {
-  return loraLib.forBase(loraBase());
+function sortedLoraLibrary(includeHidden = false) {
+  return loraLib.forBase(loraBase(), { includeHidden });
 }
 
 /* ---------- LoRA 行 ---------- */
@@ -313,10 +313,12 @@ function populateLoraSelect(select, selected = '') {
   const library = sortedLoraLibrary();
   const byName = !!provider().loraByName;
   select.innerHTML = '';
+  // 名前の先頭が同じもの（同じ LoRA のチェックポイント群）には同じ色の印を付ける
+  const colors = loraLib.groupColors(library);
   for (const item of library) {
     const opt = document.createElement('option');
     opt.value = item.path;
-    opt.textContent = (item.fav ? '★ ' : '') + loraLabel(item.path);
+    opt.textContent = loraLib.optionPrefix(item, colors) + loraLabel(item.path);
     opt.title = item.path;
     select.appendChild(opt);
   }
@@ -327,6 +329,17 @@ function populateLoraSelect(select, selected = '') {
     select.appendChild(opt);
   }
   if (selected && library.some((l) => l.path === selected)) {
+    select.value = selected;
+    return;
+  }
+  // ライブラリで非表示にしたものは候補に無いが、下書きや履歴から戻した行では
+  // そのまま選ばれた状態にする（名前で打ったものとして扱ってはいけない）
+  if (selected && loraLib.isHidden(selected)) {
+    const opt = document.createElement('option');
+    opt.value = selected;
+    opt.textContent = `${loraLabel(selected)}（非表示）`;
+    opt.title = selected;
+    select.insertBefore(opt, select.firstChild);
     select.value = selected;
     return;
   }
@@ -512,18 +525,24 @@ function syncAddLoraBtn() {
   els.addLoraBtn.disabled = count >= max || (usable === 0 && !provider().loraByName);
   els.addLoraBtn.title = count >= max ? `LoRA はこのモデルでは最大 ${max} 個までです` : '';
 
-  // 使える LoRA が無い / 別のベースモデル向けを隠したことを伝える
-  const hidden = loraLib.load().length - usable;
-  els.loraHint.hidden = usable > 0 && hidden === 0;
+  // 使える LoRA が無い / 別のベースモデル向け・非表示にしたものを隠したことを伝える
+  const all = loraLib.load();
+  const otherBase = all.filter((i) => loraLib.baseKind(i.base) !== loraBase()).length;
+  const hidden = all.filter((i) => i.hidden && loraLib.baseKind(i.base) === loraBase()).length;
+  const parts = [];
+  if (otherBase > 0) parts.push(`${base} 以外の LoRA ${otherBase} 件は候補から外しています（ベースモデルはライブラリ管理で直せます）`);
+  if (hidden > 0) parts.push(`非表示にした LoRA ${hidden} 件は候補に出していません（ライブラリ管理で戻せます）`);
+  els.loraHint.hidden = usable > 0 && parts.length === 0;
   els.loraHint.textContent = usable === 0
     ? `${base} 用の LoRA が登録されていません。下の「Hugging Face から一括登録」「Civitai から取り込み」で追加できます（別のベースモデル用の LoRA はこのモデルでは使えません）。`
-    : `${base} 以外の LoRA ${hidden} 件は候補から外しています（ベースモデルはライブラリ管理で直せます）。`;
+    : `${parts.join('。')}。`;
 }
 
 // 候補に無くなった LoRA 行を落とす。ベースモデルはプロバイダで変わるので、
-// 切り替えたときに前のモデル用の LoRA が残っていると、そのまま送られてしまう
+// 切り替えたときに前のモデル用の LoRA が残っていると、そのまま送られてしまう。
+// 非表示にしただけのもの（ベースモデルは合っている）は落とさない
 function pruneLoraRows() {
-  const usable = new Set(sortedLoraLibrary().map((item) => item.path));
+  const usable = new Set(sortedLoraLibrary(true).map((item) => item.path));
   for (const row of els.loraList.querySelectorAll('.lora-row')) {
     const value = row.querySelector('.lora-select').value;
     // 名前で直接指定した行はライブラリに紐づかないので、名前で指定できる

@@ -601,22 +601,31 @@ function sortedLoraLibrary() {
 }
 
 // 登録済み LoRA（表示名）+「URL を入力…」でプルダウンを構成する。
-// 選択中のものが対象外（別のベースモデル）でも、選択が失われないよう候補に残す
+// 選択中のものが候補から外れていても（別のベースモデル・非表示）、選択が
+// 失われないよう候補に残す。履歴から設定を復元したときは、この経路で
+// 非表示の LoRA もそのまま選ばれた状態になる
 function populateLoraSelect(select, selected) {
   select.innerHTML = '';
   const items = sortedLoraLibrary();
   const known = new Set(items.map((i) => i.path));
-  if (selected && selected !== LORA_URL_OPTION && !known.has(selected) && loraLib.entry(selected)) {
+  const stray = selected && selected !== LORA_URL_OPTION && !known.has(selected)
+    ? loraLib.entry(selected) : null;
+  if (stray) {
     const opt = document.createElement('option');
     opt.value = selected;
-    opt.textContent = `⚠ ${loraLabel(selected)}（このモデル向けではありません）`;
+    const want = modelLoraBase();
+    opt.textContent = want && loraLib.baseKind(stray.base) !== want
+      ? `⚠ ${loraLabel(selected)}（このモデル向けではありません）`
+      : `${loraLabel(selected)}（非表示）`;
     opt.title = selected;
     select.appendChild(opt);
   }
+  // 名前の先頭が同じもの（同じ LoRA のチェックポイント群）には同じ色の印を付ける
+  const colors = loraLib.groupColors(items);
   for (const item of items) {
     const opt = document.createElement('option');
     opt.value = item.path;
-    opt.textContent = (item.fav ? '★ ' : '') + loraLabel(item.path);
+    opt.textContent = loraLib.optionPrefix(item, colors) + loraLabel(item.path);
     opt.title = item.path;
     select.appendChild(opt);
   }
@@ -628,13 +637,18 @@ function populateLoraSelect(select, selected) {
   if (select.value !== selected) select.value = LORA_URL_OPTION;
 }
 
-// 別のベースモデル向けで隠した件数を知らせる（黙って消えると混乱するため）
+// 別のベースモデル向け・非表示にしたもので隠した件数を知らせる
+// （黙って消えると混乱するため）
 function syncLoraFilterHint() {
   const want = modelLoraBase();
-  const hidden = want ? loraLib.load().filter((i) => loraLib.baseKind(i.base) !== want).length : 0;
-  els.loraFilterHint.hidden = hidden === 0;
-  els.loraFilterHint.textContent = hidden === 0 ? ''
-    : `${loraLib.baseLabel(want)} 以外の LoRA ${hidden} 件は候補から外しています（ベースモデルはライブラリ管理で直せます）`;
+  const all = loraLib.load();
+  const otherBase = want ? all.filter((i) => loraLib.baseKind(i.base) !== want).length : 0;
+  const hidden = all.filter((i) => i.hidden && (!want || loraLib.baseKind(i.base) === want)).length;
+  const parts = [];
+  if (otherBase > 0) parts.push(`${loraLib.baseLabel(want)} 以外の LoRA ${otherBase} 件は候補から外しています（ベースモデルはライブラリ管理で直せます）`);
+  if (hidden > 0) parts.push(`非表示にした LoRA ${hidden} 件は候補に出していません（ライブラリ管理で戻せます）`);
+  els.loraFilterHint.hidden = parts.length === 0;
+  els.loraFilterHint.textContent = parts.join('。');
 }
 
 function refreshLoraSelects() {
@@ -2424,6 +2438,7 @@ initStatsDialog();
 initCkptField();
 initForm();
 restoreFormState();
+syncLoraFilterHint(); // 候補から外している件数（別ベース・非表示）は開いた直後から出す
 
 // 履歴: まずローカルキャッシュで即描画し、サーバーの内容で置き換える
 try {

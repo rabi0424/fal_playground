@@ -89,7 +89,7 @@ function formatDate(ts) {
 /* ---------- 一覧の状態 ---------- */
 
 let library = loadLibrary();
-let filter = 'all'; // 'all' | 'fav' | 'todo' | `base:<名前>`
+let filter = 'all'; // 'all' | 'fav' | 'todo' | 'hidden' | `base:<名前>`
 let expanded = null; // 展開中の path
 const saveTimers = new Map();
 
@@ -124,6 +124,7 @@ function visibleItems() {
   let items = library.filter((item) => matchesSearch(item, q));
   if (filter === 'fav') items = items.filter((i) => i.fav);
   else if (filter === 'todo') items = items.filter(needsAttention);
+  else if (filter === 'hidden') items = items.filter((i) => i.hidden);
   else if (filter.startsWith('base:')) {
     const base = filter.slice('base:'.length);
     items = items.filter((i) => (i.base || '') === base);
@@ -147,6 +148,7 @@ function renderFilters() {
     { key: 'all', label: 'すべて', count: library.length },
     { key: 'fav', label: '★', count: library.filter((i) => i.fav).length },
     { key: 'todo', label: '要整理', count: library.filter(needsAttention).length },
+    { key: 'hidden', label: '非表示', count: library.filter((i) => i.hidden).length },
     ...bases.map((b) => ({ key: `base:${b}`, label: b, count: library.filter((i) => i.base === b).length })),
   ];
   els.filterChips.innerHTML = '';
@@ -170,7 +172,10 @@ function render() {
   els.list.innerHTML = '';
 
   const items = visibleItems();
-  for (const item of items) els.list.appendChild(renderCard(item));
+  // 名前の先頭が同じもの（同じ LoRA のチェックポイント群）には、左端に同じ色の印を
+  // 付ける。いま並んでいるものの中で 2 つ以上あるグループだけ（1 つだけなら印なし）
+  const colors = loraLib.groupColors(items);
+  for (const item of items) els.list.appendChild(renderCard(item, colors.get(item.path)));
 
   const hasAny = library.length > 0;
   els.empty.hidden = items.length > 0;
@@ -180,10 +185,15 @@ function render() {
   els.fetchAllBtn.disabled = library.filter((i) => needsAttention(i) && isHfPath(i.path)).length === 0;
 }
 
-function renderCard(item) {
+function renderCard(item, groupColor) {
   const card = document.createElement('div');
   card.className = 'lib-card';
   if (expanded === item.path) card.classList.add('open');
+  if (item.hidden) card.classList.add('is-hidden');
+  if (groupColor !== undefined) {
+    card.classList.add('grouped');
+    card.style.setProperty('--group-color', loraLib.groupColor(groupColor));
+  }
 
   /* --- 見出し行 --- */
   const head = document.createElement('div');
@@ -221,6 +231,24 @@ function renderCard(item) {
     head.appendChild(badge);
   }
 
+  // 生成画面などのプルダウンから外す / 戻す。ライブラリからは消えない
+  const hideBtn = document.createElement('button');
+  hideBtn.type = 'button';
+  hideBtn.className = 'ghost-btn small lib-hide';
+  hideBtn.textContent = item.hidden ? '表示に戻す' : '非表示';
+  hideBtn.title = item.hidden
+    ? 'プルダウンの候補に戻す'
+    : 'プルダウンの候補から外す（ライブラリには残る。履歴から復元した設定ではそのまま使える）';
+  hideBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    scheduleSave(item.path, (i) => {
+      if (i.hidden) delete i.hidden;
+      else i.hidden = true;
+    });
+    render();
+  });
+  head.appendChild(hideBtn);
+
   head.addEventListener('click', () => {
     expanded = expanded === item.path ? null : item.path;
     render();
@@ -250,6 +278,7 @@ function renderCard(item) {
   // 表示名と同じ文字列なら、ファイル名を二度書かない
   const fileName = loraFileName(item.path);
   sub.textContent = [
+    item.hidden ? '非表示（プルダウンの候補に出しません）' : null,
     fileName === entryLabel(item) ? null : fileName,
     item.scale !== undefined ? `既定 scale ${Number(item.scale).toFixed(2)}` : null,
     item.addedAt ? `${formatDate(item.addedAt)} 追加` : null,

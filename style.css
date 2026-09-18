@@ -2073,6 +2073,12 @@ a.ghost-btn {
 
 .plist label:hover { background: var(--bg); }
 
+/* 同じ LoRA のチェックポイント群は左端の色で見分ける（ライブラリ画面と同じ色） */
+.plist label.grouped {
+  border-left: 3px solid var(--group-color);
+  border-radius: 3px 6px 6px 3px;
+}
+
 .plist .plist-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2600,6 +2606,22 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 .lib-card.open {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   box-shadow: var(--shadow-raised);
+}
+
+/* 名前の先頭が同じもの（同じ LoRA のチェックポイント群）は、左端の色で見分ける。
+   色は lora-library.js の groupColors が振る（--group-color） */
+.lib-card.grouped {
+  border-left: 4px solid var(--group-color);
+}
+
+/* 非表示（プルダウンの候補から外したもの）は薄く。編集中は読めるように戻す */
+.lib-card.is-hidden:not(.open) > :not(.lib-card-head),
+.lib-card.is-hidden:not(.open) .lib-name {
+  opacity: 0.5;
+}
+.lib-hide {
+  flex-shrink: 0;
+  align-self: center;
 }
 
 .lib-card-head {

@@ -112,10 +112,76 @@ function sorted(items = load()) {
   });
 }
 
-// そのモデルで使えるものだけ。want が null なら制限しない
-function forBase(want) {
-  const all = sorted();
-  return want ? all.filter((item) => baseKind(item.base) === want) : all;
+// そのモデルで使えるものだけ。want が null なら制限しない。
+// 非表示にしたものは候補から外す（includeHidden で含められる。復元した行が
+// 候補に無いために落ちる、という経路で使う）
+function forBase(want, { includeHidden = false } = {}) {
+  return sorted().filter((item) =>
+    (!want || baseKind(item.base) === want) && (includeHidden || !item.hidden));
+}
+
+/* ---------- 非表示 ----------
+ *
+ * 同じ LoRA のチェックポイントを何十個も登録していると、使わないものまで
+ * プルダウンに並ぶ。ライブラリからは消さずに候補から外すための印。
+ * 履歴から設定を復元したときは、非表示のものも選択された状態で出す
+ * （各画面の populateLoraSelect がその行だけ候補に足す）
+ */
+const isHidden = (path) => !!entry(path)?.hidden;
+
+function setHidden(path, hidden) {
+  const items = load();
+  const item = items.find((i) => i.path === path);
+  if (!item) return;
+  if (hidden) item.hidden = true;
+  else delete item.hidden;
+  save(items);
+}
+
+/* ---------- グループ（名前の先頭が同じもの） ----------
+ *
+ * 同じ LoRA のチェックポイント群は名前の先頭が共通で、末尾のステップ数だけ
+ * 違う。表示名の先頭 GROUP_PREFIX 文字が同じものを 1 つのグループとして、
+ * 一覧で同じ色の印を付ける。並び順は変えない（印を付けるだけ）。
+ * 1 つしか無いグループには色を付けない（全部に色が付くと、かえって見づらい）
+ */
+const GROUP_PREFIX = 10;
+
+// 一覧の左に出す色。プルダウン（option には色が付けられない）では同じ順の
+// 色つき四角で代用する。両方の順番を揃えておくこと
+const GROUP_COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#3b82f6', '#a855f7', '#a16207'];
+const GROUP_MARKS = ['🟥', '🟧', '🟨', '🟩', '🟦', '🟪', '🟫'];
+
+function groupKey(item) {
+  return labelOf(item).trim().toLowerCase().slice(0, GROUP_PREFIX);
+}
+
+// 並んでいる順に、2 つ以上あるグループへ色番号を振る（path → 番号）。
+// 隣り合うグループが同じ色にならないよう、出てきた順に色を回す
+function groupColors(items) {
+  const counts = new Map();
+  for (const item of items) {
+    const key = groupKey(item);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const indexOf = new Map(); // key → 色番号
+  const out = new Map();
+  for (const item of items) {
+    const key = groupKey(item);
+    if (counts.get(key) < 2) continue;
+    if (!indexOf.has(key)) indexOf.set(key, indexOf.size % GROUP_COLORS.length);
+    out.set(item.path, indexOf.get(key));
+  }
+  return out;
+}
+
+const groupColor = (index) => GROUP_COLORS[index] ?? null;
+const groupMark = (index) => GROUP_MARKS[index] ?? '';
+
+// プルダウンの option に付ける先頭の印（色つき四角 + ★）
+function optionPrefix(item, colors) {
+  const index = colors.get(item.path);
+  return (index === undefined ? '' : `${groupMark(index)} `) + (item.fav ? '★ ' : '');
 }
 
 function register(path, meta = null) {
@@ -189,6 +255,14 @@ window.loraLib = {
   baseLabel: (kind) => BASE_LABELS[kind] ?? kind,
   sorted,
   forBase,
+  isHidden,
+  setHidden,
+  groupKey,
+  groupColors,
+  groupColor,
+  groupMark,
+  optionPrefix,
+  GROUP_PREFIX,
   register,
   unregister,
   migrate,

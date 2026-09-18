@@ -123,4 +123,59 @@ check('空は null', loraLib.baseKind(''), null);
   check('容量あふれは日本語で伝える', message.includes('保存領域がいっぱい'), true);
 }
 
+/* ---- グループ（名前の先頭 10 文字が同じもの） ---- */
+
+{
+  const at = (name) => ({ path: `https://x/${name}.safetensors`, name });
+  const items = [
+    at('Shimizu_krea2_v1_000005000'),
+    at('Shimizu_krea2_v1_000010000'),
+    at('Tanaka_lora_v2'),
+    at('Shimizu_krea2_v2_000005000'), // 先頭 10 文字は Shimizu_kr で同じグループ
+    at('Yamada_style_a'),
+    at('Yamada_style_b'),
+  ];
+  const colors = loraLib.groupColors(items);
+  check('先頭 10 文字が同じものは同じ色',
+    colors.get(items[0].path) === colors.get(items[1].path)
+      && colors.get(items[1].path) === colors.get(items[3].path), true);
+  check('別のグループは別の色', colors.get(items[0].path) !== colors.get(items[4].path), true);
+  check('Yamada 同士は同じ色', colors.get(items[4].path), colors.get(items[5].path));
+  check('1 つしか無いグループには色を付けない', colors.has(items[2].path), false);
+  check('色番号は出てきた順', colors.get(items[0].path), 0);
+  check('2 つ目のグループは次の色', colors.get(items[4].path), 1);
+  check('色は取り出せる', typeof loraLib.groupColor(0), 'string');
+  check('プルダウン用の印も同じ番号で引ける', loraLib.groupMark(0) !== loraLib.groupMark(1), true);
+  check('option の先頭は 印 + ★', loraLib.optionPrefix({ ...items[0], fav: true }, colors),
+    `${loraLib.groupMark(0)} ★ `);
+  check('色の無いものは ★ だけ', loraLib.optionPrefix({ ...items[2], fav: true }, colors), '★ ');
+  // 表示名（label）があればそちらで判定する。大文字小文字は区別しない
+  const labeled = [
+    { path: 'p1', name: 'zzz', label: 'ABCDEFGHIJ-1' },
+    { path: 'p2', name: 'yyy', label: 'abcdefghij-2' },
+  ];
+  check('表示名の先頭で判定し、大文字小文字は区別しない',
+    loraLib.groupColors(labeled).get('p1'), loraLib.groupColors(labeled).get('p2'));
+}
+
+/* ---- 非表示 ---- */
+
+{
+  const store = {};
+  const lib = loadLib(store);
+  const a = 'https://huggingface.co/o/r/resolve/main/a.safetensors';
+  const b = 'https://huggingface.co/o/r/resolve/main/b.safetensors';
+  lib.register(a, { base: 'Krea 2' });
+  lib.register(b, { base: 'Krea 2' });
+  lib.setHidden(a, true);
+  check('非表示の印が付く', lib.isHidden(a), true);
+  check('非表示は保存される', JSON.parse(store.fal_lora_library).find((i) => i.path === a).hidden, true);
+  check('候補からは外れる', lib.forBase('krea2').map((i) => i.path).join(), b);
+  check('含める指定なら出る', lib.forBase('krea2', { includeHidden: true }).length, 2);
+  check('ライブラリからは消えない', lib.load().length, 2);
+  lib.setHidden(a, false);
+  check('戻せる', lib.isHidden(a), false);
+  check('戻すと印そのものが消える', 'hidden' in lib.load().find((i) => i.path === a), false);
+}
+
 console.log(`ok: ${passed} checks passed`);

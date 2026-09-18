@@ -1064,11 +1064,18 @@ function openSessionDialog() {
   els.sessionCustomModelField.hidden = true;
 
   const lib = sortedLoraLibrary();
+  // 名前の先頭が同じもの（同じ LoRA のチェックポイント群）には同じ色の印を付ける
+  const colors = loraLib.groupColors(lib);
   els.plist.innerHTML = '';
   els.rangeStart.innerHTML = '';
   els.rangeEnd.innerHTML = '';
   lib.forEach((item, i) => {
     const label = document.createElement('label');
+    const color = colors.get(item.path);
+    if (color !== undefined) {
+      label.classList.add('grouped');
+      label.style.setProperty('--group-color', loraLib.groupColor(color));
+    }
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.value = item.path;
@@ -1084,7 +1091,7 @@ function openSessionDialog() {
     for (const select of [els.rangeStart, els.rangeEnd]) {
       const opt = document.createElement('option');
       opt.value = String(i);
-      opt.textContent = loraLabel(item.path);
+      opt.textContent = loraLib.optionPrefix(item, colors) + loraLabel(item.path);
       select.appendChild(opt);
     }
   });
