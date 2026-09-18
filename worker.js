@@ -973,11 +973,17 @@ function insertStatements(db, table, cols, rows, prefix = 'INSERT') {
   return out;
 }
 
-// レコード → history の 1 行。マスクだけ列を分ける（一覧で読まないため）
+// レコード → history の 1 行。マスクだけ列を分ける（一覧で読まないため）。
+//
+// seq は列にだけ持ち、record の JSON には入れない。新規の保存は seq を
+// SQLite に振らせる（列が NULL なら、その時点の最大 + 1 が入る。INTEGER
+// PRIMARY KEY の決まり）ので、書く時点では値が分からない。読むときに列の値を
+// 被せる（historyPage / historyGet）。Durable Object から引き取るぶんは
+// 並び順を引き継ぐため、持っている seq をそのまま列に入れる
 function historyRow(record) {
-  const { mask, ...rest } = record;
+  const { mask, seq, ...rest } = record;
   return [
-    record.seq,
+    Number.isFinite(seq) ? seq : null,
     record.id,
     HISTORY_SOURCE,
     record.type ?? '',
@@ -1281,7 +1287,7 @@ async function historyPage(env, { limit, cursor, q, type } = {}) {
     `SELECT seq, record FROM history WHERE ${where.join(' AND ')} ORDER BY seq DESC LIMIT ?`,
   ).bind(...bind).all();
 
-  const records = results.map((row) => JSON.parse(row.record));
+  const records = results.map((row) => ({ ...JSON.parse(row.record), seq: row.seq }));
   // want 件取れたなら、まだ続きがあるかもしれない
   return { records, cursor: results.length < want ? null : results[results.length - 1].seq };
 }
@@ -1391,24 +1397,31 @@ function summarizeStats(samples) {
 
 // 1 件（マスク込み）
 async function historyGet(env, id) {
-  const row = await env.DB.prepare('SELECT record, mask FROM history WHERE id = ?').bind(id).first();
+  const row = await env.DB.prepare('SELECT seq, record, mask FROM history WHERE id = ?').bind(id).first();
   if (!row) return null;
-  const record = JSON.parse(row.record);
+  const record = { ...JSON.parse(row.record), seq: row.seq };
   if (row.mask) record.mask = JSON.parse(row.mask);
   return record;
 }
 
-// 保存。同じ id の保存は差し替えで、新しい通し番号が付くので先頭に来る
+// 保存。同じ id の保存は差し替えで、新しい通し番号が付くので先頭に来る。
+//
+// 通し番号は SQLite に振らせる（seq 列を NULL で入れると、その時点の最大 + 1 が
+// 付く）。以前は先に MAX(seq) を読んで +1 した値を入れていたが、保存が同時に
+// 走ると同じ番号を取り合い、主キーの重複で片方しか入らなかった。複数枚を続けて
+// 生成すると完了がまとまって届くので、まさにその形になる。失敗した側は
+// クライアントの表示キャッシュにだけ残り、次にサーバーから取り直したとき
+// （タブに戻ったときなど）に消える ―― 「しばらくして見返すと 1 枚しか無い」
 async function historySave(env, record) {
-  const top = await env.DB.prepare('SELECT COALESCE(MAX(seq), 0) AS top FROM history').first();
-  const saved = { ...record, seq: (top?.top ?? 0) + 1 };
+  const { seq: _ignored, ...fresh } = record; // 送られてきた seq は信用しない
   await env.DB.batch([
-    env.DB.prepare('DELETE FROM history WHERE id = ?').bind(saved.id),
-    env.DB.prepare('DELETE FROM history_images WHERE history_id = ?').bind(saved.id),
-    ...insertStatements(env.DB, 'history', HISTORY_COLS, [historyRow(saved)]),
-    ...insertStatements(env.DB, 'history_images', IMAGE_LINK_COLS, imageLinks(saved), 'INSERT OR IGNORE'),
+    env.DB.prepare('DELETE FROM history WHERE id = ?').bind(fresh.id),
+    env.DB.prepare('DELETE FROM history_images WHERE history_id = ?').bind(fresh.id),
+    ...insertStatements(env.DB, 'history', HISTORY_COLS, [historyRow(fresh)]),
+    ...insertStatements(env.DB, 'history_images', IMAGE_LINK_COLS, imageLinks(fresh), 'INSERT OR IGNORE'),
   ]);
-  return saved;
+  const row = await env.DB.prepare('SELECT seq FROM history WHERE id = ?').bind(fresh.id).first();
+  return { ...fresh, seq: row.seq };
 }
 
 // 参照が無くなった画像だけ R2 から消す。1 枚が複数の記録に出ることがある

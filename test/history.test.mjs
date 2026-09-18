@@ -175,6 +175,42 @@ test('同じ id の保存は差し替えになり、増えない', async () => {
   );
 });
 
+// 複数枚を続けて生成すると、完了がまとまって届いて保存が同時に走る。
+// 通し番号を「MAX(seq) を読んで +1」で振っていたころは、同じ番号を取り合って
+// 主キーの重複になり、1 件しか残らなかった（「しばらくして見返すと 1 枚しか
+// 履歴に無い」の正体）。番号は SQLite に振らせ、同時でも全部残ること
+test('同時に保存しても、全部残る', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  await postRecord(mod, env, { id: 'first', images: [] }); // カタログを用意しておく
+
+  const responses = await Promise.all(
+    [1, 2, 3, 4].map((i) => postRecord(mod, env, { id: `r${i}`, images: [{ url: imageUrl(i) }] })),
+  );
+  assert.deepEqual(responses.map((r) => r.status), [200, 200, 200, 200], '保存が落ちています');
+
+  const ids = await listIds(mod, env);
+  assert.deepEqual([...ids].sort(), ['first', 'r1', 'r2', 'r3', 'r4'], '同時に保存した記録が消えています');
+  // 通し番号は重複せず、応答にも一覧と同じものが入る
+  const saved = await Promise.all(responses.map((r) => r.json()));
+  const seqs = saved.map((r) => r.seq);
+  assert.equal(new Set(seqs).size, 4, `通し番号が重複しています: ${seqs}`);
+  const list = await (await call(mod, env, '/api/history')).json();
+  for (const r of saved) assert.equal(list.find((x) => x.id === r.id).seq, r.seq);
+});
+
+// 送られてきた seq は並び順に使わない（古い表示キャッシュから送り直したときに、
+// 昔の番号で奥に埋もれないように）
+test('保存し直すと、送った seq に関わらず先頭に来る', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  await postRecord(mod, env, { id: 'a', images: [] });
+  await postRecord(mod, env, { id: 'b', images: [] });
+  const saved = await (await postRecord(mod, env, { id: 'a', seq: 1, images: [] })).json();
+  assert.deepEqual(await listIds(mod, env), ['a', 'b']);
+  assert.ok(saved.seq > 2, `seq=${saved.seq}`);
+});
+
 /* ---- ページ送り ---- */
 
 test('limit と cursor でページを刻める', async () => {

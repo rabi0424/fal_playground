@@ -268,6 +268,36 @@ async function loadMoreHistory() {
   }
 }
 
+// サーバーへの保存が通らなかったときの送り直し。保存は「同じ id を消して入れ直す」
+// なので、応答を取りこぼしていても二重にはならない
+const HISTORY_SAVE_ATTEMPTS = 3;
+const HISTORY_SAVE_RETRY_MS = 1500;
+
+// 1 件をサーバーへ保存して、保存後のレコードを返す。通らなければ投げる。
+// 送り直すのは、次で通る見込みのあるもの（接続断・5xx・429）だけ
+async function postHistoryRecord(record) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= HISTORY_SAVE_ATTEMPTS; attempt++) {
+    if (attempt > 1) await sleep(HISTORY_SAVE_RETRY_MS * (attempt - 1));
+    let res;
+    try {
+      res = await fetch('/api/history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(record),
+      });
+    } catch (err) {
+      lastError = err; // オフラインなど
+      continue;
+    }
+    if (isHtmlResponse(res)) throw new Error(ACCESS_EXPIRED_MSG);
+    if (res.ok) return res.json();
+    lastError = new Error(`HTTP ${res.status}`);
+    if (res.status < 500 && res.status !== 429) break; // 送り直しても同じ答えになる
+  }
+  throw lastError;
+}
+
 // 生成完了時に呼ぶ。即座にローカルへ反映し、サーバーへは裏で保存する。
 // fal の CDN 画像はサーバー側で失効しない URL に取り込まれるため、応答で差し替える
 function addHistoryRecord(record) {
@@ -276,13 +306,7 @@ function addHistoryRecord(record) {
   pendingHistorySaves.add(record.id);
   (async () => {
     try {
-      const res = await fetch('/api/history', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(record),
-      });
-      if (!res.ok || isHtmlResponse(res)) return;
-      const saved = await res.json();
+      const saved = await postHistoryRecord(record);
       historySavedAt.set(saved.id, Date.now());
       const i = historyCache.findIndex((r) => r.id === saved.id);
       if (i !== -1) historyCache[i] = saved;
@@ -291,8 +315,11 @@ function addHistoryRecord(record) {
       persistHistoryCache();
       if (selectedId === saved.id) renderDetail(saved);
       else renderGallery();
-    } catch {
-      // オフライン時など。次回起動時のサーバー取得で整合する
+    } catch (err) {
+      // 黙って諦めると、手元の表示キャッシュにだけ残った記録が、次にサーバーから
+      // 取り直したとき（タブに戻ったときなど）に消えて「履歴から消えた」に見える。
+      // 保存できていないことを、その場で伝える
+      setError(`生成結果を履歴に保存できませんでした（${err.message}）。この記録はサーバーに無いので、ページを開き直すと一覧から消えます。`);
     } finally {
       pendingHistorySaves.delete(record.id);
     }
