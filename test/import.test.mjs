@@ -16,9 +16,8 @@ const OUT = new URL('./.worker.test.mjs', import.meta.url); // 定数を差し�
 const PATCHES = [
   ["import { DurableObject } from 'cloudflare:workers';",
     'class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }'],
-  ['const CHUNKED_DL_MIN_BYTES = 64 * 1024 * 1024;', 'const CHUNKED_DL_MIN_BYTES = 1024;'],
   ['const R2_PART_SIZE = 256 * 1024 * 1024;', 'const R2_PART_SIZE = 64 * 1024;'],
-  ['const R2_SMALL_PART_SIZE = 64 * 1024 * 1024;', 'const R2_SMALL_PART_SIZE = 64 * 1024;'],
+  ['const R2_SINGLE_PUT_MAX = 4 * 1024 * 1024 * 1024;', 'const R2_SINGLE_PUT_MAX = 256 * 1024;'],
   ['const LORA_PARTS_PER_RUN = 16;', 'const LORA_PARTS_PER_RUN = 4;'],
   ['const LORA_BYTES_PER_RUN = 2 * 1024 * 1024 * 1024;', 'const LORA_BYTES_PER_RUN = 10 * 1024 * 1024;'],
   ['const LORA_API_TIMEOUT_MS = 60 * 1000;', 'const LORA_API_TIMEOUT_MS = 50;'],
@@ -38,6 +37,23 @@ async function loadWorker() {
   return await import(`${OUT.href}?v=${Date.now()}`);
 }
 
+// Workers の crypto.DigestStream 相当（書き込まれた内容のハッシュを digest で返す WritableStream）
+globalThis.crypto.DigestStream = class DigestStream extends WritableStream {
+  constructor(algo) {
+    const hash = createHash(algo.replace('-', '').toLowerCase());
+    let resolve;
+    const digest = new Promise((r) => { resolve = r; });
+    super({
+      write(chunk) { hash.update(chunk); },
+      close() {
+        const buf = hash.digest();
+        resolve(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+      },
+    });
+    this.digest = digest;
+  }
+};
+
 // Workers の FixedLengthStream 相当（長さ検証はしない素通しの TransformStream）
 globalThis.FixedLengthStream = class FixedLengthStream extends TransformStream {
   constructor(len) {
@@ -46,11 +62,11 @@ globalThis.FixedLengthStream = class FixedLengthStream extends TransformStream {
   }
 };
 
-function makeDo(mod, { fileBytes, chunkSize, failPartOnce, hangOn }) {
+function makeDo(mod, { fileBytes, chunkSize, failPartOnce, hangOn, noHash, noRange }) {
   const counters = { sub: 0 };
   const storage = makeStorage();
   const bucket = makeBucket(counters);
-  const server = makeFetch({ counters, fileBytes, chunkSize, failPartOnce, hangOn });
+  const server = makeFetch({ counters, fileBytes, chunkSize, failPartOnce, hangOn, noHash, noRange });
   globalThis.fetch = server.fetch;
   const env = { IMAGES: bucket, HF_TOKEN: 'hf_test', CIVITAI_TOKEN: 'civ_test' };
   const stub = new mod.SyncState({ storage }, env);
@@ -72,7 +88,7 @@ async function runAlarms({ stub, storage, counters }, max = 200) {
 
 async function testCheckpoint() {
   const mod = await loadWorker();
-  const fileBytes = randomBytes(1024 * 1024); // 1 MB = 64 KB × 16 パート
+  const fileBytes = randomBytes(1024 * 1024); // 1 MB
   const ctx = makeDo(mod, { fileBytes, chunkSize: 100 * 1024 }); // HF 側は 11 パート
   const { stub, storage, bucket, server } = ctx;
 
@@ -81,9 +97,15 @@ async function testCheckpoint() {
 
   const job = await storage.get('lora:job:' + 'a'.repeat(32));
   assert.equal(job.status, 'done', `期待: done / 実際: ${job.status} (${job.error ?? ''})`);
-  assert.ok(perRun.length >= 6, `複数回の alarm に分割されるはず: ${perRun.length} 回`);
+  // 11 パートを 1 回 4 パートの予算で送るので 3 回。commit は転送を伴わないので同じ実行で済む
+  assert.ok(perRun.length >= 3 && perRun.length <= 4, `複数回の alarm に分割されるはず: ${perRun.length} 回`);
   assert.ok(Math.max(...perRun) <= 30, `1 回あたりの subrequest が多すぎる: ${Math.max(...perRun)}`);
   assert.ok(server.completed.equals(fileBytes), 'HF に届いた内容が元ファイルと一致しない');
+  // 直結転送なので本体は R2 に置かない（置くのは複数回にまたがるときの転送計画だけ）
+  assert.deepEqual(bucket.written.filter((k) => !k.endsWith('.plan.json')), [],
+    `直結転送のはずが R2 に本体を書いている: ${bucket.written}`);
+  // Civitai には HF のパート境界どおりの Range で取りに行く
+  assert.ok(server.ranges.some((r) => r === 'bytes=0-102399'), `Range が HF のパート境界と合っていない: ${server.ranges.slice(0, 3)}`);
   assert.equal(server.batchCalls, 1, `batch API は 1 回だけのはず: ${server.batchCalls} 回`);
   assert.equal(server.verified, true, 'verify が呼ばれていない');
   assert.ok(server.committed.includes('test-ckpt.safetensors'), 'commit の内容が不正');
@@ -96,7 +118,7 @@ async function testCheckpoint() {
 
 async function testLoraSingleRun() {
   const mod = await loadWorker();
-  const fileBytes = randomBytes(150 * 1024); // 64 KB × 3 パート = 予算内
+  const fileBytes = randomBytes(150 * 1024);
   const ctx = makeDo(mod, { fileBytes, chunkSize: 0 }); // basic アップロード
   const { stub, storage, bucket, server } = ctx;
 
@@ -105,11 +127,36 @@ async function testLoraSingleRun() {
 
   const job = await storage.get('lora:job:' + 'b'.repeat(32));
   assert.equal(job.status, 'done', `期待: done / 実際: ${job.status} (${job.error ?? ''})`);
-  assert.ok(perRun.length <= 3, `小さいファイルは実行回数が少ないはず: ${perRun.length} 回`);
+  assert.equal(perRun.length, 1, `直結転送の小さいファイルは 1 回の実行で終わるはず: ${perRun.length} 回`);
   assert.ok(server.hfParts.get(1).body.equals(fileBytes), 'basic PUT の内容が一致しない');
   assert.equal(job.planAt ?? null, null, '計画ファイルの記録が残っている');
+  assert.deepEqual(bucket.written, [], `直結転送のはずが R2 に書いている: ${bucket.written}`);
   assert.deepEqual([...bucket.objects.keys()], [], `R2 に残骸: ${[...bucket.objects.keys()]}`);
   console.log(`✓ lora: ${perRun.length} 回の alarm 実行で完了 / 各回の subrequest = ${perRun.join(', ')}`);
+}
+
+// SHA256 の公称値が無い / Range に応じない Civitai のファイルは、従来どおり R2 に
+// 置きながら SHA256 を計算し、そこから HF へ送る経路に落ちる
+async function testStagingFallback(label, opts) {
+  const mod = await loadWorker();
+  const fileBytes = randomBytes(1024 * 1024); // R2_SINGLE_PUT_MAX（256 KB）超なので multipart 保存
+  const ctx = makeDo(mod, { fileBytes, chunkSize: 100 * 1024, ...opts });
+  const { stub, storage, bucket, server } = ctx;
+  const id = 'g'.repeat(32);
+
+  await stub.startLoraImport(id, 'https://civitai.com/models/45?modelVersionId=123', 'me/repo', true, 'lora');
+  const perRun = await runAlarms(ctx);
+
+  const job = await storage.get(`lora:job:${id}`);
+  assert.equal(job.status, 'done', `期待: done / 実際: ${job.status} (${job.error ?? ''})`);
+  assert.ok(server.completed.equals(fileBytes), 'HF に届いた内容が元ファイルと一致しない');
+  assert.equal(job.sha256, server.sha256, 'ダウンロードしながら計算した SHA256 が oid になっていない');
+  assert.ok(bucket.written.some((k) => k.startsWith('lora-staging/') && !k.endsWith('.plan.json')),
+    'ステージング経路のはずが R2 に本体を置いていない');
+  assert.ok(perRun.length >= 2, `download と upload が別の実行に分かれるはず: ${perRun.length} 回`);
+  assert.deepEqual([...bucket.objects.keys()], [], `R2 に残骸: ${[...bucket.objects.keys()]}`);
+  assert.equal(bucket.uploads.size, 0, '未完了の multipart が残っている');
+  console.log(`✓ fallback (${label}): R2 経由で ${perRun.length} 回の実行で完了`);
 }
 
 async function testRetryDuringUpload() {
@@ -250,7 +297,7 @@ async function testNewJobNotStarved() {
   await stub.alarm(); // 予算を使い切るまで大きい方が進む
   const bigJob = await storage.get(`lora:job:${big}`);
   assert.equal(bigJob.status, 'pending');
-  assert.equal(bigJob.step, 'download');
+  assert.equal(bigJob.step, 'transfer');
 
   await stub.startLoraImport(late, 'https://civitai.com/models/45?modelVersionId=123', 'me/late', false, 'ckpt');
   await storage.deleteAlarm();
@@ -292,7 +339,7 @@ async function testListAndCancel() {
 
   const list = await stub.listLoraImports();
   assert.equal(list.jobs.length, 1);
-  assert.equal(list.jobs[0].step, 'download');
+  assert.equal(list.jobs[0].step, 'transfer');
   assert.ok(list.jobs[0].bytesTotal > 0, '一覧にサイズが出ていない');
   assert.ok(Number.isFinite(list.jobs[0].progressAgoSec), '一覧に停滞時間が出ていない');
 
@@ -677,6 +724,8 @@ async function testCaptureEndpoint() {
 
 await testCheckpoint();
 await testLoraSingleRun();
+await testStagingFallback('sha256 なし', { noHash: true });
+await testStagingFallback('Range 非対応', { noRange: true });
 await testRetryDuringUpload();
 await testStallSupervision();
 await testResumeAfterLostAlarm();
