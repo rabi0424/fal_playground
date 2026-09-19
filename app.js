@@ -1980,6 +1980,14 @@ function loadImage(imgEl, url, maxRetries = 5) {
   imgEl.src = url;
 }
 
+// その記録を詳細に並べる順の画像 URL。拡大表示の送りもこの並びをたどる
+function recordImageUrls(record) {
+  if (!record) return [];
+  return record.type === 'compare'
+    ? record.variants.flatMap((v) => (v.images ?? []).map((img) => img.url))
+    : (record.images ?? []).map((img) => img.url);
+}
+
 function renderDetail(record) {
   selectedId = record.id;
   els.detail.innerHTML = '';
@@ -1993,7 +2001,7 @@ function renderDetail(record) {
   const imagesWrap = document.createElement('div');
   imagesWrap.className = 'detail-images';
 
-  const detailUrls = record.images.map((i) => i.url);
+  const detailUrls = recordImageUrls(record);
   for (const img of record.images) {
     const card = document.createElement('div');
     card.className = 'image-card';
@@ -2008,7 +2016,7 @@ function renderDetail(record) {
     el.style.cursor = 'zoom-in';
     el.addEventListener('click', () => {
       if (detailSwipe.swiped()) return; // スワイプで送った直後の click では開かない
-      openLightbox(detailUrls, record.images.indexOf(img));
+      openLightbox(detailUrls, record.images.indexOf(img), { fromHistory: true });
     });
     card.appendChild(el);
 
@@ -2088,7 +2096,7 @@ function renderCompareDetail(record) {
   grid.className = 'compare-grid';
 
   // 拡大表示で左右移動できるよう、全試行の画像 URL を並び順どおりに集める
-  const compareUrls = record.variants.flatMap((v) => v.images.map((img) => img.url));
+  const compareUrls = recordImageUrls(record);
 
   record.variants.forEach((v, i) => {
     const col = document.createElement('div');
@@ -2114,7 +2122,7 @@ function renderCompareDetail(record) {
         el.style.cursor = 'zoom-in';
         el.addEventListener('click', () => {
           if (detailSwipe.swiped()) return; // スワイプで送った直後の click では開かない
-          openLightbox(compareUrls, compareUrls.indexOf(img.url));
+          openLightbox(compareUrls, compareUrls.indexOf(img.url), { fromHistory: true });
         });
         col.appendChild(el);
       }
@@ -2161,11 +2169,15 @@ function renderCompareDetail(record) {
 
 let lightboxUrls = [];
 let lightboxIndex = 0;
+// 履歴に連なる拡大表示か。結果の画像から開いたときは、その記録の端まで来たら
+// 隣の記録へ続ける（1 枚しかない記録では、そうしないと送る先が無い）
+let lightboxFromHistory = false;
 
-// urls は単一 URL 文字列でも配列でも可。配列なら拡大表示中に ←/→ で切替できる
-function openLightbox(urls, index = 0) {
+// urls は単一 URL 文字列でも配列でも可。配列なら拡大表示中に ←/→ ・スワイプで切替できる
+function openLightbox(urls, index = 0, { fromHistory = false } = {}) {
   lightboxUrls = Array.isArray(urls) ? urls : [urls];
   lightboxIndex = index;
+  lightboxFromHistory = fromHistory;
   showLightboxImage();
   els.lightbox.hidden = false;
 }
@@ -2177,9 +2189,30 @@ function showLightboxImage() {
   els.lightboxCounter.textContent = `${lightboxIndex + 1} / ${lightboxUrls.length}`;
 }
 
-// 拡大表示中に前後の画像へ（端はループ）
+// 拡大表示中に前後の画像へ。
+//
+// 結果の画像から開いたぶんは、その記録の端まで来たら履歴の隣の記録へ続ける。
+// 1 枚だけの記録がほとんどなので、記録の中だけで送っていると「開いた途端に
+// スワイプが効かなくなった」ように見える。裏の詳細表示も一緒に動かすので、
+// 閉じたときは送った先の記録が出ている。
 function lightboxNav(dir) {
-  if (lightboxUrls.length < 2) return;
+  const next = lightboxIndex + dir;
+  if (next >= 0 && next < lightboxUrls.length) {
+    lightboxIndex = next;
+    showLightboxImage();
+    return;
+  }
+
+  if (lightboxFromHistory && navigateGallery(dir)) {
+    lightboxUrls = recordImageUrls(loadHistory().find((r) => r.id === selectedId));
+    // 左へ送ったら次の記録の 1 枚目、右へ送ったら前の記録の最後の 1 枚から
+    lightboxIndex = dir > 0 ? 0 : Math.max(0, lightboxUrls.length - 1);
+    showLightboxImage();
+    return;
+  }
+
+  // 履歴に連なっていないぶん（単発で開いた画像）は、今までどおり端でループする
+  if (lightboxFromHistory || lightboxUrls.length < 2) return;
   lightboxIndex = (lightboxIndex + dir + lightboxUrls.length) % lightboxUrls.length;
   showLightboxImage();
 }
@@ -2320,21 +2353,23 @@ function galleryItemEl(record) {
 
 const galleryPager = falGallery.create(els.gallery, galleryItemEl, { onNeedMore: loadMoreHistory });
 
-// 詳細表示中に前後の履歴（ギャラリー）へ移動する。dir=+1 で右、-1 で左
+// 詳細表示中に前後の履歴（ギャラリー）へ移動する。dir=+1 で右、-1 で左。
+// 動けたかどうかを返す（拡大表示は、端まで来たかの判断にこれを見る）
 function navigateGallery(dir) {
   const items = galleryItems;
-  if (items.length === 0 || selectedId == null) return;
+  if (items.length === 0 || selectedId == null) return false;
   const idx = items.findIndex((r) => r.id === selectedId);
-  if (idx === -1) return;
+  if (idx === -1) return false;
   const next = idx + dir;
   // 末尾が近づいたら続きを取っておく。手元にあるのは取得済みのぶんだけなので、
   // そうしないとスクロールで足すまで、送る手が 1 ページ目の切れ目で止まる
   if (next >= items.length - 3) loadMoreHistory();
-  if (next < 0 || next >= items.length) return;
+  if (next < 0 || next >= items.length) return false;
   // ギャラリーは末尾が見えたぶんだけ足しているので、飛び先が未描画のことがある
   galleryPager.ensure(next);
   renderDetail(items[next]);
   revealGalleryItem(els.gallery.querySelector('.gallery-item.selected'));
+  return true;
 }
 
 // 選んだサムネをギャラリーの見えている範囲へ。ページ自体は動かさない
