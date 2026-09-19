@@ -123,6 +123,7 @@ const els = {
   jobHint: $('#jobHint'),
   error: $('#error'),
   detail: $('#detail'),
+  jumpResult: $('#jumpResult'),
   gallery: $('#gallery'),
   gallerySearch: $('#gallerySearch'),
 };
@@ -1504,7 +1505,7 @@ async function finishSingle(job, r) {
   };
   addHistoryRecord(record);
   renderDetail(record);
-  scrollToDetail();
+  announceResult();
   removeActiveJob(job);
 }
 
@@ -1724,7 +1725,7 @@ function finishModal(job) {
   };
   addHistoryRecord(record);
   renderDetail(record);
-  scrollToDetail();
+  announceResult();
 }
 
 // 比較モード: 共通 LoRA + 各試行の LoRA を、同じ seed / プロンプトで順番に生成
@@ -1829,7 +1830,7 @@ async function runCompareFrom(job) {
   }
   addHistoryRecord(record);
   renderDetail(record);
-  scrollToDetail();
+  announceResult();
   removeActiveJob(job);
 }
 
@@ -1881,11 +1882,74 @@ async function resumeJob(job) {
 function clearDetail() {
   selectedId = null;
   els.detail.innerHTML = '<div class="detail-empty">プロンプトを入力して「生成する」を押してください</div>';
+  hideJumpResult(); // 送る先が空になったので、誘導も引っ込める
 }
 
-// モバイルでは生成完了時に結果まで自動スクロールする（フォームが長く結果が画面外のため）
+/* ---------- 生成結果への誘導 ---------- */
+//
+// 以前は生成が終わるたびに結果まで自動スクロールしていた。だが生成中も設定を
+// 直せる・追加で投げられる作りなので、手を動かしている最中に画面を持っていかれる。
+// 履歴を見ている最中でも同じことが起きる。
+//
+// 勝手には動かさず、結果が画面の外にあるときだけ「生成結果へ」を浮かべて、
+// 押されたときだけ送る。すでに結果が見えているなら、出す意味が無いので何もしない。
+
+const VISIBLE_PX = 80; // これだけ見えていれば「結果は見えている」とみなす
+
+const cssPx = (name) =>
+  parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name)) || 0;
+
+// 画面のうち、貼り付くバーに隠れていない範囲。
+// 上はページバー（スマホ）、下は生成バー（スマホ）。どちらも実高さが CSS 変数に入る
+function viewBand() {
+  return { top: cssPx('--shell-top'), bottom: window.innerHeight - cssPx('--genbar-h') };
+}
+
+// 結果が画面の外にあるならその向き（'down' / 'up'）。見えているなら null
+function detailOffscreen() {
+  const r = els.detail.getBoundingClientRect();
+  const { top, bottom } = viewBand();
+  if (Math.min(r.bottom, bottom) - Math.max(r.top, top) > VISIBLE_PX) return null;
+  return r.top > top ? 'down' : 'up';
+}
+
+// 生成完了時に呼ぶ。結果が見えていなければ誘導を出す
+function announceResult() {
+  // 古い HTML を掴んでいるとボタンごと無い。誘導が出ないだけで生成は通す
+  if (!els.jumpResult) return;
+  const dir = detailOffscreen();
+  if (!dir) { hideJumpResult(); return; }
+  els.jumpResult.classList.toggle('up', dir === 'up');
+  if (!els.jumpResult.hidden) return; // すでに出ている（出し直すと animation が走る）
+  els.jumpResult.hidden = false;
+  // 出している間だけ見張る。自分でたどり着いたなら、ボタンは引っ込める
+  window.addEventListener('scroll', onViewChange, { passive: true });
+  window.addEventListener('resize', onViewChange);
+}
+
+function hideJumpResult() {
+  if (!els.jumpResult || els.jumpResult.hidden) return;
+  els.jumpResult.hidden = true;
+  window.removeEventListener('scroll', onViewChange);
+  window.removeEventListener('resize', onViewChange);
+}
+
+let viewTick = false;
+function onViewChange() {
+  if (viewTick) return; // スクロール中に何度も測らない
+  viewTick = true;
+  requestAnimationFrame(() => {
+    viewTick = false;
+    const dir = detailOffscreen();
+    if (!dir) hideJumpResult();
+    else els.jumpResult.classList.toggle('up', dir === 'up'); // 行き過ぎたら向きを変える
+  });
+}
+
 function scrollToDetail() {
-  if (MOBILE_MQ.matches) els.detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  hideJumpResult();
+  // 結果の頭がページバーに隠れないよう、.detail 側に scroll-margin-top を置いてある
+  els.detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 // モバイル用: ギャラリーカードから撤去した削除操作を詳細表示側に置く
@@ -1942,7 +2006,10 @@ function renderDetail(record) {
     }
     loadImage(el, img.url);
     el.style.cursor = 'zoom-in';
-    el.addEventListener('click', () => openLightbox(detailUrls, record.images.indexOf(img)));
+    el.addEventListener('click', () => {
+      if (detailSwipe.swiped()) return; // スワイプで送った直後の click では開かない
+      openLightbox(detailUrls, record.images.indexOf(img));
+    });
     card.appendChild(el);
 
     const actions = document.createElement('div');
@@ -2045,7 +2112,10 @@ function renderCompareDetail(record) {
         el.alt = variantLabel(v.ownLoras);
         loadImage(el, img.url);
         el.style.cursor = 'zoom-in';
-        el.addEventListener('click', () => openLightbox(compareUrls, compareUrls.indexOf(img.url)));
+        el.addEventListener('click', () => {
+          if (detailSwipe.swiped()) return; // スワイプで送った直後の click では開かない
+          openLightbox(compareUrls, compareUrls.indexOf(img.url));
+        });
         col.appendChild(el);
       }
       const dlBtn = document.createElement('button');
@@ -2257,12 +2327,28 @@ function navigateGallery(dir) {
   const idx = items.findIndex((r) => r.id === selectedId);
   if (idx === -1) return;
   const next = idx + dir;
+  // 末尾が近づいたら続きを取っておく。手元にあるのは取得済みのぶんだけなので、
+  // そうしないとスクロールで足すまで、送る手が 1 ページ目の切れ目で止まる
+  if (next >= items.length - 3) loadMoreHistory();
   if (next < 0 || next >= items.length) return;
   // ギャラリーは末尾が見えたぶんだけ足しているので、飛び先が未描画のことがある
   galleryPager.ensure(next);
   renderDetail(items[next]);
-  const selEl = els.gallery.querySelector('.gallery-item.selected');
-  if (selEl) selEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  revealGalleryItem(els.gallery.querySelector('.gallery-item.selected'));
+}
+
+// 選んだサムネをギャラリーの見えている範囲へ。ページ自体は動かさない
+// （scrollIntoView だと、結果を見ているのに履歴まで画面が飛んでいってしまう。
+//   スワイプで次々送るときに視点を持っていかれるのは特に困る）
+function revealGalleryItem(el) {
+  if (!el?.getBoundingClientRect) return;
+  const box = els.gallery;
+  const item = el.getBoundingClientRect();
+  const view = box.getBoundingClientRect();
+  const top = item.top < view.top
+    ? item.top - view.top
+    : Math.max(0, item.bottom - view.bottom);
+  if (top !== 0) box.scrollBy({ top, behavior: 'smooth' });
 }
 
 function reuseRecord(record) {
@@ -2443,11 +2529,15 @@ if (MOBILE_MQ.matches) els.loraField.open = false;
   const generateArea = $('.generate-area');
   const layout = $('.layout');
   if (window.ResizeObserver && generateArea && layout) {
-    new ResizeObserver(() => {
-      layout.style.paddingBottom = MOBILE_MQ.matches
-        ? `${generateArea.offsetHeight + 16}px`
-        : '';
-    }).observe(generateArea);
+    const syncGenBar = () => {
+      const h = MOBILE_MQ.matches ? generateArea.offsetHeight : 0;
+      layout.style.paddingBottom = h ? `${h + 16}px` : '';
+      // 画面の下端に浮かぶ「生成結果へ」が、バーの上に載るように実高さを渡す
+      document.documentElement.style.setProperty('--genbar-h', `${h}px`);
+    };
+    new ResizeObserver(syncGenBar).observe(generateArea);
+    // 幅が変わってバーの位置づけ（固定 / パネル内）が変わったときも合わせ直す
+    MOBILE_MQ.addEventListener('change', syncGenBar);
   }
 }
 
@@ -2472,6 +2562,8 @@ document.addEventListener('visibilitychange', () => {
 });
 
 els.generateBtn.addEventListener('click', generate);
+// 生成完了時に出る「生成結果へ」。押されたときだけ結果まで送る
+els.jumpResult?.addEventListener('click', scrollToDetail);
 els.addLoraBtn.addEventListener('click', () => addLoraRow());
 els.compareToggle.addEventListener('change', () => setCompareMode(els.compareToggle.checked));
 els.addVariantBtn.addEventListener('click', () => addVariant());
@@ -2480,32 +2572,36 @@ els.addVariantBtn.addEventListener('click', () => addVariant());
 // 背景のタップで閉じる経路は今までどおり
 const lightboxZoom = falLightboxZoom.attach(els.lightbox, { onTap: closeLightbox });
 
-// スワイプ直後は click（背景タップで閉じる）を無効化して、意図しないクローズを防ぐ
-let lightboxTouchX = 0;
-let lightboxTouchY = 0;
-let lightboxSwiped = false;
+// swipe-nav.js は後から足した共有スクリプトなので、古い HTML を掴んでいると
+// script タグごと無い。falBoot に読み直しを任せ、それまではスワイプを付けずに進む
+//（付けようとして落ちると、画面ぜんぶが動かなくなる）
+function attachSwipe(el, opts) {
+  if (window.falSwipe) return falSwipe.attach(el, opts);
+  falBoot.requireShared(['falSwipe']);
+  return { swiped: () => false };
+}
+
+// 横スワイプで前後の画像へ（縦方向の動きが主ならスクロール操作とみなして無視）。
+// ズーム中の指の動きは画像を動かすためのものなので送らない
+const lightboxSwipe = attachSwipe(els.lightbox, {
+  onSwipe: lightboxNav,
+  enabled: () => !lightboxZoom.zoomed,
+});
 
 els.lightbox.addEventListener('click', () => {
-  if (lightboxSwiped) { lightboxSwiped = false; return; }
+  // スワイプ直後の click（指を離した位置で飛ぶ）で閉じてしまわないように
+  if (lightboxSwipe.swiped()) return;
   closeLightbox();
 });
 els.lightboxClose.addEventListener('click', closeLightbox);
 
-// 横スワイプで前後の画像へ（縦方向の動きが主ならスクロール操作とみなして無視）
-els.lightbox.addEventListener('touchstart', (e) => {
-  lightboxTouchX = e.touches[0].clientX;
-  lightboxTouchY = e.touches[0].clientY;
-}, { passive: true });
-
-els.lightbox.addEventListener('touchend', (e) => {
-  if (lightboxZoom.zoomed) return; // ズーム中の指の動きは画像を動かすためのもの
-  const dx = e.changedTouches[0].clientX - lightboxTouchX;
-  const dy = e.changedTouches[0].clientY - lightboxTouchY;
-  if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
-    lightboxSwiped = true;
-    lightboxNav(dx < 0 ? 1 : -1);
-  }
-}, { passive: true });
+// 生成結果の画像を横スワイプすると、履歴（ギャラリー）の左右の記録へ送る。
+// 向きは拡大表示と同じで、左へ払うと右隣＝ひとつ古い記録へ進む。
+// 入れ物に付けておけば、描き直しのたびに付け直さずに済む
+const detailSwipe = attachSwipe(els.detail, {
+  from: 'img',
+  onSwipe: navigateGallery,
+});
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !els.lightbox.hidden) closeLightbox();

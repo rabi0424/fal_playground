@@ -24,6 +24,7 @@
 <script src="history-feed.js" defer></script>
 <script src="gallery-pager.js" defer></script>
 <script src="lightbox-zoom.js" defer></script>
+<script src="swipe-nav.js" defer></script>
 <script src="app.js" defer></script>
 </head>
 <body>
@@ -205,6 +206,12 @@
     </div>
   </form>
 </dialog>
+
+<!-- 生成が終わっても勝手に飛ばさない。結果が画面の外にあるときだけこれを出し、
+     押されたら結果まで送る（下にあるときは画面の下・上にあるときは上に出る） -->
+<button id="jumpResult" class="jump-result" type="button" hidden>
+  <span class="jump-arrow" aria-hidden="true">↓</span>生成結果へ
+</button>
 
 <div id="lightbox" class="lightbox" hidden>
   <button id="lightboxClose" class="lightbox-close mobile-only" type="button" aria-label="閉じる">✕</button>
