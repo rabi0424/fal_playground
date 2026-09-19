@@ -78,6 +78,7 @@ function parseHfRepo(raw) {
 const CIVITAI_STEP_LABELS = {
   resolve: 'モデル情報を確認中…',
   download: 'Civitai からダウンロード中…（サイズにより数分かかります）',
+  transfer: 'Civitai から Hugging Face へ転送中…（サイズにより数分かかります）',
   upload: 'Hugging Face へアップロード中…（サイズにより数分かかります）',
   commit: 'リポジトリへコミット中…',
 };
@@ -163,7 +164,7 @@ function civitaiPollDelay() {
   return watching ? CIVITAI_POLL_MS : CIVITAI_POLL_IDLE_MS;
 }
 
-// 転送中（download / upload ステップ）のプログレスバー。それ以外では隠す
+// 転送中（download / transfer / upload ステップ）のプログレスバー。それ以外では隠す
 function civitaiSetProgress(done, total, extra = '') {
   const show = Number.isFinite(done) && Number.isFinite(total) && total > 0;
   els.progress.hidden = !show;
@@ -443,7 +444,7 @@ async function civitaiPollJob() {
         break;
       }
       civitaiSetStatus(CIVITAI_STEP_LABELS[job.step] ?? '処理中…');
-      const transferring = job.step === 'download' || job.step === 'upload';
+      const transferring = ['download', 'transfer', 'upload'].includes(job.step);
       civitaiSetProgress(
         transferring ? job.bytesDone : null,
         job.bytesTotal,

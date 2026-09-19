@@ -106,6 +106,7 @@ async function drain(stream) {
 export function makeBucket(counters) {
   const objects = new Map(); // key -> { body: Buffer, uploaded: Date }
   const uploads = new Map(); // uploadId -> { key, parts: Map<n, Buffer> }
+  const written = []; // put / createMultipartUpload されたキーの記録（直結転送が R2 を使わない確認用）
   let uploadSeq = 0;
 
   const handle = (key, uploadId) => ({
@@ -141,8 +142,10 @@ export function makeBucket(counters) {
   return {
     objects,
     uploads,
+    written,
     async put(key, value, opts) {
       counters.sub++;
+      written.push(key);
       const body = typeof value === 'string' ? Buffer.from(value)
         : value instanceof Uint8Array ? Buffer.from(value)
           : value instanceof ArrayBuffer ? Buffer.from(new Uint8Array(value))
@@ -196,6 +199,7 @@ export function makeBucket(counters) {
     },
     async createMultipartUpload(key) {
       counters.sub++;
+      written.push(key);
       const uploadId = `up-${++uploadSeq}`;
       uploads.set(uploadId, { key, parts: new Map() });
       return handle(key, uploadId);
@@ -214,6 +218,8 @@ export function makeFetch(opts) {
     chunkSize,          // HF LFS multipart の chunk_size（0 なら basic）
     failPartOnce = null, // このパート番号だけ 1 回失敗させる
     hangOn = null,       // このパスを含むリクエストには永久に応答しない
+    noHash = false,      // Civitai が SHA256 の公称値を返さない（ステージング経路に落ちる）
+    noRange = false,     // Civitai のダウンロードが Range に応じない（同上）
   } = opts;
   const sha256 = createHash('sha256').update(fileBytes).digest('hex');
   // HF 側の状態はリポジトリごとに持つ（取り込みを同時に 2 本走らせるテストのため）
@@ -229,6 +235,7 @@ export function makeFetch(opts) {
     sha256,
     repos,
     batchCalls: 0,
+    ranges: [], // Civitai へ投げた Range ヘッダの記録
     committed: null,
     failedOnce: new Set(),
     // 単一リポジトリのテスト向けの近道
@@ -266,7 +273,7 @@ export function makeFetch(opts) {
         files: [{
           primary: true, name: 'test-ckpt.safetensors',
           sizeKB: fileBytes.length / 1024,
-          hashes: { SHA256: sha256.toUpperCase() },
+          hashes: noHash ? {} : { SHA256: sha256.toUpperCase() },
           downloadUrl: 'https://civitai.com/api/download/models/123',
         }],
         images: [],
@@ -279,7 +286,8 @@ export function makeFetch(opts) {
     // --- Civitai ダウンロード（Range 対応） ---
     if (path.startsWith('/api/download/models/')) {
       const range = init.headers?.Range;
-      if (range) {
+      if (range) state.ranges.push(range);
+      if (range && !noRange) {
         const [, a, b] = range.match(/bytes=(\d+)-(\d+)/);
         const slice = fileBytes.subarray(Number(a), Number(b) + 1);
         return new Response(slice, {
