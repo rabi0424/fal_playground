@@ -1942,7 +1942,10 @@ function renderDetail(record) {
     }
     loadImage(el, img.url);
     el.style.cursor = 'zoom-in';
-    el.addEventListener('click', () => openLightbox(detailUrls, record.images.indexOf(img)));
+    el.addEventListener('click', () => {
+      if (detailSwipe.swiped()) return; // スワイプで送った直後の click では開かない
+      openLightbox(detailUrls, record.images.indexOf(img));
+    });
     card.appendChild(el);
 
     const actions = document.createElement('div');
@@ -2045,7 +2048,10 @@ function renderCompareDetail(record) {
         el.alt = variantLabel(v.ownLoras);
         loadImage(el, img.url);
         el.style.cursor = 'zoom-in';
-        el.addEventListener('click', () => openLightbox(compareUrls, compareUrls.indexOf(img.url)));
+        el.addEventListener('click', () => {
+          if (detailSwipe.swiped()) return; // スワイプで送った直後の click では開かない
+          openLightbox(compareUrls, compareUrls.indexOf(img.url));
+        });
         col.appendChild(el);
       }
       const dlBtn = document.createElement('button');
@@ -2257,12 +2263,28 @@ function navigateGallery(dir) {
   const idx = items.findIndex((r) => r.id === selectedId);
   if (idx === -1) return;
   const next = idx + dir;
+  // 末尾が近づいたら続きを取っておく。手元にあるのは取得済みのぶんだけなので、
+  // そうしないとスクロールで足すまで、送る手が 1 ページ目の切れ目で止まる
+  if (next >= items.length - 3) loadMoreHistory();
   if (next < 0 || next >= items.length) return;
   // ギャラリーは末尾が見えたぶんだけ足しているので、飛び先が未描画のことがある
   galleryPager.ensure(next);
   renderDetail(items[next]);
-  const selEl = els.gallery.querySelector('.gallery-item.selected');
-  if (selEl) selEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  revealGalleryItem(els.gallery.querySelector('.gallery-item.selected'));
+}
+
+// 選んだサムネをギャラリーの見えている範囲へ。ページ自体は動かさない
+// （scrollIntoView だと、結果を見ているのに履歴まで画面が飛んでいってしまう。
+//   スワイプで次々送るときに視点を持っていかれるのは特に困る）
+function revealGalleryItem(el) {
+  if (!el?.getBoundingClientRect) return;
+  const box = els.gallery;
+  const item = el.getBoundingClientRect();
+  const view = box.getBoundingClientRect();
+  const top = item.top < view.top
+    ? item.top - view.top
+    : Math.max(0, item.bottom - view.bottom);
+  if (top !== 0) box.scrollBy({ top, behavior: 'smooth' });
 }
 
 function reuseRecord(record) {
@@ -2480,32 +2502,36 @@ els.addVariantBtn.addEventListener('click', () => addVariant());
 // 背景のタップで閉じる経路は今までどおり
 const lightboxZoom = falLightboxZoom.attach(els.lightbox, { onTap: closeLightbox });
 
-// スワイプ直後は click（背景タップで閉じる）を無効化して、意図しないクローズを防ぐ
-let lightboxTouchX = 0;
-let lightboxTouchY = 0;
-let lightboxSwiped = false;
+// swipe-nav.js は後から足した共有スクリプトなので、古い HTML を掴んでいると
+// script タグごと無い。falBoot に読み直しを任せ、それまではスワイプを付けずに進む
+//（付けようとして落ちると、画面ぜんぶが動かなくなる）
+function attachSwipe(el, opts) {
+  if (window.falSwipe) return falSwipe.attach(el, opts);
+  falBoot.requireShared(['falSwipe']);
+  return { swiped: () => false };
+}
+
+// 横スワイプで前後の画像へ（縦方向の動きが主ならスクロール操作とみなして無視）。
+// ズーム中の指の動きは画像を動かすためのものなので送らない
+const lightboxSwipe = attachSwipe(els.lightbox, {
+  onSwipe: lightboxNav,
+  enabled: () => !lightboxZoom.zoomed,
+});
 
 els.lightbox.addEventListener('click', () => {
-  if (lightboxSwiped) { lightboxSwiped = false; return; }
+  // スワイプ直後の click（指を離した位置で飛ぶ）で閉じてしまわないように
+  if (lightboxSwipe.swiped()) return;
   closeLightbox();
 });
 els.lightboxClose.addEventListener('click', closeLightbox);
 
-// 横スワイプで前後の画像へ（縦方向の動きが主ならスクロール操作とみなして無視）
-els.lightbox.addEventListener('touchstart', (e) => {
-  lightboxTouchX = e.touches[0].clientX;
-  lightboxTouchY = e.touches[0].clientY;
-}, { passive: true });
-
-els.lightbox.addEventListener('touchend', (e) => {
-  if (lightboxZoom.zoomed) return; // ズーム中の指の動きは画像を動かすためのもの
-  const dx = e.changedTouches[0].clientX - lightboxTouchX;
-  const dy = e.changedTouches[0].clientY - lightboxTouchY;
-  if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
-    lightboxSwiped = true;
-    lightboxNav(dx < 0 ? 1 : -1);
-  }
-}, { passive: true });
+// 生成結果の画像を横スワイプすると、履歴（ギャラリー）の左右の記録へ送る。
+// 向きは拡大表示と同じで、左へ払うと右隣＝ひとつ古い記録へ進む。
+// 入れ物に付けておけば、描き直しのたびに付け直さずに済む
+const detailSwipe = attachSwipe(els.detail, {
+  from: 'img',
+  onSwipe: navigateGallery,
+});
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !els.lightbox.hidden) closeLightbox();
