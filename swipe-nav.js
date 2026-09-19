@@ -8,6 +8,10 @@
  * ここに 1 か所へまとめる。
  *
  * 縦方向の動きが主なときは送らない（ページのスクロールを邪魔しないため）。
+ * 送る / 送らないは指が動いている間に決める。離すまで待つと、ブラウザが途中で
+ * スクロールとして引き取ったときに何も起きない（touchmove の注記を参照）。
+ * 払わせる要素には touch-action: pan-y も当てておくこと。
+ *
  * 指を離した位置では click も飛ぶので、送った直後かどうかを swiped() で
  * 見られるようにしてある。「タップで開く / 閉じる」の頭でこれを見て、
  * スワイプのぶんは捨てる（見ないと、送った先で拡大表示が開いてしまう）。
@@ -34,6 +38,7 @@ const CLICK_GUARD_MS = 600;
 function attach(el, opts = {}) {
   const { onSwipe = null, from = null, enabled = null, threshold = THRESHOLD } = opts;
   let start = null; // 追いかけている指の始点
+  let sent = false; // いま触れている指で、もう送ったか
   let swipedAt = 0;
 
   el.addEventListener('touchstart', (e) => {
@@ -42,28 +47,44 @@ function attach(el, opts = {}) {
     if (!t || e.touches.length > 1) { start = null; return; }
     if (from && !e.target?.closest?.(from)) { start = null; return; }
     start = { x: t.clientX, y: t.clientY };
+    // 前の指の送りはここで締める。送った先で描き直すと、触っていた要素が
+    // 入れ替わって touchend が入れ物まで上がってこないことがあるため、
+    // 「送った」の印を終わりの合図だけに頼らない（残ると次のタップを捨ててしまう）
+    sent = false;
   }, { passive: true });
 
-  // 途中で指が増えたら、そこからはピンチ。送らない
+  // 送るかどうかは、指が動いている間に決める。
+  //
+  // 指を離すまで待つ作りだと、ページの中に置いた画像では効かないことがある。
+  // ブラウザは横へ払った指を途中でスクロールとして引き取ることがあり、そうなると
+  // touchcancel が飛んで touchend は来ない（iOS Safari）。拡大表示は画面を覆う
+  // 固定の入れ物でスクロールに取られないので、離してから決めても効いていた。
   el.addEventListener('touchmove', (e) => {
-    if (e.touches.length > 1) start = null;
-  }, { passive: true });
-
-  el.addEventListener('touchend', (e) => {
-    const s = start;
-    start = null;
-    if (!s || !onSwipe) return;
-    if (enabled && !enabled()) return;
-    const t = e.changedTouches?.[0];
+    if (!start) return;
+    if (e.touches.length > 1) { start = null; return; } // 途中からピンチ
+    const t = e.touches[0];
     if (!t) return;
-    const dx = t.clientX - s.x;
-    const dy = t.clientY - s.y;
+    const dx = t.clientX - start.x;
+    const dy = t.clientY - start.y;
+    // 縦へ抜けたらスクロール。そのあと横へ戻ってきても送らない
+    if (Math.abs(dy) > threshold && Math.abs(dy) >= Math.abs(dx)) { start = null; return; }
     if (Math.abs(dx) <= threshold || Math.abs(dx) <= Math.abs(dy)) return;
+    start = null; // 1 回の指の動きで送るのは 1 つだけ
+    if (enabled && !enabled()) return;
+    sent = true;
     swipedAt = Date.now();
-    onSwipe(dx < 0 ? 1 : -1);
+    onSwipe?.(dx < 0 ? 1 : -1);
   }, { passive: true });
 
-  el.addEventListener('touchcancel', () => { start = null; }, { passive: true });
+  for (const type of ['touchend', 'touchcancel']) {
+    el.addEventListener(type, () => {
+      start = null;
+      // click は指を離してから飛ぶ。払い切ったあと指を止めていることもあるので、
+      // 捨てる猶予は「送った時刻」ではなく「離した時刻」から数え直す
+      if (sent) swipedAt = Date.now();
+      sent = false;
+    }, { passive: true });
+  }
 
   return {
     // 直前がスワイプだったか。続けて飛んでくる click 1 回ぶんだけ true を返して消える
