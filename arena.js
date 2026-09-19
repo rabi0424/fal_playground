@@ -365,8 +365,12 @@ function buildRoundInput(session, round, participant) {
     image_size: { width: size.width, height: size.height },
     loras: [{ path: participant.path, scale: session.scale }],
   };
-  // Krea 2 は安全チェッカーを切って送る（誤検知で真っ黒な画像が返るのを避ける。app.js と同じ）
-  if (session.modelId === 'fal-ai/krea-2/turbo/lora') input.enable_safety_checker = false;
+  // Krea 2 は安全チェッカーを切り、高速化は使わずに送る（app.js と同じ。
+  // 真っ黒な画像が返るのを避けるためと、品質を採るため）
+  if (session.modelId === 'fal-ai/krea-2/turbo/lora') {
+    input.enable_safety_checker = false;
+    input.acceleration = 'none';
+  }
   if (round.settings?.steps !== '' && round.settings?.steps != null) {
     input.num_inference_steps = Number(round.settings.steps);
   }

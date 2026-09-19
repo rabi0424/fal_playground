@@ -20,7 +20,8 @@ const MODAL_KREA2_LANPAINT_ID = 'modal/krea2-turbo-lanpaint';
 
 const MODELS = [
   // safetyChecker: fal 側の安全チェッカー（enable_safety_checker）を持つモデル。常に切って送る
-  { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA', sizeParam: 'image_size', lora: true, loraBase: 'krea2', maxLoras: 3, safetyChecker: true },
+  // acceleration: fal 側の高速化（none / regular）。品質を採るので none を明示して送る
+  { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA', sizeParam: 'image_size', lora: true, loraBase: 'krea2', maxLoras: 3, safetyChecker: true, acceleration: 'none' },
   { id: MODAL_KREA2_EXP_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 実験版）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'exp' },
   { id: MODAL_KREA2_GPUSNAP_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal GPUスナップ版）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'gpusnap' },
   { id: MODAL_KREA2_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 本番）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'prod' },
@@ -1137,6 +1138,9 @@ function buildInput({ loras, seed, numImages } = {}) {
   if (effLoras.length > 0) input.loras = effLoras;
   // 安全チェッカーは誤検知で真っ黒な画像が返る（そのぶんも課金される）ので切る
   if (model.safetyChecker) input.enable_safety_checker = false;
+  // 高速化は品質と引き換えなので使わない。いまの既定値も none だが、
+  // 向こうで変わっても静かに切り替わらないよう明示して送る
+  if (model.acceleration) input.acceleration = model.acceleration;
   return input;
 }
 
