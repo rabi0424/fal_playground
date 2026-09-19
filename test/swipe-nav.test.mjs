@@ -3,6 +3,9 @@
 // swipe-nav.js はブラウザ用の IIFE なので、必要なぶんだけの DOM を用意して読み込む。
 // 見るのは:
 //   - 横に払ったら、その向きで送られること（左へ払う = +1 / 右へ払う = -1）
+//   - 指が動いている間に決まること。指を離すのを待たないので、ブラウザが途中で
+//     スクロールとして引き取っても（touchend が来ず touchcancel だけ）送られる
+//   - 1 回の指の動きで送るのは 1 つだけであること
 //   - 縦向きの動き・小さな動きでは送らないこと（ページのスクロールとタップを邪魔しない）
 //   - from を渡したときは、その選択子に載った指だけ拾うこと
 //   - enabled() が false の間は送らないこと（拡大表示のズーム中など）
@@ -38,19 +41,24 @@ class El {
   }
 }
 
-function setup(opts = {}) {
+function setup(opts = {}, clock = Date) {
   const el = new El();
   const window = {};
-  new Function('window', 'Date', 'Math', SRC)(window, Date, Math);
+  new Function('window', 'Date', 'Math', SRC)(window, clock, Math);
   const moves = [];
   const swipe = window.falSwipe.attach(el, { onSwipe: (dir) => moves.push(dir), ...opts });
   return { el, swipe, moves };
 }
 
-// 1 回ぶんのスワイプ（触って、離す）。target は指が載った要素
-function drag(el, { from = [0, 0], to = [0, 0], target = el } = {}) {
+// 1 回ぶんのスワイプ（触って、なぞって、離す）。target は指が載った要素。
+// 実機と同じく、始点から終点まで何回かに分けて動かす
+function drag(el, { from = [0, 0], to = [0, 0], target = el, steps = 4, end = 'touchend' } = {}) {
   el.fire('touchstart', { touches: [{ clientX: from[0], clientY: from[1] }], target });
-  el.fire('touchend', { changedTouches: [{ clientX: to[0], clientY: to[1] }] });
+  for (let i = 1; i <= steps; i++) {
+    const at = (a, b) => a + ((b - a) * i) / steps;
+    el.fire('touchmove', { touches: [{ clientX: at(from[0], to[0]), clientY: at(from[1], to[1]) }] });
+  }
+  if (end) el.fire(end, { changedTouches: [{ clientX: to[0], clientY: to[1] }] });
 }
 
 const tests = [];
@@ -100,10 +108,63 @@ test('送った直後の click 1 回ぶんだけ swiped() が true になる', (
   assert.equal(swipe.swiped(), false, '次の click まで捨ててしまう');
 });
 
+test('払い切ったあと指を止めていても、離したときの click を捨てられる', () => {
+  let now = 1_000;
+  const { el, swipe } = setup({}, { now: () => now });
+  el.fire('touchstart', { touches: [{ clientX: 300, clientY: 200 }], target: el });
+  el.fire('touchmove', { touches: [{ clientX: 200, clientY: 200 }] }); // ここで送られる
+  now += 3_000; // 指をしばらく置いたまま
+  el.fire('touchend', { changedTouches: [{ clientX: 200, clientY: 200 }] });
+  assert.equal(swipe.swiped(), true, '猶予を送った時刻から数えていて、離すころには切れている');
+});
+
+test('送ったあと終わりの合図が来なくても、次のタップは捨てない', () => {
+  // 送った先で描き直すと、触っていた画像ごと入れ替わって touchend が
+  // 入れ物まで上がってこないことがある。それで「送った」の印が残ると、
+  // 次にタップしても拡大表示が開かなくなる
+  let now = 1_000;
+  const { el, swipe } = setup({}, { now: () => now });
+  el.fire('touchstart', { touches: [{ clientX: 300, clientY: 200 }], target: el });
+  el.fire('touchmove', { touches: [{ clientX: 200, clientY: 200 }] }); // 送る
+  assert.equal(swipe.swiped(), true);
+  now += 5_000; // touchend は来ないまま、しばらくして次のタップ
+
+  el.fire('touchstart', { touches: [{ clientX: 150, clientY: 200 }], target: el });
+  el.fire('touchend', { changedTouches: [{ clientX: 150, clientY: 200 }] });
+  assert.equal(swipe.swiped(), false, 'ふつうのタップが捨てられている（拡大表示が開かない）');
+});
+
 test('送らなかった指の動きでは swiped() は true にならない', () => {
   const { el, swipe } = setup();
   drag(el, { from: [200, 200], to: [210, 300] }); // 縦向き
   assert.equal(swipe.swiped(), false, 'ふつうのタップまで捨ててしまう');
+});
+
+test('指を離す前に決まる（離さなくても送られる）', () => {
+  const { el, moves } = setup();
+  drag(el, { from: [300, 200], to: [200, 200], end: null });
+  assert.deepEqual(moves, [1], '指を離すまで送られない（スクロールに取られると何も起きない）');
+});
+
+test('スクロールに取られても（touchcancel だけ）送られる', () => {
+  const { el, moves } = setup();
+  drag(el, { from: [300, 200], to: [200, 205], end: 'touchcancel' });
+  assert.deepEqual(moves, [1], 'touchend が来ないと送られない');
+});
+
+test('1 回の指の動きで送るのは 1 つだけ', () => {
+  const { el, moves } = setup();
+  drag(el, { from: [340, 200], to: [40, 200], steps: 10 }); // 大きく払う
+  assert.deepEqual(moves, [1], `なぞった回数だけ送っている: ${moves.join(',')}`);
+});
+
+test('縦へ抜けたあとに横へ戻ってきても送らない（スクロール中の指）', () => {
+  const { el, moves } = setup();
+  el.fire('touchstart', { touches: [{ clientX: 200, clientY: 200 }], target: el });
+  el.fire('touchmove', { touches: [{ clientX: 205, clientY: 300 }] }); // 縦へ
+  el.fire('touchmove', { touches: [{ clientX: 60, clientY: 320 }] }); // そこから横へ
+  el.fire('touchend', { changedTouches: [{ clientX: 60, clientY: 320 }] });
+  assert.deepEqual(moves, [], 'スクロールしている指で画像が送られている');
 });
 
 test('2 本指（ピンチ）は送らない', () => {
@@ -113,19 +174,20 @@ test('2 本指（ピンチ）は送らない', () => {
   el.fire('touchend', { changedTouches: [{ clientX: 200, clientY: 200 }] });
   assert.deepEqual(moves, [], 'ピンチの開始で送っている');
 
-  // 1 本で始めて、途中から 2 本になった
+  // 1 本で始めて、横へ払い切る前に 2 本になった
   el.fire('touchstart', { touches: [{ clientX: 300, clientY: 200 }], target: el });
   el.fire('touchmove', { touches: [{ clientX: 280, clientY: 200 }, { clientX: 320, clientY: 210 }] });
+  el.fire('touchmove', { touches: [{ clientX: 200, clientY: 200 }] });
   el.fire('touchend', { changedTouches: [{ clientX: 200, clientY: 200 }] });
   assert.deepEqual(moves, [], 'ピンチの途中で送っている');
 });
 
-test('touchcancel のあとは送らない（別の操作に持っていかれたぶん）', () => {
+test('指を離したあとの動きは拾わない', () => {
   const { el, moves } = setup();
   el.fire('touchstart', { touches: [{ clientX: 300, clientY: 200 }], target: el });
-  el.fire('touchcancel', {});
-  el.fire('touchend', { changedTouches: [{ clientX: 200, clientY: 200 }] });
-  assert.deepEqual(moves, [], '取り消された指の動きで送っている');
+  el.fire('touchend', { changedTouches: [{ clientX: 300, clientY: 200 }] });
+  el.fire('touchmove', { touches: [{ clientX: 200, clientY: 200 }] }); // 次の指の前触れ
+  assert.deepEqual(moves, [], '離したあとの動きで送っている');
 });
 
 let failed = 0;

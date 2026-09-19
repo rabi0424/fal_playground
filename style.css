@@ -1097,6 +1097,16 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
   display: block;
 }
 
+/* 結果の画像に載った指の横移動は、こちらで受け取る（前後の履歴へ送る・swipe-nav.js）。
+   既定のままだと、ブラウザが途中でスクロールとして引き取り、払っても何も起きない。
+   縦のスクロールとピンチは今までどおりブラウザに任せる
+   （2 行目を解釈できない実装では 1 行目が残り、ピンチだけ効かなくなる） */
+.detail-images .image-card img,
+.compare-grid .compare-img {
+  touch-action: pan-y;
+  touch-action: pan-y pinch-zoom;
+}
+
 .image-card .actions {
   display: flex;
   gap: 8px;
