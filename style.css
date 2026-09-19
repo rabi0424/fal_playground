@@ -1135,6 +1135,65 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
   flex-wrap: wrap;
 }
 
+/* 結果の頭を、貼り付くページバー（スマホ）の下に出す */
+.detail { scroll-margin-top: calc(var(--shell-top, 0px) + 12px); }
+
+/* ---------- 生成結果への誘導 ---------- */
+/* 生成が終わるたびに結果まで飛ばしていたが、設定を直している最中や履歴を見て
+   いる最中に画面を持っていかれるのは具合が悪い。勝手には動かさず、結果が画面の
+   外にあるときだけこのボタンを浮かべ、押されたときだけ送る。
+
+   結果が下にあるときは画面の下（スマホでは下部固定バーの上・その実高さは
+   app.js が --genbar-h に入れる）、上にあるときは画面の上に出す */
+.jump-result {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--genbar-h, 0px) + 16px);
+  /* 下部固定の生成バー（50）より下。バーが伸びたぶんは --genbar-h で避ける */
+  z-index: 45;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  /* 生成ボタンのすぐ上に出るので、同じ塗りだと「主ボタンが 2 つ」に見える。
+     浮かんでいる帯と同じマテリアルにし、文字だけアクセント色にする */
+  background: var(--material);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: var(--shadow-floating);
+  animation: jump-rise var(--dur-move) var(--spring);
+}
+
+.jump-result.up {
+  bottom: auto;
+  /* ページバーの実高さは shell.js が --shell-top に入れる（PC では 0） */
+  top: calc(var(--shell-top, 0px) + 12px);
+  animation-name: jump-drop;
+}
+
+/* 矢印は結果のある向きへ。↓ を回して ↑ にする */
+.jump-result .jump-arrow {
+  display: inline-block;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.jump-result.up .jump-arrow { transform: rotate(180deg); }
+
+.jump-result:hover { border-color: var(--accent); }
+.jump-result:active { transform: translateX(-50%) scale(0.97); }
+
+/* translateX(-50%) を持ったままなので、横位置ごと動かさないよう translate で書く */
+@keyframes jump-rise { from { opacity: 0; transform: translate(-50%, 10px); } }
+@keyframes jump-drop { from { opacity: 0; transform: translate(-50%, -10px); } }
+
 /* ---------- gallery ---------- */
 .gallery-section { margin-top: 24px; }
 
@@ -1749,6 +1808,9 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
   .ghost-btn:active { border-color: var(--muted); }
 
   .icon-btn { width: 44px; height: 44px; }
+
+  /* タッチターゲット（44pt）を確保する */
+  .jump-result { min-height: 44px; font-size: 15px; padding: 10px 20px; }
 
   /* ギャラリー: 3 列固定・内部スクロール廃止（ページスクロールに統一） */
   .gallery {
@@ -2462,9 +2524,13 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 
   .lightbox img { transition: none; }
 
+  /* 沈み込みだけやめる。transform: none にすると横の中央寄せごと消える */
+  .jump-result:active { transform: translateX(-50%); }
+
   .detail-images .image-card,
   .lightbox,
   .lightbox img,
+  .jump-result,
   .key-dialog[open] {
     animation-name: fade-in;
     animation-duration: 0.15s;
@@ -2477,6 +2543,7 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 @media (prefers-reduced-transparency: reduce) {
   .pagebar,
   .shell-scrim,
+  .jump-result,
   .generate-area {
     background: var(--panel);
     -webkit-backdrop-filter: none;

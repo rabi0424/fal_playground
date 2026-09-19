@@ -123,6 +123,7 @@ const els = {
   jobHint: $('#jobHint'),
   error: $('#error'),
   detail: $('#detail'),
+  jumpResult: $('#jumpResult'),
   gallery: $('#gallery'),
   gallerySearch: $('#gallerySearch'),
 };
@@ -1504,7 +1505,7 @@ async function finishSingle(job, r) {
   };
   addHistoryRecord(record);
   renderDetail(record);
-  scrollToDetail();
+  announceResult();
   removeActiveJob(job);
 }
 
@@ -1724,7 +1725,7 @@ function finishModal(job) {
   };
   addHistoryRecord(record);
   renderDetail(record);
-  scrollToDetail();
+  announceResult();
 }
 
 // 比較モード: 共通 LoRA + 各試行の LoRA を、同じ seed / プロンプトで順番に生成
@@ -1829,7 +1830,7 @@ async function runCompareFrom(job) {
   }
   addHistoryRecord(record);
   renderDetail(record);
-  scrollToDetail();
+  announceResult();
   removeActiveJob(job);
 }
 
@@ -1881,11 +1882,74 @@ async function resumeJob(job) {
 function clearDetail() {
   selectedId = null;
   els.detail.innerHTML = '<div class="detail-empty">プロンプトを入力して「生成する」を押してください</div>';
+  hideJumpResult(); // 送る先が空になったので、誘導も引っ込める
 }
 
-// モバイルでは生成完了時に結果まで自動スクロールする（フォームが長く結果が画面外のため）
+/* ---------- 生成結果への誘導 ---------- */
+//
+// 以前は生成が終わるたびに結果まで自動スクロールしていた。だが生成中も設定を
+// 直せる・追加で投げられる作りなので、手を動かしている最中に画面を持っていかれる。
+// 履歴を見ている最中でも同じことが起きる。
+//
+// 勝手には動かさず、結果が画面の外にあるときだけ「生成結果へ」を浮かべて、
+// 押されたときだけ送る。すでに結果が見えているなら、出す意味が無いので何もしない。
+
+const VISIBLE_PX = 80; // これだけ見えていれば「結果は見えている」とみなす
+
+const cssPx = (name) =>
+  parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name)) || 0;
+
+// 画面のうち、貼り付くバーに隠れていない範囲。
+// 上はページバー（スマホ）、下は生成バー（スマホ）。どちらも実高さが CSS 変数に入る
+function viewBand() {
+  return { top: cssPx('--shell-top'), bottom: window.innerHeight - cssPx('--genbar-h') };
+}
+
+// 結果が画面の外にあるならその向き（'down' / 'up'）。見えているなら null
+function detailOffscreen() {
+  const r = els.detail.getBoundingClientRect();
+  const { top, bottom } = viewBand();
+  if (Math.min(r.bottom, bottom) - Math.max(r.top, top) > VISIBLE_PX) return null;
+  return r.top > top ? 'down' : 'up';
+}
+
+// 生成完了時に呼ぶ。結果が見えていなければ誘導を出す
+function announceResult() {
+  // 古い HTML を掴んでいるとボタンごと無い。誘導が出ないだけで生成は通す
+  if (!els.jumpResult) return;
+  const dir = detailOffscreen();
+  if (!dir) { hideJumpResult(); return; }
+  els.jumpResult.classList.toggle('up', dir === 'up');
+  if (!els.jumpResult.hidden) return; // すでに出ている（出し直すと animation が走る）
+  els.jumpResult.hidden = false;
+  // 出している間だけ見張る。自分でたどり着いたなら、ボタンは引っ込める
+  window.addEventListener('scroll', onViewChange, { passive: true });
+  window.addEventListener('resize', onViewChange);
+}
+
+function hideJumpResult() {
+  if (!els.jumpResult || els.jumpResult.hidden) return;
+  els.jumpResult.hidden = true;
+  window.removeEventListener('scroll', onViewChange);
+  window.removeEventListener('resize', onViewChange);
+}
+
+let viewTick = false;
+function onViewChange() {
+  if (viewTick) return; // スクロール中に何度も測らない
+  viewTick = true;
+  requestAnimationFrame(() => {
+    viewTick = false;
+    const dir = detailOffscreen();
+    if (!dir) hideJumpResult();
+    else els.jumpResult.classList.toggle('up', dir === 'up'); // 行き過ぎたら向きを変える
+  });
+}
+
 function scrollToDetail() {
-  if (MOBILE_MQ.matches) els.detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  hideJumpResult();
+  // 結果の頭がページバーに隠れないよう、.detail 側に scroll-margin-top を置いてある
+  els.detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 // モバイル用: ギャラリーカードから撤去した削除操作を詳細表示側に置く
@@ -2465,11 +2529,15 @@ if (MOBILE_MQ.matches) els.loraField.open = false;
   const generateArea = $('.generate-area');
   const layout = $('.layout');
   if (window.ResizeObserver && generateArea && layout) {
-    new ResizeObserver(() => {
-      layout.style.paddingBottom = MOBILE_MQ.matches
-        ? `${generateArea.offsetHeight + 16}px`
-        : '';
-    }).observe(generateArea);
+    const syncGenBar = () => {
+      const h = MOBILE_MQ.matches ? generateArea.offsetHeight : 0;
+      layout.style.paddingBottom = h ? `${h + 16}px` : '';
+      // 画面の下端に浮かぶ「生成結果へ」が、バーの上に載るように実高さを渡す
+      document.documentElement.style.setProperty('--genbar-h', `${h}px`);
+    };
+    new ResizeObserver(syncGenBar).observe(generateArea);
+    // 幅が変わってバーの位置づけ（固定 / パネル内）が変わったときも合わせ直す
+    MOBILE_MQ.addEventListener('change', syncGenBar);
   }
 }
 
@@ -2494,6 +2562,8 @@ document.addEventListener('visibilitychange', () => {
 });
 
 els.generateBtn.addEventListener('click', generate);
+// 生成完了時に出る「生成結果へ」。押されたときだけ結果まで送る
+els.jumpResult?.addEventListener('click', scrollToDetail);
 els.addLoraBtn.addEventListener('click', () => addLoraRow());
 els.compareToggle.addEventListener('change', () => setCompareMode(els.compareToggle.checked));
 els.addVariantBtn.addEventListener('click', () => addVariant());
