@@ -39,7 +39,7 @@ const MODELS = [
   // qwen21: Qwen-Image 2.1。Krea 2 系とはモデルが別で、LoRA も蒸留版も無いので
   // ステップ数は 25 前後が必要（Krea 2 Turbo の 8 とは桁が違う）。そのぶん
   // ガイダンスは 1 に固定されず、negative_prompt を効かせるなら上げられる
-  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 実験版・参照画像編集と共有）', sizeParam: 'image_size', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, sampler: true, cfgMax: 10 },
+  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 実験版・参照画像編集と共有）', sizeParam: 'image_size', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', sampler: true, cfgMax: 10, stepsHint: '25（蒸留版が無いので必要）' },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -75,8 +75,20 @@ const LS_JOB = 'fal_active_job';
 const LORA_URL_OPTION = '__url__';
 const POLL_INTERVAL_MS = 900;
 
-// Modal チェックポイント指定版の既定チェックポイント（modal_comfy の UNET_FILE）
-const DEFAULT_CKPT_NAME = 'Krea-2-Turbo-Q8_0.gguf';
+// 系統ごとの既定チェックポイント（modal_comfy の UNET_FILE）。
+//
+// チェックポイントはモデルの系統ごとに別物で、**Krea 2 用を Qwen-Image 2.1 に
+// 渡すと Modal 側の Volume が共通なぶん読み込めてしまう**。テキストエンコーダ
+// だけ噛み合わない絵が出るが、エラーにはならないので気づきにくい。そのため
+// ライブラリも系統で分けて、別系統のものは選べないようにしてある。
+//
+// 既存の登録には base が無い。qwen21 を足すまでは Krea 2 用しか登録できなかった
+// ので、base 無しは krea2 とみなす（移行処理は不要）
+const DEFAULT_CKPTS = {
+  krea2: 'Krea-2-Turbo-Q8_0.gguf',
+  qwen21: 'qwen_image_2.1_Q8_0.gguf',
+};
+const DEFAULT_CKPT_BASE = 'krea2';
 
 /* ---------- helpers ---------- */
 
@@ -383,6 +395,9 @@ function updateModelFields() {
   els.customModelField.hidden = model.id !== '__custom__';
   els.ckptField.hidden = !model.ckpt;
   els.loraField.hidden = !model.lora;
+  // 系統が変わると使えるチェックポイントも変わる。選択が残っていても
+  // populateCkptSelect が一覧に無い値を既定へ落とす
+  if (model.ckpt) populateCkptSelect(els.ckptSelect.value);
 
   // Modal 版は fal のキュー API を使わないため比較モード非対応
   const isModal = model.provider === 'modal';
@@ -392,8 +407,10 @@ function updateModelFields() {
   if ((!model.lora || isModal) && compareMode) setCompareMode(false);
 
   // Modal 版のデフォルト値・範囲は API の仕様（INTEGRATION.md）に合わせて案内する
-  els.steps.placeholder = isModal ? '8（変更非推奨）' : 'デフォルト';
-  els.guidance.placeholder = isModal ? '1（0〜1）' : 'デフォルト';
+  // 蒸留版の Krea 2 Turbo は 8 ステップ / cfg 0〜1 だが、Qwen-Image 2.1 は
+  // 蒸留していないので前提が違う。モデル側の指定を優先する
+  els.steps.placeholder = model.stepsHint ?? (isModal ? '8（変更非推奨）' : 'デフォルト');
+  els.guidance.placeholder = isModal ? `1（0〜${model.cfgMax ?? 1}）` : 'デフォルト';
 
   // サンプラー系は統合版だけが受け付ける
   els.wanSamplerRow.hidden = !model.sampler;
@@ -759,10 +776,10 @@ function ckptDisplayName(path) {
   }
 }
 
-function registerCkpt(path) {
+function registerCkpt(path, base = currentCkptBase()) {
   const library = loadCkptLibrary();
   if (!library.some((item) => item.path === path)) {
-    library.push({ name: ckptDisplayName(path), path });
+    library.push({ name: ckptDisplayName(path), path, base });
     saveCkptLibrary(library);
   }
   populateCkptSelect(els.ckptSelect.value);
@@ -773,9 +790,18 @@ function unregisterCkpt(path) {
   populateCkptSelect(els.ckptSelect.value);
 }
 
+// 選択中のモデルのチェックポイント系統
+function currentCkptBase() {
+  const model = MODELS.find((m) => m.id === els.modelSelect.value) || MODELS[0];
+  return model.ckptBase ?? DEFAULT_CKPT_BASE;
+}
+
+// 選択中のモデルで使えるものだけを返す（別系統のものを送らせない）
 function sortedCkptLibrary() {
-  return [...loadCkptLibrary()].sort((a, b) =>
-    a.name.localeCompare(b.name, 'ja', { numeric: true, sensitivity: 'base' }));
+  const base = currentCkptBase();
+  return loadCkptLibrary()
+    .filter((item) => (item.base ?? DEFAULT_CKPT_BASE) === base)
+    .sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true, sensitivity: 'base' }));
 }
 
 // 「既定」+ 登録済みチェックポイント + 「URL / ファイル名を入力…」でプルダウンを構成
@@ -785,7 +811,8 @@ function populateCkptSelect(selected) {
   select.innerHTML = '';
   const defOpt = document.createElement('option');
   defOpt.value = '';
-  defOpt.textContent = `既定（${DEFAULT_CKPT_NAME}）`;
+  const fallback = DEFAULT_CKPTS[currentCkptBase()] ?? DEFAULT_CKPTS[DEFAULT_CKPT_BASE];
+  defOpt.textContent = `既定（${fallback}）`;
   select.appendChild(defOpt);
   for (const item of sortedCkptLibrary()) {
     const opt = document.createElement('option');
@@ -857,7 +884,9 @@ function initHfDialog() {
     defaultRepo: HF_DEFAULT_REPO,
     defaultCkptRepo: HF_DEFAULT_CKPT_REPO,
     currentBase: () => modelLoraBase() ?? 'krea2',
-    registeredPaths: (kind) => (kind === 'ckpt' ? loadCkptLibrary() : loadLoraLibrary())
+    // 「登録済み」の印は、いま選べるものだけを対象にする。別系統のチェック
+    // ポイントまで登録済みに見えると、押せないのに押せそうな見た目になる
+    registeredPaths: (kind) => (kind === 'ckpt' ? sortedCkptLibrary() : loadLoraLibrary())
       .map((item) => item.path),
     register(kind, url, meta) {
       if (kind === 'ckpt') registerCkpt(url);
