@@ -211,6 +211,7 @@ const els = {
   sizeHint: $('#sizeHint'),
   numImages: $('#numImages'),
   steps: $('#steps'),
+  q21Steps: $('#q21Steps'),
   guidance: $('#guidance'),
   acceleration: $('#acceleration'),
   outputFormat: $('#outputFormat'),
@@ -3158,7 +3159,97 @@ const PROVIDERS = {
         + ' ・ 自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です';
     },
   },
+
+  // Qwen-Image 2.1（Modal 自前ホスト / modal_comfy の qwen21_app の /edit）。
+  //
+  // **マスクを使わない参照画像編集**。画像を丸ごと渡して、指示文で「何をどう
+  // 変えるか」を書く。ほかの Modal 版と違い Krea 2 ではなく Qwen-Image 2.1 なので、
+  // Krea 2 の LoRA は効かない（2026-09-20 時点で 2.1 用の LoRA は未公開）。
+  // そのため LoRA 欄は出していない（imgedit.html の data-only に入れていない）。
+  //
+  // 生成側の「Qwen-Image 2.1 自前ホスト」と同じコンテナなので、両方使うなら
+  // 生成もそちらに寄せるとコンテナが 1 つで済む。
+  qwen21: {
+    label: 'Modal 自前ホスト（Qwen-Image 2.1 参照画像編集）',
+    model: 'modal/qwen21-edit',
+    note: 'マスク不要。画像を丸ごと渡して、指示文で変更点を書きます。蒸留版が無いモデルなのでステップ数は 25 前後が必要で、1024×1536 で 20 秒ほどかかります（Krea 2 Turbo の 8 ステップとは桁が違います）。Krea 2 の LoRA は効きません。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。生成側の「Qwen-Image 2.1 自前ホスト」と同じコンテナです。',
+    supports: { size: true, steps: true },
+    sizeKind: 'wan',
+    // Krea 2 用でも Qwen 用でもない。該当する LoRA が無いベースを指しておくと、
+    // 別プロバイダから移ってきたときに残った行が pruneLoraRows で外れる
+    loraBase: 'qwen21',
+    // 画像全体を作り直すモデルなので、返ってくる絵が数 px ずれることがある
+    alignOutput: true,
+    pollMs: 2000,
+    promptHint: 'このモデルは参照画像を <image1> と書いて参照します（例:「<image1> のシャツを赤いニットに変えて、顔・ポーズ・背景はそのまま」）。'
+      + '変えない部分も「そのまま」と書いておくと保たれやすくなります。',
+    promptPlaceholder: '例: <image1> のシャツを赤いニットに変えて、顔とポーズと背景はそのまま',
+    snapSize: snap32,
+
+    buildInput(dataUri, size) {
+      const input = {
+        prompt: els.prompt.value.trim(),
+        // 参照画像の配列。API は 4 枚まで受けるが、この画面の入力欄は 1 枚なので
+        // 編集対象（= <image1>）だけを渡す
+        images: [dataUri],
+        // **0 は「リサイズしない」の意味**（32 の倍数へ丸めるだけ）。
+        // 既定の 1024 は「総ピクセル予算」で、1024×1536 を渡すと 832×1248 に
+        // 縮んで返る。マスク合成は入出力のサイズが一致している前提なので、
+        // ここでは必ず 0 を送って送信サイズのまま返させる
+        resolution: 0,
+      };
+      if (els.seedLock.checked && els.seed.value !== '') input.seed = Number(els.seed.value);
+      // 空欄はキーごと落として API の既定（25）に任せる。
+      // 共用の #steps は data-only="fal" で隠れていて値も動かないので使わない
+      if (els.q21Steps.value !== '') input.steps = Number(els.q21Steps.value);
+      // size は snapSize で 32 の倍数に丸めてある。resolution=0 と合わせると
+      // 出力が送信サイズと一致するので、width/height は送らない
+      //（送ると custom_size 扱いになり、公式いわく編集がずれやすくなる）
+      return input;
+    },
+
+    // 画像本体（base64）は履歴にも再開用の記録にも残さない
+    strip(input) {
+      return { ...input, images: undefined };
+    },
+
+    submit(input) {
+      return modalEditSubmit(input, 'qwen21');
+    },
+
+    poll(handle) {
+      return modalEditPoll(handle, '初回はモデルの読み込みで 1 分ほどかかります');
+    },
+
+    parse: modalEditParse,
+
+    costHint() {
+      const size = sendSize();
+      if (!size) return '';
+      return `出力 ${size.width}×${size.height} × 1 枚`
+        + ` ・ ウォーム時 約 ${qwen21Seconds(size)} 秒`
+        + ' ・ 自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です';
+    },
+  },
 };
+
+// 参照画像編集のだいたいの所要時間（秒）。実測（modal_comfy HANDOFF §12）では
+// L40S・1024×1536・25 ステップで 17〜19 秒だった。1 ステップあたりのコストは
+// おおむね画素数に比例するので、そこから面積とステップ数で割り戻す
+const QWEN21_REF_PX = 1024 * 1536;
+const QWEN21_REF_SECONDS = 18;
+const QWEN21_REF_STEPS = 25;
+
+function qwen21Steps() {
+  const n = Number(els.q21Steps.value);
+  return els.q21Steps.value !== '' && Number.isFinite(n) && n > 0 ? n : QWEN21_REF_STEPS;
+}
+
+function qwen21Seconds(size) {
+  const px = size.width * size.height;
+  const secs = QWEN21_REF_SECONDS * (px / QWEN21_REF_PX) * (qwen21Steps() / QWEN21_REF_STEPS);
+  return Math.max(1, Math.round(secs));
+}
 
 // 思考回数（num_steps）。空欄・数値でないものは既定に寄せる
 // （空欄を 0 と読むと、消しただけで LanPaint が切れてしまう）

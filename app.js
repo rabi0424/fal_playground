@@ -17,6 +17,10 @@ const MODAL_KREA2_WAN_ID = 'modal/krea2-turbo-wan';
 // 同じコンテナを共有する。統合版（wan）とは別コンテナなので、編集で LanPaint を
 // 使うならこちらで生成するとコンテナが 1 つで済む
 const MODAL_KREA2_LANPAINT_ID = 'modal/krea2-turbo-lanpaint';
+// Qwen-Image 2.1（modal_comfy の qwen21_app）。**Krea 2 とは別モデル**で、
+// Krea 2 の LoRA は効かない（2026-09-20 時点で 2.1 用の LoRA は未公開）。
+// 画像編集の「参照画像編集」と同じコンテナを共有する
+const MODAL_QWEN21_ID = 'modal/qwen-image-2.1';
 
 const MODELS = [
   // safetyChecker: fal 側の安全チェッカー（enable_safety_checker）を持つモデル。常に切って送る
@@ -32,6 +36,10 @@ const MODELS = [
   { id: MODAL_KREA2_WAN_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・編集と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'wan', ckpt: true, sampler: true },
   // lanpaint: 画像編集の「LanPaint インペイント」と同居する版。API は統合版と同じ
   { id: MODAL_KREA2_LANPAINT_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal LanPaint 版・インペイントと共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'lanpaint', ckpt: true, sampler: true },
+  // qwen21: Qwen-Image 2.1。Krea 2 系とはモデルが別で、LoRA も蒸留版も無いので
+  // ステップ数は 25 前後が必要（Krea 2 Turbo の 8 とは桁が違う）。そのぶん
+  // ガイダンスは 1 に固定されず、negative_prompt を効かせるなら上げられる
+  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 実験版・参照画像編集と共有）', sizeParam: 'image_size', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, sampler: true, cfgMax: 10 },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -1616,8 +1624,11 @@ async function generateModal(model, prompt) {
     const ckpt = selectedCkpt();
     if (ckpt) input.checkpoint = ckpt;
   }
-  if (input.cfg !== undefined && (input.cfg < 0 || input.cfg > 1)) {
-    setError('この API のガイダンス（cfg）は 0〜1 の範囲で指定してください');
+  // ガイダンスの上限はモデルごと。Krea 2 Turbo は蒸留版なので 0〜1、
+  // Qwen-Image 2.1 は蒸留していないので上げられる（上げると negative_prompt が効く）
+  const cfgMax = model.cfgMax ?? 1;
+  if (input.cfg !== undefined && (input.cfg < 0 || input.cfg > cfgMax)) {
+    setError(`この API のガイダンス（cfg）は 0〜${cfgMax} の範囲で指定してください`);
     return;
   }
   // この API の LoRA は名前でも HF の resolve URL でも指定できる。名前だけに落とすと

@@ -276,6 +276,16 @@
         </select>
       </label>
 
+      <div class="field" data-only="qwen21">
+        <span class="label">生成パラメータ <em>（Qwen-Image 2.1）</em></span>
+        <div class="row">
+          <label class="field num-field" title="蒸留版が無いモデルなので 25 前後が要ります（Krea 2 Turbo の 8 とは桁が違います）">
+            <span class="label">ステップ</span>
+            <input id="q21Steps" type="number" min="1" max="60" step="1" placeholder="25">
+          </label>
+        </div>
+      </div>
+
       <div class="field" data-only="modal">
         <span class="label">生成パラメータ <em>（Wan2.2 + VACE）</em></span>
         <div class="row">

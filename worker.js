@@ -61,6 +61,10 @@ const JOB_MAX_SUBMIT_ATTEMPTS = 2; // 送信自体の再試行上限（多重生
 // 画像に焼き込む kind。ジョブの kind から引く（既定は生成）
 const JOB_META_KINDS = { edit: 'edit', inpaint: 'inpaint' };
 
+// 参照画像編集（Qwen-Image 2.1 / qwen21_app の /edit）で受け取れる参照画像の枚数。
+// Modal 側の MAX_REFS と同じ値にしてある
+const MODAL_MAX_REF_IMAGES = 4;
+
 // プロバイダ側の URL は失効しうるので、履歴に残す画像はすべて自分の R2 に取り込む。
 //
 // 以前はホストの許可リスト（fal / WaveSpeed / Runware のドメイン）で絞っていたが、
@@ -2199,7 +2203,11 @@ export class SyncState extends DurableObject {
       const height = Number(res.headers.get('X-Height'));
       // 生成設定を画像に焼き込んでから保存する。画像本体（base64）は焼かない。
       // 正規化で拾われない項目（endpoint・sampler_name など）は raw に入る
-      const { image: _img, mask: _mask, hf_token: _tok, ...params } = job.payload;
+      // images は参照画像（base64）の配列。image / mask と同じく、焼き込むと
+      // メタデータが数 MB になるので必ず落とす
+      const {
+        image: _img, mask: _mask, images: _imgs, hf_token: _tok, ...params
+      } = job.payload;
       const endpoint = job.endpointKey ?? (job.endpoint.includes('-exp-') ? 'exp'
         : job.endpoint.includes('-gpusnap-') ? 'gpusnap'
           : job.endpoint.includes('-ckpt-') ? 'ckpt' : 'prod');
@@ -3647,6 +3655,10 @@ export default {
         // コンテナを共有するので、生成もこちらに寄せれば 1 コンテナで済む
         lanpaint: env.LANPAINT_ENDPOINT_GENERATE
           || 'https://rabitteru--lanpaint-api-comfyapi-generate.modal.run',
+        // Qwen-Image 2.1（qwen21_app）。**Krea 2 とは別モデル**で、Krea 2 の LoRA は
+        // 効かない。画像編集の「参照画像編集」と同じコンテナを共有する
+        qwen21: env.QWEN21_ENDPOINT_GENERATE
+          || 'https://rabitteru--qwen21-api-comfyapi-generate.modal.run',
       };
       // Object.hasOwn で見る（'constructor' のような継承プロパティを
       // 許可リストの当たりと取り違えないため）
@@ -3678,25 +3690,22 @@ export default {
       if (typeof payload?.prompt !== 'string' || payload.prompt.trim() === '') {
         return new Response('prompt is required', { status: 422 });
       }
-      // 画像とマスクは必須。base64（data URL 接頭辞付きも可）で受ける
-      for (const field of ['image', 'mask']) {
-        if (typeof payload?.[field] !== 'string' || payload[field] === '') {
-          return new Response(`${field} is required`, { status: 422 });
-        }
-      }
       const jobId = payload.jobId;
       if (typeof jobId !== 'string' || !/^[0-9a-f]{32}$/.test(jobId)) {
         return new Response('jobId is required', { status: 422 });
       }
       delete payload.jobId;
 
-      // 生成と同じく、URL はクライアントから受け取らずここの許可リストで解決する
+      // 生成と同じく、URL はクライアントから受け取らずここの許可リストで解決する。
+      // needs は必須フィールドの形。マスク編集（wan / lanpaint）は image + mask、
+      // 参照画像編集（qwen21）は images 配列と、要求するものが違う
       const endpoints = {
         wan: {
           url: env.WAN_ENDPOINT_EDIT
             || 'https://rabitteru--wan-vace-api-comfyapi-edit.modal.run',
           kind: 'edit',
           key: 'wan-edit',
+          needs: 'mask',
         },
         // LanPaint 版（lanpaint_app の /inpaint）。マスクの外は元画像とピクセル
         // 一致で返り、Krea 2 の LoRA がそのまま効く。別コンテナなので、生成も
@@ -3706,11 +3715,44 @@ export default {
             || 'https://rabitteru--lanpaint-api-comfyapi-inpaint.modal.run',
           kind: 'inpaint',
           key: 'lanpaint',
+          needs: 'mask',
+        },
+        // Qwen-Image 2.1（qwen21_app の /edit）。**マスクを使わない**。
+        // 参照画像を base64 の配列で渡し、指示文の中で <image1> … と参照する。
+        // images[0] が編集対象で、残りは参照用（API 側の上限は 4 枚）
+        qwen21: {
+          url: env.QWEN21_ENDPOINT_EDIT
+            || 'https://rabitteru--qwen21-api-comfyapi-edit.modal.run',
+          kind: 'edit',
+          key: 'qwen21-edit',
+          needs: 'images',
         },
       };
       const target = Object.hasOwn(endpoints, payload.endpoint)
         ? endpoints[payload.endpoint] : endpoints.wan;
       delete payload.endpoint; // Modal API には存在しないフィールドなので転送しない
+
+      if (target.needs === 'images') {
+        // base64（data URL 接頭辞付きも可）の配列。Modal 側の上限が 4 枚なので、
+        // 無駄に大きな本文を Durable Object に積まないようここでも弾く
+        const images = payload.images;
+        if (!Array.isArray(images) || images.length === 0) {
+          return new Response('images is required', { status: 422 });
+        }
+        if (images.length > MODAL_MAX_REF_IMAGES) {
+          return new Response(`images must be ${MODAL_MAX_REF_IMAGES} or fewer`, { status: 422 });
+        }
+        if (images.some((i) => typeof i !== 'string' || i === '')) {
+          return new Response('images must be non-empty base64 strings', { status: 422 });
+        }
+      } else {
+        // 画像とマスクは必須。base64（data URL 接頭辞付きも可）で受ける
+        for (const field of ['image', 'mask']) {
+          if (typeof payload?.[field] !== 'string' || payload[field] === '') {
+            return new Response(`${field} is required`, { status: 422 });
+          }
+        }
+      }
 
       await stub.startKrea2Job(jobId, payload, target.url, target.kind, target.key);
       return Response.json({ queued: true, jobId });

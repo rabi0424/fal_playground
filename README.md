@@ -368,7 +368,7 @@ LoRA 欄の「ライブラリを管理」（`library.html`）で、登録済み 
 
 ```
 node test/import.test.mjs        # Civitai 取り込みパイプライン
-node test/modal.test.mjs         # Modal（modal_comfy）ジョブ・ポーリングの扱い
+node test/modal.test.mjs         # Modal（modal_comfy）ジョブ・ポーリング・エンドポイント振り分け
 node test/history.test.mjs       # 履歴 API（一覧の軽量化と 1 件取得）
 node test/lora-library.test.mjs  # LoRA ライブラリ（Modal へ渡す識別子など）
 node test/store.test.mjs         # localStorage のラッパー（容量あふれの扱い）と古い HTML の検出
@@ -492,6 +492,27 @@ localStorage はブラウザごとに 5MB 前後で頭打ちになり、超え�
 - `WAN_ENDPOINT_EDIT` = 統合版（Wan2.2 + VACE のマスク編集）の URL
 - `LANPAINT_ENDPOINT_GENERATE` = LanPaint 版（生成）の URL
 - `LANPAINT_ENDPOINT_INPAINT` = LanPaint 版（インペイント）の URL
+- `QWEN21_ENDPOINT_GENERATE` = Qwen-Image 2.1（生成）の URL
+- `QWEN21_ENDPOINT_EDIT` = Qwen-Image 2.1（参照画像編集）の URL
+
+## Modal 自前ホスト版 Qwen-Image 2.1（実験）
+
+モデル選択の「Qwen-Image 2.1 自前ホスト（Modal 実験版・参照画像編集と共有）」と、画像編集の「Modal 自前ホスト（Qwen-Image 2.1 参照画像編集）」は、同じく modal_comfy の `qwen21-api` を使います。**Krea 2 系とはモデルもコンテナも別です。**
+
+- **LoRA は効きません。** Krea 2 用の LoRA は構造が違うため無視され、2.1 用の LoRA は 2026-09-20 時点で公開されていません（そのため編集側では LoRA 欄を出していません）
+- **蒸留版が無いのでステップ数が要ります。** 既定は 25（Krea 2 Turbo は 8）。実測では L40S・1024×1536・25 ステップで **18.7 秒**、参照画像編集が **17.0 秒**でした
+- **ガイダンス（cfg）は 1 より上げられます。** Krea 2 Turbo は 0〜1 ですが、2.1 は蒸留していないので上げられます（上げると negative prompt が効きます）
+- 生成と参照画像編集は**同じコンテナ**なので、両方使うならコールドスタートとアイドル維持のコストが割り勘になります
+
+### 参照画像編集はマスクを使いません
+
+マスクを塗る代わりに、画像を丸ごと渡して指示文で変更点を書きます。指示文の中では参照画像を `<image1>` と書いて参照します（例:「`<image1>` のシャツを赤いニットに変えて、顔とポーズと背景はそのまま」）。変えない部分も明示しておくと保たれやすくなります。
+
+マスクを塗った場合は、ほかのマスク非対応プロバイダと同じくブラウザ側の合成で反映します（API にはマスクを渡しません）。
+
+API 側は参照画像を 4 枚まで受けますが、この画面の入力欄は 1 枚なので編集対象だけを渡しています。
+
+> **送信サイズについて。** この画面は `resolution=0`（リサイズ無効）を送っているので、**出力は送信サイズのまま返ります**。API の既定（`resolution=1024`）は「総ピクセル予算」で、1024×1536 を渡すと 832×1248 に縮んで返るため、マスク合成の前提（入出力のサイズ一致）が崩れます。そのぶん大きく送るほど遅くなります。
 
 ### 統合版（編集とコンテナを共有）
 

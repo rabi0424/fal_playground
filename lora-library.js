@@ -102,7 +102,7 @@ function baseKind(base) {
   return 'other';
 }
 
-const BASE_LABELS = { qwen: 'Qwen', krea2: 'Krea 2', wan: 'Wan', other: 'その他' };
+const BASE_LABELS = { qwen: 'Qwen', krea2: 'Krea 2', wan: 'Wan', qwen21: 'Qwen-Image 2.1', other: 'その他' };
 
 // ★ を先頭に、あとは表示名順（数字は数値として比較する）
 function sorted(items = load()) {

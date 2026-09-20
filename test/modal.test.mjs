@@ -3,7 +3,8 @@
 // worker.js をそのまま Node に取り込み、Modal のエンドポイントと R2 をモックして流す。
 // 見るのは 3 点:
 //   - /api/krea2/generate と /api/modal/edit がエンドポイントを正しく解決すること
-//     （編集は Wan2.2 + VACE の /edit と LanPaint の /inpaint を振り分ける）
+//     （編集は Wan2.2 + VACE の /edit、LanPaint の /inpaint、Qwen-Image 2.1 の
+//       参照画像編集を振り分ける。必須フィールドが image+mask か images かも変わる）
 //   - 303（結果ポーリングへの切り替え）を追って完了まで進むこと
 //   - ポーリング中の 202（まだ実行中）を完了と取り違えないこと
 //   - 画像以外が返ったときに、それを結果として保存しないこと
@@ -402,6 +403,85 @@ test('ルーティング: endpoint フィールドで URL を選び、未知の�
   }
   await post('/api/krea2/generate', { ...base, jobId: '2'.repeat(32), endpoint: 'constructor' });
   assert.match(seen.at(-1)[2], /krea2-comfy-api-exp/);
+
+  // Qwen-Image 2.1（別モデル・別コンテナ）
+  await post('/api/krea2/generate', { ...base, jobId: '3'.repeat(32), endpoint: 'qwen21' });
+  assert.match(seen.at(-1)[2], /qwen21-api-comfyapi-generate/);
+  assert.deepEqual(seen.at(-1).slice(3), ['generate', 'qwen21']);
+});
+
+test('参照画像編集: qwen21 は images 配列で振り分け、image/mask は要求しない', async () => {
+  const mod = await loadWorker();
+  const seen = [];
+  const env = {
+    STATE: { idFromName: () => 'id', get: () => ({ startKrea2Job: (...a) => { seen.push(a); } }) },
+    MODAL_PROXY_KEY: 'wk-test',
+    MODAL_PROXY_SECRET: 'ws-test',
+  };
+  const post = (body) => mod.default.fetch(new Request('https://app/api/modal/edit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }), env);
+
+  const base = { prompt: '<image1> のシャツを赤く', jobId: '7'.repeat(32), endpoint: 'qwen21' };
+
+  // マスク無しで通る（マスク編集の 2 つとは必須フィールドが違う）
+  assert.equal((await post({ ...base, images: ['AAA'] })).status, 200);
+  assert.match(seen.at(-1)[2], /qwen21-api-comfyapi-edit/);
+  assert.deepEqual(seen.at(-1).slice(3), ['edit', 'qwen21-edit']);
+  assert.deepEqual(seen.at(-1)[1].images, ['AAA']);
+  assert.equal(seen.at(-1)[1].endpoint, undefined);
+  assert.equal(seen.at(-1)[1].jobId, undefined);
+
+  assert.equal((await post({ ...base, jobId: '8'.repeat(32), images: ['A', 'B', 'C', 'D'] })).status, 200);
+
+  // images の形が違えば弾く（DO に大きな本文を積む前に落とす）
+  const bad = [
+    {},                                   // images 自体が無い
+    { images: [] },                       // 空配列
+    { images: 'AAA' },                    // 配列でない
+    { images: ['A', ''] },                // 空文字が混ざる
+    { images: ['A', 1] },                 // 文字列でない
+    { images: ['A', 'B', 'C', 'D', 'E'] }, // 上限 4 枚を超える
+  ];
+  for (const extra of bad) {
+    const res = await post({ ...base, jobId: '9'.repeat(32), ...extra });
+    assert.equal(res.status, 422, JSON.stringify(extra));
+  }
+
+  // マスク編集側は従来どおり image / mask が必須のまま
+  assert.equal((await post({ ...base, endpoint: 'lanpaint', images: ['A'] })).status, 422);
+});
+
+test('参照画像編集: 参照画像（base64）を画像のメタデータに焼き込まない', async () => {
+  const mod = await loadWorker();
+  const { stub, storage, env } = makeDo(mod);
+  globalThis.fetch = makeModal().fetch;
+
+  const id = 'd'.repeat(32);
+  await stub.startKrea2Job(id, {
+    prompt: '<image1> のシャツを赤いニットに',
+    // 実物は数 MB になる。焼き込むと画像が肥大するので落ちていること
+    images: ['data:image/png;base64,' + 'A'.repeat(4096)],
+    resolution: 0,
+    steps: 25,
+  }, 'https://x--y.modal.run/edit', 'edit', 'qwen21-edit');
+  await runAlarms(stub, storage);
+
+  const job = await stub.getKrea2Job(id);
+  assert.equal(job.status, 'done', job.error ?? '');
+
+  const meta = readEmbeddedMeta(await storedBytes(env, job.url));
+  assert.equal(meta.kind, 'edit');
+  assert.equal(meta.model, 'modal/qwen21-edit');
+  assert.equal(meta.raw.endpoint, 'qwen21-edit');
+  // steps は正規化で拾われる項目なので raw ではなく直下に入る
+  assert.equal(meta.steps, 25);
+  // resolution は Modal 固有なので raw 行き（0 が落とされていないことも見る）
+  assert.equal(meta.raw.resolution, 0);
+  // ここが本題
+  assert.equal(meta.raw.images, undefined);
 });
 
 test('インペイント: 結果は LanPaint として記録する', async () => {
