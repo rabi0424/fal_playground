@@ -36,10 +36,11 @@ const MODELS = [
   { id: MODAL_KREA2_WAN_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・編集と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'wan', ckpt: true, sampler: true },
   // lanpaint: 画像編集の「LanPaint インペイント」と同居する版。API は統合版と同じ
   { id: MODAL_KREA2_LANPAINT_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal LanPaint 版・インペイントと共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'lanpaint', ckpt: true, sampler: true },
-  // qwen21: Qwen-Image 2.1。Krea 2 系とはモデルが別で、LoRA も蒸留版も無いので
+  // qwen21: Qwen-Image 2.1。Krea 2 系ともノーマルの Qwen-Image ともモデルが別で、
+  // **LoRA はどちらのものも効かない**（loraBase で分けている）。蒸留版が無いので
   // ステップ数は 25 前後が必要（Krea 2 Turbo の 8 とは桁が違う）。そのぶん
   // ガイダンスは 1 に固定されず、negative_prompt を効かせるなら上げられる
-  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 実験版・参照画像編集と共有）', sizeParam: 'image_size', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', sampler: true, cfgMax: 10, stepsHint: '25（蒸留版が無いので必要）' },
+  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 実験版・参照画像編集と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', sampler: true, cfgMax: 10, stepsHint: '25（蒸留版が無いので必要）' },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },

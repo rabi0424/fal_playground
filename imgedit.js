@@ -3164,8 +3164,8 @@ const PROVIDERS = {
   //
   // **マスクを使わない参照画像編集**。画像を丸ごと渡して、指示文で「何をどう
   // 変えるか」を書く。ほかの Modal 版と違い Krea 2 ではなく Qwen-Image 2.1 なので、
-  // Krea 2 の LoRA は効かない（2026-09-20 時点で 2.1 用の LoRA は未公開）。
-  // そのため LoRA 欄は出していない（imgedit.html の data-only に入れていない）。
+  // **Krea 2 用の LoRA も、ノーマルの Qwen-Image 用の LoRA も効かない**。
+  // loraBase: 'qwen21' で候補を分けてある。
   //
   // 生成側の「Qwen-Image 2.1 自前ホスト」と同じコンテナなので、両方使うなら
   // 生成もそちらに寄せるとコンテナが 1 つで済む。
@@ -3175,9 +3175,12 @@ const PROVIDERS = {
     note: 'マスク不要。画像を丸ごと渡して、指示文で変更点を書きます。蒸留版が無いモデルなのでステップ数は 25 前後が必要で、1024×1536 で 20 秒ほどかかります（Krea 2 Turbo の 8 ステップとは桁が違います）。Krea 2 の LoRA は効きません。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。生成側の「Qwen-Image 2.1 自前ホスト」と同じコンテナです。',
     supports: { size: true, steps: true },
     sizeKind: 'wan',
-    // Krea 2 用でも Qwen 用でもない。該当する LoRA が無いベースを指しておくと、
-    // 別プロバイダから移ってきたときに残った行が pruneLoraRows で外れる
+    // Krea 2 用でも、ノーマルの Qwen-Image 用でもない専用の枠
     loraBase: 'qwen21',
+    // この API の LoRA も名前 / HF の resolve URL で指定するので、ライブラリに
+    // 無いものも名前だけで足せる（Modal 側が Volume と既定リポジトリから引く）
+    loraByName: true,
+    maxLoras: 8,
     // 画像全体を作り直すモデルなので、返ってくる絵が数 px ずれることがある
     alignOutput: true,
     pollMs: 2000,
@@ -3202,6 +3205,10 @@ const PROVIDERS = {
       // 空欄はキーごと落として API の既定（25）に任せる。
       // 共用の #steps は data-only="fal" で隠れていて値も動かないので使わない
       if (els.q21Steps.value !== '') input.steps = Number(els.q21Steps.value);
+      const loras = collectLoras();
+      if (loras.length > 0) {
+        input.loras = loras.map((l) => ({ name: loraLib.modalRef(l.path), strength: l.scale }));
+      }
       // size は snapSize で 32 の倍数に丸めてある。resolution=0 と合わせると
       // 出力が送信サイズと一致するので、width/height は送らない
       //（送ると custom_size 扱いになり、公式いわく編集がずれやすくなる）

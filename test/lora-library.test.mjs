@@ -94,6 +94,15 @@ check('fileName はファイル名だけ',
 check('Wan Video 表記は wan', loraLib.baseKind('Wan Video 14B t2v'), 'wan');
 check('Wan 2.2 表記は wan', loraLib.baseKind('Wan Video 2.2 I2V-A14B'), 'wan');
 check('Qwen は qwen（wan を含まない）', loraLib.baseKind('Qwen-Image'), 'qwen');
+// Qwen-Image 2.1 は別アーキテクチャなので、Qwen-Image 用 LoRA と同じ枠にしない
+check('Qwen-Image 2.1 は qwen21', loraLib.baseKind('Qwen-Image 2.1'), 'qwen21');
+check('区切り無しの qwen21 も qwen21', loraLib.baseKind('qwen21'), 'qwen21');
+check('アンダースコア表記も qwen21', loraLib.baseKind('qwen_image_2_1'), 'qwen21');
+// Qwen-Image Edit の版番号（2509 / 2511）を 2.1 と読み違えない
+check('Qwen-Image Edit 2511 は qwen', loraLib.baseKind('Qwen-Image Edit 2511'), 'qwen');
+check('Qwen-Image Edit 2509 は qwen', loraLib.baseKind('qwen-image-edit-2509'), 'qwen');
+// wan を先に見るので、Wan 側の版番号に巻き込まれない
+check('Wan 2.1 は wan', loraLib.baseKind('Wan Video 2.1 T2V'), 'wan');
 check('Krea は krea2', loraLib.baseKind('Krea 2'), 'krea2');
 check('空は null', loraLib.baseKind(''), null);
 

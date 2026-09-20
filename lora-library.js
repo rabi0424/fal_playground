@@ -97,6 +97,12 @@ function baseKind(base) {
   if (s === '') return null;
   // "qwen" に "wan" は含まれない（wen）ので、この順で取り違えは起きない
   if (s.includes('wan')) return 'wan';
+  // **Qwen-Image 2.1 は Qwen-Image（20B）とは別アーキテクチャ**で、LoRA に
+  // 互換は無い。"qwen" だけで見ると同じ枠に混ざって、効かない LoRA が候補に
+  // 出てしまうので、先に 2.1 を判定する。
+  // 2509 / 2511（Qwen-Image Edit の版）を 2.1 と読まないよう、"2" と "1" の
+  // 前後に数字が続かないことまで見る
+  if (s.includes('qwen') && /(?:^|[^\d])2[._-]?1(?:[^\d]|$)/.test(s)) return 'qwen21';
   if (s.includes('qwen')) return 'qwen';
   if (s.includes('krea')) return 'krea2';
   return 'other';
