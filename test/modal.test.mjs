@@ -434,7 +434,10 @@ test('参照画像編集: qwen21 は images 配列で振り分け、image/mask �
   assert.equal(seen.at(-1)[1].endpoint, undefined);
   assert.equal(seen.at(-1)[1].jobId, undefined);
 
-  assert.equal((await post({ ...base, jobId: '8'.repeat(32), images: ['A', 'B', 'C', 'D'] })).status, 200);
+  // 上限ちょうど（16 枚 = TextEncodeQwenImage21 の Autogrow 入力の限界）まで通る
+  const sixteen = Array.from({ length: 16 }, (_, i) => `IMG${i}`);
+  assert.equal((await post({ ...base, jobId: '8'.repeat(32), images: sixteen })).status, 200);
+  assert.deepEqual(seen.at(-1)[1].images, sixteen);
 
   // images の形が違えば弾く（DO に大きな本文を積む前に落とす）
   const bad = [
@@ -443,7 +446,7 @@ test('参照画像編集: qwen21 は images 配列で振り分け、image/mask �
     { images: 'AAA' },                    // 配列でない
     { images: ['A', ''] },                // 空文字が混ざる
     { images: ['A', 1] },                 // 文字列でない
-    { images: ['A', 'B', 'C', 'D', 'E'] }, // 上限 4 枚を超える
+    { images: Array.from({ length: 17 }, (_, i) => `IMG${i}`) }, // 上限 16 枚を超える
   ];
   for (const extra of bad) {
     const res = await post({ ...base, jobId: '9'.repeat(32), ...extra });

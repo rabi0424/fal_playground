@@ -62,8 +62,10 @@ const JOB_MAX_SUBMIT_ATTEMPTS = 2; // 送信自体の再試行上限（多重生
 const JOB_META_KINDS = { edit: 'edit', inpaint: 'inpaint' };
 
 // 参照画像編集（Qwen-Image 2.1 / qwen21_app の /edit）で受け取れる参照画像の枚数。
-// Modal 側の MAX_REFS と同じ値にしてある
-const MODAL_MAX_REF_IMAGES = 4;
+// Modal 側の MAX_REFS と同じ値にしてある。**16 は TextEncodeQwenImage21 の
+// Autogrow 入力 image_1..image_16 の限界**で、ノード側の上限そのもの。
+// ここで弾くのは、通らない本文を Durable Object に積まないため
+const MODAL_MAX_REF_IMAGES = 16;
 
 // プロバイダ側の URL は失効しうるので、履歴に残す画像はすべて自分の R2 に取り込む。
 //

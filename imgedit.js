@@ -3015,7 +3015,7 @@ const PROVIDERS = {
     // 名前だけで足せる（ベースモデルの表記に左右されない）
     loraByName: true,
     // 蒸留 LoRA 2 本と合わせて、API のサニティ上限（10 本）に収まる数
-    maxLoras: 8,
+    maxLoras: 16, // modal_comfy 側の MAX_LORAS と揃える
     fixedLoraNote: '標準の蒸留 2 本に追加',
     // 全画面を作り直すので、返る絵が数 px ずれることがある
     alignOutput: true,
@@ -3098,7 +3098,7 @@ const PROVIDERS = {
     // この API の LoRA も名前 / HF の resolve URL で指定するので、ライブラリに
     // 無いものも名前だけで足せる
     loraByName: true,
-    maxLoras: 8,
+    maxLoras: 16, // modal_comfy 側の MAX_LORAS と揃える
     nativeMask: true,
     requiresMask: true,
     // LanPaint は二値マスクを前提にしている（公式 README: "requires binary
@@ -3181,7 +3181,7 @@ const PROVIDERS = {
     // この API の LoRA も名前 / HF の resolve URL で指定するので、ライブラリに
     // 無いものも名前だけで足せる（Modal 側が Volume と既定リポジトリから引く）
     loraByName: true,
-    maxLoras: 8,
+    maxLoras: 16, // modal_comfy 側の MAX_LORAS と揃える
     // 画像全体を作り直すモデルなので、返ってくる絵が数 px ずれることがある
     alignOutput: true,
     pollMs: 2000,
@@ -3193,8 +3193,9 @@ const PROVIDERS = {
     buildInput(dataUri, size) {
       const input = {
         prompt: els.prompt.value.trim(),
-        // 参照画像の配列。API は 4 枚まで受けるが、この画面の入力欄は 1 枚なので
-        // 編集対象（= <image1>）だけを渡す
+        // 参照画像の配列。**API は 16 枚まで受ける**（ノードの Autogrow 入力
+        // image_1..image_16 の限界）が、この画面の入力欄は 1 枚なので
+        // 編集対象（= <image1>）だけを渡す。複数枚を使うには入力欄の追加が要る
         images: [dataUri],
         // **0 は「リサイズしない」の意味**（32 の倍数へ丸めるだけ）。
         // 既定の 1024 は「総ピクセル予算」で、1024×1536 を渡すと 832×1248 に
