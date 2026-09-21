@@ -381,7 +381,7 @@ function initForm() {
   customOpt.textContent = 'カスタム（px 指定）';
   els.sizeSelect.appendChild(customOpt);
 
-  els.modelSelect.addEventListener('change', updateModelFields);
+  els.modelSelect.addEventListener('change', onModelChange);
   els.sizeSelect.addEventListener('change', updateCustomSize);
   els.customWidth.addEventListener('input', updateMpReadout);
   els.customHeight.addEventListener('input', updateMpReadout);
@@ -2447,8 +2447,14 @@ function revealGalleryItem(el) {
 function reuseRecord(record) {
   els.prompt.value = record.prompt;
   const known = MODELS.some((m) => m.id === record.model);
+  // 履歴からの再利用でもモデルが変わりうる。**切り替える前に**今のモデルの
+  // 状態を控えておかないと、この記録の内容が前のモデルの分として保存される
+  if (lastModelId && lastModelId !== (known ? record.model : '__custom__')) {
+    perModelStore[lastModelId] = perModelSnapshot();
+  }
   els.modelSelect.value = known ? record.model : '__custom__';
   if (!known) els.customModel.value = record.model;
+  lastModelId = els.modelSelect.value;
   updateModelFields();
 
   // チェックポイント指定版はチェックポイントも復元する（未登録の URL なら登録する）
@@ -2498,54 +2504,67 @@ function serializeLoraList(listEl) {
     .filter((l) => l.path !== '');
 }
 
-function saveFormState() {
-  const state = {
-    model: els.modelSelect.value,
-    customModel: els.customModel.value,
+/* ---------- エンドポイントごとの記憶 ---------- */
+// LoRA・チェックポイント・生成パラメータは「どのモデル向けか」で意味が変わる。
+// Krea 2 Turbo の 8 ステップをそのまま Qwen-Image 2.1 に持ち込むと足りないし、
+// LoRA に至ってはベースモデルが違えば効かない。そこで**モデルごとに覚えて、
+// 選び直したら戻す**。プロンプト・シード・枚数はモデルを跨いで比べたいので
+// 全体で 1 つのまま（モデルを変えても消えない）。
+let perModelStore = {}; // { [モデル id]: perModelSnapshot() }
+let lastModelId = null;
+
+function perModelSnapshot() {
+  return {
     ckptSelect: els.ckptSelect.value,
     ckptPath: els.ckptPath.value,
-    prompt: els.prompt.value,
     size: els.sizeSelect.value,
     customWidth: els.customWidth.value,
     customHeight: els.customHeight.value,
-    numImages: els.numImages.value,
-    seed: els.seed.value,
-    seedLock: els.seedLock.checked,
+    steps: els.steps.value,
+    guidance: els.guidance.value,
     samplerName: els.samplerName.value,
     scheduler: els.scheduler.value,
     denoise: els.denoise.value,
-    steps: els.steps.value,
-    guidance: els.guidance.value,
     compare: compareMode,
     common: serializeLoraList(els.loraList),
     variants: [...els.variantList.querySelectorAll('.variant')]
       .map((b) => serializeLoraList(b.querySelector('.variant-lora-list'))),
   };
-  falStore.set(LS_FORM, JSON.stringify(state));
 }
 
-function restoreFormState() {
-  let s;
-  try { s = JSON.parse(falStore.get(LS_FORM)); } catch { s = null; }
-  if (!s) return;
+// まだ一度も使っていないモデルの初期値。**LoRA と生成パラメータは引き継がない**
+// （前のモデル向けの値が黙って効いてしまう。ステップ数などは桁が違う）。
+// サイズだけは今の指定を残す（作りたい絵の形はモデルを変えても同じことが多い）
+function perModelBlank() {
+  return {
+    ckptSelect: '',
+    ckptPath: '',
+    size: els.sizeSelect.value,
+    customWidth: els.customWidth.value,
+    customHeight: els.customHeight.value,
+    steps: '',
+    guidance: '',
+    samplerName: '',
+    scheduler: '',
+    denoise: '',
+    compare: false,
+    common: [],
+    variants: [],
+  };
+}
 
-  if (s.model) els.modelSelect.value = s.model;
-  els.customModel.value = s.customModel || '';
+// 呼ぶ前に updateModelFields() を済ませておくこと（欄の出し入れと
+// LoRA の絞り込みが先に決まっていないと、比較モードの可否を判定できない）
+function perModelApply(s) {
   populateCkptSelect(s.ckptSelect || '');
   els.ckptPath.value = s.ckptPath || '';
   syncCkptRow();
-  els.prompt.value = s.prompt || '';
-  updateModelFields();
-
   // 旧バージョンで保存された存在しないサイズ値（fal の列挙名など）は無視する
   if (s.size && [...els.sizeSelect.options].some((o) => o.value === s.size)) {
     els.sizeSelect.value = s.size;
   }
   if (s.customWidth) els.customWidth.value = s.customWidth;
   if (s.customHeight) els.customHeight.value = s.customHeight;
-  els.numImages.value = s.numImages || '1';
-  els.seed.value = s.seed || '';
-  els.seedLock.checked = !!s.seedLock;
   els.steps.value = s.steps || '';
   els.guidance.value = s.guidance || '';
   els.samplerName.value = s.samplerName || '';
@@ -2561,7 +2580,58 @@ function restoreFormState() {
     setCompareMode(true);
     els.variantList.innerHTML = '';
     for (const v of s.variants || []) addVariant(v, false);
+  } else {
+    setCompareMode(false);
   }
+}
+
+// モデルを変えたとき。**前のモデルの状態を控えてから**新しいモデルの分を出す
+function onModelChange() {
+  const next = els.modelSelect.value;
+  if (lastModelId && lastModelId !== next) {
+    perModelStore[lastModelId] = perModelSnapshot();
+  }
+  lastModelId = next;
+  updateModelFields();
+  perModelApply(perModelStore[next] ?? perModelBlank());
+  saveFormState();
+}
+
+function saveFormState() {
+  const per = perModelSnapshot();
+  perModelStore[els.modelSelect.value] = per;
+  const state = {
+    model: els.modelSelect.value,
+    customModel: els.customModel.value,
+    prompt: els.prompt.value,
+    numImages: els.numImages.value,
+    seed: els.seed.value,
+    seedLock: els.seedLock.checked,
+    byModel: perModelStore,
+    // 旧バージョンが読めるように、今のモデルの分はフラットにも置いておく
+    ...per,
+  };
+  falStore.set(LS_FORM, JSON.stringify(state));
+}
+
+function restoreFormState() {
+  let s;
+  try { s = JSON.parse(falStore.get(LS_FORM)); } catch { s = null; }
+  if (!s) return;
+
+  perModelStore = s.byModel && typeof s.byModel === 'object' ? s.byModel : {};
+
+  if (s.model) els.modelSelect.value = s.model;
+  els.customModel.value = s.customModel || '';
+  els.prompt.value = s.prompt || '';
+  els.numImages.value = s.numImages || '1';
+  els.seed.value = s.seed || '';
+  els.seedLock.checked = !!s.seedLock;
+  updateModelFields();
+
+  // byModel を持たない旧形式は、フラットな値を「そのときのモデルの分」として読む
+  lastModelId = els.modelSelect.value;
+  perModelApply(perModelStore[lastModelId] ?? s);
 }
 
 let saveFormTimer = null;
@@ -2603,6 +2673,9 @@ initStatsDialog();
 initCkptField();
 initForm();
 restoreFormState();
+// 保存が無い初回でも「今のモデル」を控えておく。null のままだと最初の
+// 切り替えで前のモデルの状態を取りこぼす
+if (lastModelId === null) lastModelId = els.modelSelect.value;
 
 // 履歴: まずローカルキャッシュで即描画し、サーバーの内容で置き換える
 try {
