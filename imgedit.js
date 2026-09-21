@@ -86,6 +86,17 @@ const SIZE_PRESETS = {
 // 旧バージョンは Qwen の解像度しか無かったので qwen_* で保存されている
 const migrateSizeValue = (value) => String(value ?? '').replace(/^qwen_/, 'ar_');
 
+// アップスケール生成。元画像（切り抜いて送るならその範囲）の各辺を n 倍して送る。
+// 比は変わらないので帯も引き伸ばしも起きず、モデルが同じ絵をより多い画素で
+// 描き直す。上限はプロバイダごと（maxSendPx）で、そこで頭打ちになる
+const UPSCALE_STEPS = [
+  { value: 'up_1_5', scale: 1.5 },
+  { value: 'up_2', scale: 2 },
+  { value: 'up_3', scale: 3 },
+  { value: 'up_4', scale: 4 },
+];
+const upscaleScale = (value) => UPSCALE_STEPS.find((u) => u.value === value)?.scale ?? null;
+
 // Runware の width / height の上限（64 の倍数・128〜2048）
 const RUNWARE_MAX_PX = 2048;
 
@@ -832,7 +843,11 @@ function nearestPresetSize(width, height, presets = sizePresets()) {
       < Math.abs(Math.log(best.width / best.height) - target) ? size : best));
 }
 
+// そのプロバイダへ送れる長辺の上限。アップスケールはここで頭打ちになる
+const maxSendPx = () => provider().maxSendPx ?? MAX_INPUT_PX;
+
 // 選択中の設定での送信サイズ。'none' はリサイズしない（長辺の上限のみ）。
+// 'up_*' は元画像の各辺を n 倍（プロバイダの上限まで）。
 // プロバイダ側に刻みの制約があれば最後に丸める（Runware は 64 の倍数）
 function sendSize(width = source?.width, height = source?.height) {
   if (!width || !height) return null;
@@ -845,8 +860,12 @@ function sendSize(width = source?.width, height = source?.height) {
   }
   const presets = sizePresets();
   const choice = els.sizeSelect.value;
-  const size = choice === 'none' ? fitWithin({ width, height }, MAX_INPUT_PX)
-    : presets.find((s) => s.value === choice) ?? nearestPresetSize(width, height, presets);
+  const scale = upscaleScale(choice);
+  // fitWithin は縮めるだけなので、先に n 倍してから上限へ収める（比は保たれる）
+  const size = scale
+    ? fitWithin({ width: width * scale, height: height * scale }, maxSendPx())
+    : choice === 'none' ? fitWithin({ width, height }, MAX_INPUT_PX)
+      : presets.find((s) => s.value === choice) ?? nearestPresetSize(width, height, presets);
   const snap = provider().snapSize;
   return snap ? snap(size) : { width: size.width, height: size.height };
 }
@@ -859,6 +878,10 @@ function renderSizeOptions() {
     { value: 'auto', label: '自動（近いアスペクト比に合わせる）' },
     ...sizePresets(),
     { value: 'none', label: `リサイズしない（長辺 ${MAX_INPUT_PX}px まで）` },
+    ...UPSCALE_STEPS.map((u) => ({
+      value: u.value,
+      label: `アップスケール ×${u.scale}（元の各辺を ${u.scale} 倍）`,
+    })),
   ];
   els.sizeSelect.innerHTML = '';
   for (const size of options) {
@@ -1072,9 +1095,26 @@ function renderSizeHint() {
   els.sizeHint.textContent = `${region ? '切り抜き ' : ''}${from.width}×${from.height}`
     + ` → ${size.width}×${size.height} で送信`
     + (off < 0.5 ? '（比率そのまま）' : `（${how}）`)
+    + upscaleHintText(plan)
     + padHintText(plan);
   // 帯を付けるなら歪まないので、大きく違っても警告にはしない
   els.sizeHint.classList.toggle('warn', !fit && off > 12);
+}
+
+// アップスケール生成のときは、実際に何倍で送るかを添える。切り抜いて送る場合や
+// 上限で頭打ちになった場合は、選んだ倍率とは違う値になる
+function upscaleHintText(plan) {
+  const want = upscaleScale(els.sizeSelect.value);
+  if (!want || !(plan.from.width > 0)) return '';
+  const got = plan.size.width / plan.from.width;
+  const max = maxSendPx();
+  const capped = Math.max(plan.size.width, plan.size.height) >= max - 1;
+  return ` ・ アップスケール ×${want}`
+    + (Math.abs(got - want) < 0.05 ? '' : ` → 実際は ×${got.toFixed(1)}`)
+    + (capped ? `（長辺 ${max}px の上限）` : '')
+    // 合成は元解像度で行う（周りは描き直していないので、そこまで引き伸ばすと
+    // 描き直していない画素を水増しすることになる）。上げたぶんは合成で落ちる
+    + (plan.useMask ? ' ・ マスクを使うので、合成は元解像度に戻ります' : '');
 }
 
 // 縁の余白が付く場合、どの辺にどれだけ足すかを送信サイズの説明に添える
@@ -2791,6 +2831,7 @@ async function saveHistoryRecord(record) {
 //
 // sizeKind    … 送信サイズのプリセット（SIZE_PRESETS のキー）
 // snapSize    … プロバイダ側の刻み制約に丸める（省略可）
+// maxSendPx   … 送れる長辺の上限（省略時は MAX_INPUT_PX）。アップスケールの頭打ち
 // nativeMask  … マスクを API に渡せるか。渡せないものは合成だけで再現する
 // requiresMask… マスク前提のモデルか（マスク無しでは実行させない）
 // promptHint  … 指示文の書き方がモデルで大きく変わるときの補足（省略可）
@@ -3006,6 +3047,7 @@ const PROVIDERS = {
     pollMs: 1500,
 
     // 128〜2048 の 64 の倍数でないと 422 で弾かれる
+    maxSendPx: RUNWARE_MAX_PX,
     snapSize(size) {
       const clamp = (v) => Math.min(2048, Math.max(128, Math.round(v / 64) * 64));
       return { width: clamp(size.width), height: clamp(size.height) };
@@ -3133,6 +3175,7 @@ const PROVIDERS = {
     maskGrow: () => Number(els.wanMaskGrow.value) || 0,
     pollMs: 2500,
 
+    maxSendPx: WAN_DIM_MAX,
     snapSize: snap32,
 
     buildInput(dataUri, size, maskUri) {
@@ -3219,6 +3262,7 @@ const PROVIDERS = {
     promptHint: 'このモデルは「塗った範囲に何があってほしいか」だけを書きます（例:「赤いニット帽」）。'
       + '「帽子をかぶった男性の写真」のような画像全体の説明を書くと結果が悪くなります。',
     promptPlaceholder: '例: 赤いニット帽 / 白いシャツ',
+    maxSendPx: WAN_DIM_MAX,
     snapSize: snap32,
 
     buildInput(dataUri, size, maskUri) {
@@ -3290,6 +3334,7 @@ const PROVIDERS = {
     promptHint: 'このモデルは参照画像を <image1> と書いて参照します（例:「<image1> のシャツを赤いニットに変えて、顔・ポーズ・背景はそのまま」）。'
       + '変えない部分も「そのまま」と書いておくと保たれやすくなります。',
     promptPlaceholder: '例: <image1> のシャツを赤いニットに変えて、顔とポーズと背景はそのまま',
+    maxSendPx: WAN_DIM_MAX,
     snapSize: snap32,
 
     buildInput(dataUri, size) {

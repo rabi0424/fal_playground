@@ -11,6 +11,7 @@
 //   - 余白を足した枠でも、中身の縦横比が保たれること
 //   - 結果を入力の比へ戻すか（fitBack）の判定と、戻したときの大きさ
 //     （restoredSize。詰まった軸を伸ばし返す＝モデルが描いた画素を捨てない）
+//   - アップスケール生成の送信サイズ（n 倍してから上限へ収める順序）
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 
@@ -41,10 +42,17 @@ const build = new Function('gaps', `
   ${pick('fitWithin')}
   ${pick('restoredSize')}
   ${pick('fitBack')}
-  return { letterbox, padFrame, restoredSize, fitBack };
+  ${SRC.match(/const UPSCALE_STEPS = \[[\s\S]*?\n\];/)[0]}
+  ${SRC.match(/const upscaleScale = [^;]+;/)[0]}
+  // sendSize のうち、アップスケールを選んだときの計算だけを写したもの
+  const upscaledSize = (from, choice, max) => {
+    const scale = upscaleScale(choice);
+    return scale ? fitWithin({ width: from.width * scale, height: from.height * scale }, max) : null;
+  };
+  return { letterbox, padFrame, restoredSize, fitBack, upscaleScale, upscaledSize };
 `);
 
-const { letterbox, restoredSize, fitBack } = build(null);
+const { letterbox, restoredSize, fitBack, upscaleScale, upscaledSize } = build(null);
 const aspect = (r) => r.width / r.height;
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg}: ${a} vs ${b}`);
 
@@ -169,4 +177,28 @@ assert.deepEqual(restoredSize({ width: 1328, height: 996 }, src43),
   near(out.width / out.height, 5, 0.01, '比は保ったまま収める');
 }
 
-console.log('ok: 画像編集の帯・縁の余白・縦横比の戻し');
+/* ---- アップスケール生成 ---- */
+
+assert.equal(upscaleScale('up_2'), 2);
+assert.equal(upscaleScale('up_1_5'), 1.5);
+assert.equal(upscaleScale('auto'), null, 'プリセットはアップスケールではない');
+assert.equal(upscaleScale('none'), null);
+
+// 各辺を n 倍する（比はそのままなので、帯も引き伸ばしも起きない）
+assert.deepEqual(upscaledSize({ width: 768, height: 1024 }, 'up_2', 4096),
+  { width: 1536, height: 2048 });
+assert.deepEqual(upscaledSize({ width: 800, height: 600 }, 'up_1_5', 4096),
+  { width: 1200, height: 900 });
+
+// 上限で頭打ちになっても比は保つ
+{
+  const out = upscaledSize({ width: 1500, height: 1000 }, 'up_4', 2048);
+  assert.deepEqual(out, { width: 2048, height: 1365 });
+  near(out.width / out.height, 1.5, 0.01, '頭打ちでも比はそのまま');
+}
+
+// fitWithin は縮めるだけなので、先に n 倍してから収める順序でないと効かない
+assert.deepEqual(upscaledSize({ width: 512, height: 512 }, 'up_3', 4096),
+  { width: 1536, height: 1536 });
+
+console.log('ok: 画像編集の帯・縁の余白・縦横比の戻し・アップスケール');
