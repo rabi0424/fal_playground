@@ -411,7 +411,12 @@ function updateModelFields() {
   // 蒸留版の Krea 2 Turbo は 8 ステップ / cfg 0〜1 だが、Qwen-Image 2.1 は
   // 蒸留していないので前提が違う。モデル側の指定を優先する
   els.steps.placeholder = model.stepsHint ?? (isModal ? '8（変更非推奨）' : 'デフォルト');
-  els.guidance.placeholder = isModal ? `1（0〜${model.cfgMax ?? 1}）` : 'デフォルト';
+  // cfg を 1 より上げると ComfyUI が negative 側も評価するので所要時間がほぼ倍に
+  // なる（1 のときだけ uncond の計算を省く最適化が入る）。上げる価値はあるが、
+  // 「空欄のままと同じ速さ」と誤解されないよう欄に出しておく
+  els.guidance.placeholder = isModal
+    ? ((model.cfgMax ?? 1) > 1 ? `1（0〜${model.cfgMax}。1 より上は約2倍遅い）` : '1（0〜1）')
+    : 'デフォルト';
 
   // サンプラー系は統合版だけが受け付ける
   els.wanSamplerRow.hidden = !model.sampler;

@@ -283,7 +283,12 @@
             <span class="label">ステップ</span>
             <input id="q21Steps" type="number" min="1" max="60" step="1" placeholder="25">
           </label>
+          <label class="field num-field" title="1 より上げると指示への追従が上がりますが、UNet の評価回数が倍になるので所要時間もほぼ倍になります">
+            <span class="label">ガイダンス</span>
+            <input id="q21Cfg" type="number" min="0" max="10" step="0.1" placeholder="1">
+          </label>
         </div>
+        <p class="hint">ガイダンスを 1 より上げると negative prompt が効くようになり、指示への追従も上がります。ただし所要時間はほぼ倍になります（1 のときは ComfyUI が negative 側の計算を丸ごと省くため）。</p>
       </div>
 
       <div class="field" data-only="modal">
@@ -342,7 +347,7 @@
         </div>
       </div>
 
-      <label class="field" data-only="fal runware modal">
+      <label class="field" data-only="fal runware modal qwen21">
         <span class="label">除外したい要素（negative prompt）</span>
         <input id="negativePrompt" type="text" placeholder="空欄で未指定">
         <span class="hint" id="negativeHint" hidden></span>
