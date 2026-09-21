@@ -51,6 +51,19 @@
     </div>
   </div>
 
+  <!-- 一括操作。1 件以上選ぶと出る -->
+  <div id="bulkBar" class="lib-bulk" hidden>
+    <span id="bulkCount" class="lib-bulk-count"></span>
+    <label class="lib-sort">
+      <span class="label">ベースモデル</span>
+      <select id="bulkBaseSelect"></select>
+    </label>
+    <button id="bulkApplyBtn" class="primary-btn small" type="button">選択した LoRA に反映</button>
+    <span class="spacer"></span>
+    <button id="bulkAllBtn" class="ghost-btn small" type="button">表示中をすべて選択</button>
+    <button id="bulkClearBtn" class="ghost-btn small" type="button">選択を解除</button>
+  </div>
+
   <div id="status" class="status" hidden></div>
   <div id="error" class="error" hidden></div>
 

@@ -34,6 +34,12 @@ const check = (label, actual, expected) => {
   passed++;
 };
 
+// 配列を比べる用（check は strictEqual なので参照が違うと落ちる）
+const checkList = (label, actual, expected) => {
+  assert.deepEqual(actual, expected, label);
+  passed++;
+};
+
 /* ---- modalRef: HF の resolve URL はそのまま渡す ---- */
 
 // 既定リポジトリのもの。名前に落としても動くが、URL のままでも同じ結果になる
@@ -103,6 +109,37 @@ check('Qwen-Image Edit 2511 は qwen', loraLib.baseKind('Qwen-Image Edit 2511'),
 check('Qwen-Image Edit 2509 は qwen', loraLib.baseKind('qwen-image-edit-2509'), 'qwen');
 // wan を先に見るので、Wan 側の版番号に巻き込まれない
 check('Wan 2.1 は wan', loraLib.baseKind('Wan Video 2.1 T2V'), 'wan');
+
+/* ---- baseChoices: 選択中の値を絶対に落とさない ---- */
+// <select> は一致する option が無い値を代入されると空へ落ちる。候補を作る側が
+// 現在値を含め損ねると、開いただけでベースモデルが消える（保存まで気づけない）
+const known = loraLib.baseKinds().map((k) => loraLib.baseLabel(k));
+checkList('既定の候補は BASE_KINDS の表示名', loraLib.baseChoices(''), known);
+check(
+  '候補に無い現在値は末尾に足される',
+  loraLib.baseChoices('Qwen-Image').at(-1),
+  'Qwen-Image',
+);
+check(
+  '既知の値を渡しても重複しない',
+  loraLib.baseChoices('Krea 2').length,
+  known.length,
+);
+check(
+  'ライブラリで使われている表記も候補に入る',
+  loraLib.baseChoices('', ['SDXL 1.0']).includes('SDXL 1.0'),
+  true,
+);
+checkList(
+  '空文字・空白だけの値は候補にしない',
+  loraLib.baseChoices('   ', ['', '  ']),
+  known,
+);
+check(
+  'extras と現在値が同じなら 1 つだけ',
+  loraLib.baseChoices('SDXL 1.0', ['SDXL 1.0']).filter((v) => v === 'SDXL 1.0').length,
+  1,
+);
 check('Krea は krea2', loraLib.baseKind('Krea 2'), 'krea2');
 check('空は null', loraLib.baseKind(''), null);
 

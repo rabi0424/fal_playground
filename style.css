@@ -2658,6 +2658,31 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 .lib-sort select { padding: 5px 8px; font-size: 13px; width: auto; }
 .lib-tools .spacer { flex: 1; }
 
+/* 一括操作バー。選択があるときだけ出る */
+.lib-bulk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel, transparent);
+}
+.lib-bulk .spacer { flex: 1; }
+.lib-bulk-count { font-size: 13px; font-weight: 600; white-space: nowrap; }
+.lib-bulk select { padding: 5px 8px; font-size: 13px; width: auto; }
+
+/* 一括選択のチェックボックス。見出し行の展開操作と取り合わないよう、
+   クリックは checkbox 側で止める */
+.lib-check {
+  flex-shrink: 0;
+  margin: 3px 0 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent, currentColor);
+}
+
 .lib-list {
   display: flex;
   flex-direction: column;

@@ -41,6 +41,12 @@ const els = {
   metaDiff: $('#metaDiff'),
   metaError: $('#metaError'),
   metaApplyBtn: $('#metaApplyBtn'),
+  bulkBar: $('#bulkBar'),
+  bulkCount: $('#bulkCount'),
+  bulkBaseSelect: $('#bulkBaseSelect'),
+  bulkApplyBtn: $('#bulkApplyBtn'),
+  bulkAllBtn: $('#bulkAllBtn'),
+  bulkClearBtn: $('#bulkClearBtn'),
 };
 
 function setStatus(text, done = false) {
@@ -91,7 +97,74 @@ function formatDate(ts) {
 let library = loadLibrary();
 let filter = 'all'; // 'all' | 'fav' | 'todo' | `base:<名前>`
 let expanded = null; // 展開中の path
+const selected = new Set(); // 一括操作で選んでいる path
 const saveTimers = new Map();
+
+/* ---------- ベースモデルの選択肢 ---------- */
+
+// ライブラリで実際に使われている表記。Civitai 由来の "Qwen-Image" のように
+// 代表名と違う文字列も候補に残す（選び直したときに消えてしまわないように）
+function usedBases() {
+  return [...new Set(library.map((i) => i.base).filter(Boolean))].sort();
+}
+
+// <select> を作る。**selected は必ず候補に含める**（一致する option が無い値を
+// 代入すると空へ落ち、既存の値が黙って消えるため）。空の選択肢は「指定しない」
+function fillBaseSelect(select, selectedValue) {
+  select.innerHTML = '';
+  for (const label of loraLib.baseChoices(selectedValue, usedBases())) {
+    const opt = document.createElement('option');
+    opt.value = label;
+    opt.textContent = label;
+    select.appendChild(opt);
+  }
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = '指定しない';
+  select.appendChild(none);
+  select.value = selectedValue || '';
+}
+
+/* ---------- 一括操作 ---------- */
+
+function renderBulkBar() {
+  // ライブラリから消えたものが選択に残らないようにする
+  for (const path of [...selected]) {
+    if (!library.some((i) => i.path === path)) selected.delete(path);
+  }
+  els.bulkBar.hidden = selected.size === 0;
+  if (selected.size === 0) return;
+  els.bulkCount.textContent = `${selected.size} 件を選択中`;
+  els.bulkApplyBtn.textContent = `選択した ${selected.size} 件に反映`;
+  // 開き直すたびに選び直させない。今の選択を保ったまま候補だけ作り直す
+  fillBaseSelect(els.bulkBaseSelect, els.bulkBaseSelect.value);
+}
+
+function applyBulkBase() {
+  const base = els.bulkBaseSelect.value.trim();
+  const paths = [...selected];
+  if (paths.length === 0) return;
+  for (const path of paths) {
+    const item = library.find((i) => i.path === path);
+    if (item) item.base = base;
+  }
+  // 一括はまとめて即保存する（入力のたびの遅延保存とは別扱い）
+  saveLibrary(library);
+  setStatus(`${paths.length} 件のベースモデルを「${base || '指定しない'}」にしました`, true);
+  render();
+}
+
+function initBulkBar() {
+  els.bulkApplyBtn.addEventListener('click', applyBulkBase);
+  els.bulkAllBtn.addEventListener('click', () => {
+    for (const item of visibleItems()) selected.add(item.path);
+    render();
+  });
+  els.bulkClearBtn.addEventListener('click', () => {
+    selected.clear();
+    render();
+  });
+}
 
 // 入力のたびに保存すると同期が騒がしいので、少し待ってからまとめて書く
 function scheduleSave(path, mutate) {
@@ -167,6 +240,7 @@ function renderFilters() {
 
 function render() {
   renderFilters();
+  renderBulkBar();
   els.list.innerHTML = '';
 
   const items = visibleItems();
@@ -188,6 +262,21 @@ function renderCard(item) {
   /* --- 見出し行 --- */
   const head = document.createElement('div');
   head.className = 'lib-card-head';
+
+  // 一括操作用のチェックボックス。見出し行のクリックは展開に使われているので、
+  // ここでイベントを止めて取り合わないようにする
+  const check = document.createElement('input');
+  check.type = 'checkbox';
+  check.className = 'lib-check';
+  check.checked = selected.has(item.path);
+  check.title = '一括操作の対象にする';
+  check.addEventListener('click', (e) => e.stopPropagation());
+  check.addEventListener('change', () => {
+    if (check.checked) selected.add(item.path);
+    else selected.delete(item.path);
+    renderBulkBar();
+  });
+  head.appendChild(check);
 
   const star = document.createElement('button');
   star.type = 'button';
@@ -331,24 +420,17 @@ function renderEditor(item) {
   box.appendChild(field('既定 scale', scaleWrap, 'この LoRA を行に追加したときの初期値になります。'));
 
   /* ベースモデル */
-  const baseInput = document.createElement('input');
-  baseInput.type = 'text';
-  baseInput.value = item.base || '';
-  baseInput.placeholder = '例: Krea 2';
-  baseInput.setAttribute('list', 'baseList');
-  baseInput.addEventListener('input', () => {
-    scheduleSave(item.path, (i) => { i.base = baseInput.value.trim(); });
+  // 自由入力だと表記ゆれがそのまま絞り込みの分裂になるのでプルダウンにする。
+  // 既に使われている表記も候補に入るので、取り込み時に付いた名前は残せる
+  const baseSelect = document.createElement('select');
+  fillBaseSelect(baseSelect, item.base || '');
+  baseSelect.addEventListener('change', () => {
+    scheduleSave(item.path, (i) => { i.base = baseSelect.value.trim(); });
+    // 絞り込みのチップは件数を持つので、変えたらその場で作り直す
+    renderFilters();
   });
-  // 既に使っているベースモデル名を候補に出す（input の子には置けないので box 直下）
-  const datalist = document.createElement('datalist');
-  datalist.id = 'baseList';
-  for (const base of [...new Set(library.map((i) => i.base).filter(Boolean))].sort()) {
-    const opt = document.createElement('option');
-    opt.value = base;
-    datalist.appendChild(opt);
-  }
-  box.appendChild(datalist);
-  box.appendChild(field('ベースモデル', baseInput));
+  box.appendChild(field('ベースモデル', baseSelect,
+    '生成画面では、選んだモデルに合うベースモデルの LoRA だけが候補に出ます。'));
 
   /* メモ */
   const noteInput = document.createElement('input');
@@ -592,6 +674,7 @@ civitaiImport.init({
 
 els.searchInput.addEventListener('input', render);
 els.sortSelect.addEventListener('change', render);
+initBulkBar();
 els.fetchAllBtn.addEventListener('click', fetchAllMeta);
 els.civitaiBtn.addEventListener('click', () => civitaiImport.open('lora'));
 els.metaApplyBtn.addEventListener('click', applyMeta);

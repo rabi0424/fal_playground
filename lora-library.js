@@ -110,6 +110,25 @@ function baseKind(base) {
 
 const BASE_LABELS = { qwen: 'Qwen', krea2: 'Krea 2', wan: 'Wan', qwen21: 'Qwen-Image 2.1', other: 'その他' };
 
+// 画面に出すベースモデルの種類。**一覧を持つ場所をここ以外に作らないこと。**
+// 以前 hf-import.js が独自に 3 つ固定で持っていて、Qwen-Image 2.1 を足したときに
+// 候補から漏れ、<select> が黙って「指定しない」へ落ちてベースモデル無しで
+// 登録される不具合になった。'other' は分類の受け皿で、選ばせるものではないので出さない
+const BASE_KINDS = ['krea2', 'qwen', 'qwen21', 'wan'];
+
+// 選択肢に selected を必ず含める。<select> は一致する option が無い値を
+// 代入されると空へ落ちるので、補わないと既存の値が黙って消える。
+// extras には「ライブラリで実際に使われている表記」を渡す想定
+// （Civitai 由来の "Qwen-Image" のような、種類の代表名と違う文字列を残すため）
+function baseChoices(selected, extras = []) {
+  const out = [];
+  for (const v of [...BASE_KINDS.map((k) => BASE_LABELS[k]), ...extras, selected]) {
+    const label = String(v ?? '').trim();
+    if (label !== '' && !out.includes(label)) out.push(label);
+  }
+  return out;
+}
+
 // ★ を先頭に、あとは表示名順（数字は数値として比較する）
 function sorted(items = load()) {
   return [...items].sort((a, b) => {
@@ -193,6 +212,8 @@ window.loraLib = {
   triggerWords,
   baseKind,
   baseLabel: (kind) => BASE_LABELS[kind] ?? kind,
+  baseKinds: () => [...BASE_KINDS],
+  baseChoices,
   sorted,
   forBase,
   register,

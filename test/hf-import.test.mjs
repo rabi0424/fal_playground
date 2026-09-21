@@ -18,11 +18,20 @@ import assert from 'node:assert/strict';
 
 function loadHfImport() {
   // hf-import.js は読み込み時に DOM を触らない（init まで遅延する）ので、
-  // window だけあれば評価できる
-  const sandbox = { console };
+  // window だけあれば評価できる。ベースモデルの一覧は loraLib が持つので、
+  // 本体と同じ順で先に読み込む
+  const store = {};
+  const localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+    removeItem: (k) => { delete store[k]; },
+  };
+  const sandbox = { console, localStorage, DOMException };
   sandbox.window = sandbox;
   createContext(sandbox);
-  runInContext(readFileSync(new URL('../hf-import.js', import.meta.url), 'utf8'), sandbox);
+  for (const file of ['../store.js', '../lora-library.js', '../hf-import.js']) {
+    runInContext(readFileSync(new URL(file, import.meta.url), 'utf8'), sandbox);
+  }
   return sandbox.hfImport;
 }
 
