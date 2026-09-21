@@ -400,6 +400,14 @@ function updateModelFields() {
   // populateCkptSelect が一覧に無い値を既定へ落とす
   if (model.ckpt) populateCkptSelect(els.ckptSelect.value);
 
+  // LoRA の候補はモデルのベースモデルで絞っている。**モデルを変えたら作り直す**。
+  // 呼ばないと前のモデルの絞り込みが残り、「Krea 2 に戻したのに Qwen の LoRA
+  // しか出てこない」状態になる（絞り込みの件数を出すヒント文言も同じ関数で
+  // 更新しているので、そちらも古いまま固まる）。
+  // 候補から外れた LoRA が行に残っている場合は populateLoraSelect が
+  // 「⚠ …（このモデル向けではありません）」として見せるので、黙って消えない
+  refreshLoraSelects();
+
   // Modal 版は fal のキュー API を使わないため比較モード非対応
   const isModal = model.provider === 'modal';
   els.compareToggle.closest('.compare-toggle').hidden = isModal;

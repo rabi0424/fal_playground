@@ -513,8 +513,21 @@ input, select, textarea {
   border-radius: var(--radius-control);
   padding: 8px 10px;
   width: 100%;
+  /* width: 100% だけでは縮まない。min-width の初期値 auto は「中身の幅」を
+     下限にするので、中身が画面より広いと箱ごと広がる。
+     **iOS Safari は <select> の中身を「いちばん長い選択肢」で測る**ため、
+     長いチェックポイント名（例「既定（qwen_image_2.1_Q8_0.gguf）」）が入ると
+     行が画面幅を超え、ページ全体が横にパンできてしまう。
+     .lora-head .lora-select には個別に入れてあったが、チェックポイント欄の
+     select は .lora-row の直下なのでそのルールが当たっていなかった。
+     ここで全体に効かせる（Chromium は select を勝手に切り詰めるので再現しない） */
+  min-width: 0;
+  max-width: 100%;
   transition: border-color var(--dur-quick) ease, box-shadow var(--dur-quick) ease;
 }
+
+/* 縮めた select の文字は「…」で切る（ぶつ切りだと壊れて見える） */
+select { text-overflow: ellipsis; }
 
 input:focus, select:focus, textarea:focus {
   outline: none;
