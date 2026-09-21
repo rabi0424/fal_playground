@@ -3657,10 +3657,15 @@ export default {
         // コンテナを共有するので、生成もこちらに寄せれば 1 コンテナで済む
         lanpaint: env.LANPAINT_ENDPOINT_GENERATE
           || 'https://rabitteru--lanpaint-api-comfyapi-generate.modal.run',
-        // Qwen-Image 2.1（qwen21_app）。**Krea 2 とは別モデル**で、Krea 2 の LoRA は
-        // 効かない。画像編集の「参照画像編集」と同じコンテナを共有する
+        // 統合版（krea2_qwen_app）。Krea 2 の生成と Qwen 2.1 の生成/参照画像編集を
+        // **1 コンテナ**で提供する。どれを叩いても同じコンテナが温まる
+        unified: env.UNIFIED_ENDPOINT_KREA2_GENERATE
+          || 'https://rabitteru--krea2-qwen21-api-comfyapi-krea2-generate.modal.run',
+        // Qwen-Image 2.1。**Krea 2 とは別モデル**で、Krea 2 の LoRA は効かない。
+        // 2026-09-21 に統合版（krea2_qwen_app）へ移行した。メソッド名が
+        // qwen_generate なので URL は -comfyapi-qwen-generate になる
         qwen21: env.QWEN21_ENDPOINT_GENERATE
-          || 'https://rabitteru--qwen21-api-comfyapi-generate.modal.run',
+          || 'https://rabitteru--krea2-qwen21-api-comfyapi-qwen-generate.modal.run',
       };
       // Object.hasOwn で見る（'constructor' のような継承プロパティを
       // 許可リストの当たりと取り違えないため）
@@ -3723,8 +3728,10 @@ export default {
         // 参照画像を base64 の配列で渡し、指示文の中で <image1> … と参照する。
         // images[0] が編集対象で、残りは参照用（API 側の上限は 4 枚）
         qwen21: {
+          // 2026-09-21 に統合版（krea2_qwen_app）へ移行。メソッド名が qwen_edit
+          // なので URL は -comfyapi-qwen-edit になる
           url: env.QWEN21_ENDPOINT_EDIT
-            || 'https://rabitteru--qwen21-api-comfyapi-edit.modal.run',
+            || 'https://rabitteru--krea2-qwen21-api-comfyapi-qwen-edit.modal.run',
           kind: 'edit',
           key: 'qwen21-edit',
           needs: 'images',

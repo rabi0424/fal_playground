@@ -17,9 +17,14 @@ const MODAL_KREA2_WAN_ID = 'modal/krea2-turbo-wan';
 // 同じコンテナを共有する。統合版（wan）とは別コンテナなので、編集で LanPaint を
 // 使うならこちらで生成するとコンテナが 1 つで済む
 const MODAL_KREA2_LANPAINT_ID = 'modal/krea2-turbo-lanpaint';
-// Qwen-Image 2.1（modal_comfy の qwen21_app）。**Krea 2 とは別モデル**で、
-// Krea 2 の LoRA は効かない（2026-09-20 時点で 2.1 用の LoRA は未公開）。
-// 画像編集の「参照画像編集」と同じコンテナを共有する
+// 統合版（modal_comfy の krea2_qwen_app）。Krea 2 の生成と Qwen 2.1 の生成/
+// 参照画像編集を **1 コンテナ**で提供する。RTX PRO 6000 (96GB) に両モデルを
+// 常駐させているので、Krea 2 と Qwen 2.1 を行き来してもモデルの再ロードが
+// 起きない。Qwen 2.1 の導線（下の MODAL_QWEN21_ID）も 2026-09-21 から
+// このアプリに向いている
+const MODAL_KREA2_UNIFIED_ID = 'modal/krea2-turbo-unified';
+// Qwen-Image 2.1（modal_comfy の krea2_qwen_app）。**Krea 2 とは別モデル**で、
+// Krea 2 の LoRA は効かない。上の統合版と同じコンテナを共有する
 const MODAL_QWEN21_ID = 'modal/qwen-image-2.1';
 
 const MODELS = [
@@ -40,7 +45,9 @@ const MODELS = [
   // **LoRA はどちらのものも効かない**（loraBase で分けている）。蒸留版が無いので
   // ステップ数は 25 前後が必要（Krea 2 Turbo の 8 とは桁が違う）。そのぶん
   // ガイダンスは 1 に固定されず、negative_prompt を効かせるなら上げられる
-  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 実験版・参照画像編集と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', sampler: true, cfgMax: 10, stepsHint: '25（蒸留版が無いので必要）' },
+  // unified: Qwen 2.1 と同居する統合版。Krea 2 側の API は wan / lanpaint と同じ
+  { id: MODAL_KREA2_UNIFIED_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'unified', ckpt: true, sampler: true },
+  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版・Krea 2 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', sampler: true, cfgMax: 10, stepsHint: '25（蒸留版が無いので必要）' },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
