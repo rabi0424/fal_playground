@@ -2713,7 +2713,8 @@ async function modalEditSubmit(input, endpoint) {
     // endpoint は URL そのものではなく Worker 側の許可リストのキー
     body: JSON.stringify({ ...input, endpoint, jobId }),
   });
-  if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
+  // 英語の本文をそのまま出さず、modal-errors.js で日本語にする
+  if (!res.ok) throw await modalErrors.fromResponse(res, '編集の受付に失敗しました');
   return { jobId };
 }
 
@@ -2722,9 +2723,9 @@ async function modalEditPoll(handle, note) {
   // 一時的な通信断は、次のポーリングで拾い直す
   if (!res) return { done: false, text: '編集中…' };
   if (res.status === 404) throw new Error('ジョブが見つかりませんでした（保持期間切れの可能性があります）');
-  if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
+  if (!res.ok) throw await modalErrors.fromResponse(res, '編集の状態を確認できませんでした');
   const job = await res.json();
-  if (job.status === 'error') throw new Error(job.error || '編集に失敗しました');
+  if (job.status === 'error') throw modalErrors.fromJobError(job.error, '編集に失敗しました');
   if (job.status !== 'done') return { done: false, text: '編集中…', note };
   return { done: true, result: job };
 }

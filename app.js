@@ -1620,8 +1620,10 @@ async function modalErrorMessage(res) {
   if (res.status === 404) {
     return 'この配信環境では Modal 版は使えません（Cloudflare Workers でのホストが必要です）';
   }
+  // 英語の本文をそのまま出すと何が起きたか分からないので、modal-errors.js で
+  // 日本語にする（原文は console と err.detail に残る）
   const text = await res.text().catch(() => '');
-  return text.slice(0, 300) || `HTTP ${res.status}`;
+  return modalErrors.toError(res.status, text).message;
 }
 
 async function modalSubmit(body) {
@@ -1652,7 +1654,7 @@ async function modalAwaitJob(job, jobId) {
       if (!res.ok) throw new Error(await modalErrorMessage(res));
       const job = await res.json().catch(() => null);
       if (job?.status === 'done') return job;
-      if (job?.status === 'error') throw new Error(job.error || '生成に失敗しました');
+      if (job?.status === 'error') throw modalErrors.fromJobError(job.error, '生成に失敗しました');
     }
 
     // タイムアウト判定はポーリング結果を確認した後に行う（タブ休止からの復帰時、
