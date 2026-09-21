@@ -36,10 +36,11 @@ const MODELS = [
   { id: MODAL_KREA2_WAN_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・編集と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'wan', ckpt: true, sampler: true },
   // lanpaint: 画像編集の「LanPaint インペイント」と同居する版。API は統合版と同じ
   { id: MODAL_KREA2_LANPAINT_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal LanPaint 版・インペイントと共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'lanpaint', ckpt: true, sampler: true },
-  // qwen21: Qwen-Image 2.1。Krea 2 系とはモデルが別で、LoRA も蒸留版も無いので
+  // qwen21: Qwen-Image 2.1。Krea 2 系ともノーマルの Qwen-Image ともモデルが別で、
+  // **LoRA はどちらのものも効かない**（loraBase で分けている）。蒸留版が無いので
   // ステップ数は 25 前後が必要（Krea 2 Turbo の 8 とは桁が違う）。そのぶん
   // ガイダンスは 1 に固定されず、negative_prompt を効かせるなら上げられる
-  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 実験版・参照画像編集と共有）', sizeParam: 'image_size', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, sampler: true, cfgMax: 10 },
+  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 実験版・参照画像編集と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', sampler: true, cfgMax: 10, stepsHint: '25（蒸留版が無いので必要）' },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -75,8 +76,20 @@ const LS_JOB = 'fal_active_job';
 const LORA_URL_OPTION = '__url__';
 const POLL_INTERVAL_MS = 900;
 
-// Modal チェックポイント指定版の既定チェックポイント（modal_comfy の UNET_FILE）
-const DEFAULT_CKPT_NAME = 'Krea-2-Turbo-Q8_0.gguf';
+// 系統ごとの既定チェックポイント（modal_comfy の UNET_FILE）。
+//
+// チェックポイントはモデルの系統ごとに別物で、**Krea 2 用を Qwen-Image 2.1 に
+// 渡すと Modal 側の Volume が共通なぶん読み込めてしまう**。テキストエンコーダ
+// だけ噛み合わない絵が出るが、エラーにはならないので気づきにくい。そのため
+// ライブラリも系統で分けて、別系統のものは選べないようにしてある。
+//
+// 既存の登録には base が無い。qwen21 を足すまでは Krea 2 用しか登録できなかった
+// ので、base 無しは krea2 とみなす（移行処理は不要）
+const DEFAULT_CKPTS = {
+  krea2: 'Krea-2-Turbo-Q8_0.gguf',
+  qwen21: 'qwen_image_2.1_Q8_0.gguf',
+};
+const DEFAULT_CKPT_BASE = 'krea2';
 
 /* ---------- helpers ---------- */
 
@@ -368,7 +381,7 @@ function initForm() {
   customOpt.textContent = 'カスタム（px 指定）';
   els.sizeSelect.appendChild(customOpt);
 
-  els.modelSelect.addEventListener('change', updateModelFields);
+  els.modelSelect.addEventListener('change', onModelChange);
   els.sizeSelect.addEventListener('change', updateCustomSize);
   els.customWidth.addEventListener('input', updateMpReadout);
   els.customHeight.addEventListener('input', updateMpReadout);
@@ -383,6 +396,17 @@ function updateModelFields() {
   els.customModelField.hidden = model.id !== '__custom__';
   els.ckptField.hidden = !model.ckpt;
   els.loraField.hidden = !model.lora;
+  // 系統が変わると使えるチェックポイントも変わる。選択が残っていても
+  // populateCkptSelect が一覧に無い値を既定へ落とす
+  if (model.ckpt) populateCkptSelect(els.ckptSelect.value);
+
+  // LoRA の候補はモデルのベースモデルで絞っている。**モデルを変えたら作り直す**。
+  // 呼ばないと前のモデルの絞り込みが残り、「Krea 2 に戻したのに Qwen の LoRA
+  // しか出てこない」状態になる（絞り込みの件数を出すヒント文言も同じ関数で
+  // 更新しているので、そちらも古いまま固まる）。
+  // 候補から外れた LoRA が行に残っている場合は populateLoraSelect が
+  // 「⚠ …（このモデル向けではありません）」として見せるので、黙って消えない
+  refreshLoraSelects();
 
   // Modal 版は fal のキュー API を使わないため比較モード非対応
   const isModal = model.provider === 'modal';
@@ -392,8 +416,15 @@ function updateModelFields() {
   if ((!model.lora || isModal) && compareMode) setCompareMode(false);
 
   // Modal 版のデフォルト値・範囲は API の仕様（INTEGRATION.md）に合わせて案内する
-  els.steps.placeholder = isModal ? '8（変更非推奨）' : 'デフォルト';
-  els.guidance.placeholder = isModal ? '1（0〜1）' : 'デフォルト';
+  // 蒸留版の Krea 2 Turbo は 8 ステップ / cfg 0〜1 だが、Qwen-Image 2.1 は
+  // 蒸留していないので前提が違う。モデル側の指定を優先する
+  els.steps.placeholder = model.stepsHint ?? (isModal ? '8（変更非推奨）' : 'デフォルト');
+  // cfg を 1 より上げると ComfyUI が negative 側も評価するので所要時間がほぼ倍に
+  // なる（1 のときだけ uncond の計算を省く最適化が入る）。上げる価値はあるが、
+  // 「空欄のままと同じ速さ」と誤解されないよう欄に出しておく
+  els.guidance.placeholder = isModal
+    ? ((model.cfgMax ?? 1) > 1 ? `1（0〜${model.cfgMax}。1 より上は約2倍遅い）` : '1（0〜1）')
+    : 'デフォルト';
 
   // サンプラー系は統合版だけが受け付ける
   els.wanSamplerRow.hidden = !model.sampler;
@@ -759,10 +790,10 @@ function ckptDisplayName(path) {
   }
 }
 
-function registerCkpt(path) {
+function registerCkpt(path, base = currentCkptBase()) {
   const library = loadCkptLibrary();
   if (!library.some((item) => item.path === path)) {
-    library.push({ name: ckptDisplayName(path), path });
+    library.push({ name: ckptDisplayName(path), path, base });
     saveCkptLibrary(library);
   }
   populateCkptSelect(els.ckptSelect.value);
@@ -773,9 +804,18 @@ function unregisterCkpt(path) {
   populateCkptSelect(els.ckptSelect.value);
 }
 
+// 選択中のモデルのチェックポイント系統
+function currentCkptBase() {
+  const model = MODELS.find((m) => m.id === els.modelSelect.value) || MODELS[0];
+  return model.ckptBase ?? DEFAULT_CKPT_BASE;
+}
+
+// 選択中のモデルで使えるものだけを返す（別系統のものを送らせない）
 function sortedCkptLibrary() {
-  return [...loadCkptLibrary()].sort((a, b) =>
-    a.name.localeCompare(b.name, 'ja', { numeric: true, sensitivity: 'base' }));
+  const base = currentCkptBase();
+  return loadCkptLibrary()
+    .filter((item) => (item.base ?? DEFAULT_CKPT_BASE) === base)
+    .sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true, sensitivity: 'base' }));
 }
 
 // 「既定」+ 登録済みチェックポイント + 「URL / ファイル名を入力…」でプルダウンを構成
@@ -785,7 +825,8 @@ function populateCkptSelect(selected) {
   select.innerHTML = '';
   const defOpt = document.createElement('option');
   defOpt.value = '';
-  defOpt.textContent = `既定（${DEFAULT_CKPT_NAME}）`;
+  const fallback = DEFAULT_CKPTS[currentCkptBase()] ?? DEFAULT_CKPTS[DEFAULT_CKPT_BASE];
+  defOpt.textContent = `既定（${fallback}）`;
   select.appendChild(defOpt);
   for (const item of sortedCkptLibrary()) {
     const opt = document.createElement('option');
@@ -857,7 +898,9 @@ function initHfDialog() {
     defaultRepo: HF_DEFAULT_REPO,
     defaultCkptRepo: HF_DEFAULT_CKPT_REPO,
     currentBase: () => modelLoraBase() ?? 'krea2',
-    registeredPaths: (kind) => (kind === 'ckpt' ? loadCkptLibrary() : loadLoraLibrary())
+    // 「登録済み」の印は、いま選べるものだけを対象にする。別系統のチェック
+    // ポイントまで登録済みに見えると、押せないのに押せそうな見た目になる
+    registeredPaths: (kind) => (kind === 'ckpt' ? sortedCkptLibrary() : loadLoraLibrary())
       .map((item) => item.path),
     register(kind, url, meta) {
       if (kind === 'ckpt') registerCkpt(url);
@@ -2404,8 +2447,14 @@ function revealGalleryItem(el) {
 function reuseRecord(record) {
   els.prompt.value = record.prompt;
   const known = MODELS.some((m) => m.id === record.model);
+  // 履歴からの再利用でもモデルが変わりうる。**切り替える前に**今のモデルの
+  // 状態を控えておかないと、この記録の内容が前のモデルの分として保存される
+  if (lastModelId && lastModelId !== (known ? record.model : '__custom__')) {
+    perModelStore[lastModelId] = perModelSnapshot();
+  }
   els.modelSelect.value = known ? record.model : '__custom__';
   if (!known) els.customModel.value = record.model;
+  lastModelId = els.modelSelect.value;
   updateModelFields();
 
   // チェックポイント指定版はチェックポイントも復元する（未登録の URL なら登録する）
@@ -2455,54 +2504,67 @@ function serializeLoraList(listEl) {
     .filter((l) => l.path !== '');
 }
 
-function saveFormState() {
-  const state = {
-    model: els.modelSelect.value,
-    customModel: els.customModel.value,
+/* ---------- エンドポイントごとの記憶 ---------- */
+// LoRA・チェックポイント・生成パラメータは「どのモデル向けか」で意味が変わる。
+// Krea 2 Turbo の 8 ステップをそのまま Qwen-Image 2.1 に持ち込むと足りないし、
+// LoRA に至ってはベースモデルが違えば効かない。そこで**モデルごとに覚えて、
+// 選び直したら戻す**。プロンプト・シード・枚数はモデルを跨いで比べたいので
+// 全体で 1 つのまま（モデルを変えても消えない）。
+let perModelStore = {}; // { [モデル id]: perModelSnapshot() }
+let lastModelId = null;
+
+function perModelSnapshot() {
+  return {
     ckptSelect: els.ckptSelect.value,
     ckptPath: els.ckptPath.value,
-    prompt: els.prompt.value,
     size: els.sizeSelect.value,
     customWidth: els.customWidth.value,
     customHeight: els.customHeight.value,
-    numImages: els.numImages.value,
-    seed: els.seed.value,
-    seedLock: els.seedLock.checked,
+    steps: els.steps.value,
+    guidance: els.guidance.value,
     samplerName: els.samplerName.value,
     scheduler: els.scheduler.value,
     denoise: els.denoise.value,
-    steps: els.steps.value,
-    guidance: els.guidance.value,
     compare: compareMode,
     common: serializeLoraList(els.loraList),
     variants: [...els.variantList.querySelectorAll('.variant')]
       .map((b) => serializeLoraList(b.querySelector('.variant-lora-list'))),
   };
-  falStore.set(LS_FORM, JSON.stringify(state));
 }
 
-function restoreFormState() {
-  let s;
-  try { s = JSON.parse(falStore.get(LS_FORM)); } catch { s = null; }
-  if (!s) return;
+// まだ一度も使っていないモデルの初期値。**LoRA と生成パラメータは引き継がない**
+// （前のモデル向けの値が黙って効いてしまう。ステップ数などは桁が違う）。
+// サイズだけは今の指定を残す（作りたい絵の形はモデルを変えても同じことが多い）
+function perModelBlank() {
+  return {
+    ckptSelect: '',
+    ckptPath: '',
+    size: els.sizeSelect.value,
+    customWidth: els.customWidth.value,
+    customHeight: els.customHeight.value,
+    steps: '',
+    guidance: '',
+    samplerName: '',
+    scheduler: '',
+    denoise: '',
+    compare: false,
+    common: [],
+    variants: [],
+  };
+}
 
-  if (s.model) els.modelSelect.value = s.model;
-  els.customModel.value = s.customModel || '';
+// 呼ぶ前に updateModelFields() を済ませておくこと（欄の出し入れと
+// LoRA の絞り込みが先に決まっていないと、比較モードの可否を判定できない）
+function perModelApply(s) {
   populateCkptSelect(s.ckptSelect || '');
   els.ckptPath.value = s.ckptPath || '';
   syncCkptRow();
-  els.prompt.value = s.prompt || '';
-  updateModelFields();
-
   // 旧バージョンで保存された存在しないサイズ値（fal の列挙名など）は無視する
   if (s.size && [...els.sizeSelect.options].some((o) => o.value === s.size)) {
     els.sizeSelect.value = s.size;
   }
   if (s.customWidth) els.customWidth.value = s.customWidth;
   if (s.customHeight) els.customHeight.value = s.customHeight;
-  els.numImages.value = s.numImages || '1';
-  els.seed.value = s.seed || '';
-  els.seedLock.checked = !!s.seedLock;
   els.steps.value = s.steps || '';
   els.guidance.value = s.guidance || '';
   els.samplerName.value = s.samplerName || '';
@@ -2518,7 +2580,58 @@ function restoreFormState() {
     setCompareMode(true);
     els.variantList.innerHTML = '';
     for (const v of s.variants || []) addVariant(v, false);
+  } else {
+    setCompareMode(false);
   }
+}
+
+// モデルを変えたとき。**前のモデルの状態を控えてから**新しいモデルの分を出す
+function onModelChange() {
+  const next = els.modelSelect.value;
+  if (lastModelId && lastModelId !== next) {
+    perModelStore[lastModelId] = perModelSnapshot();
+  }
+  lastModelId = next;
+  updateModelFields();
+  perModelApply(perModelStore[next] ?? perModelBlank());
+  saveFormState();
+}
+
+function saveFormState() {
+  const per = perModelSnapshot();
+  perModelStore[els.modelSelect.value] = per;
+  const state = {
+    model: els.modelSelect.value,
+    customModel: els.customModel.value,
+    prompt: els.prompt.value,
+    numImages: els.numImages.value,
+    seed: els.seed.value,
+    seedLock: els.seedLock.checked,
+    byModel: perModelStore,
+    // 旧バージョンが読めるように、今のモデルの分はフラットにも置いておく
+    ...per,
+  };
+  falStore.set(LS_FORM, JSON.stringify(state));
+}
+
+function restoreFormState() {
+  let s;
+  try { s = JSON.parse(falStore.get(LS_FORM)); } catch { s = null; }
+  if (!s) return;
+
+  perModelStore = s.byModel && typeof s.byModel === 'object' ? s.byModel : {};
+
+  if (s.model) els.modelSelect.value = s.model;
+  els.customModel.value = s.customModel || '';
+  els.prompt.value = s.prompt || '';
+  els.numImages.value = s.numImages || '1';
+  els.seed.value = s.seed || '';
+  els.seedLock.checked = !!s.seedLock;
+  updateModelFields();
+
+  // byModel を持たない旧形式は、フラットな値を「そのときのモデルの分」として読む
+  lastModelId = els.modelSelect.value;
+  perModelApply(perModelStore[lastModelId] ?? s);
 }
 
 let saveFormTimer = null;
@@ -2560,6 +2673,9 @@ initStatsDialog();
 initCkptField();
 initForm();
 restoreFormState();
+// 保存が無い初回でも「今のモデル」を控えておく。null のままだと最初の
+// 切り替えで前のモデルの状態を取りこぼす
+if (lastModelId === null) lastModelId = els.modelSelect.value;
 
 // 履歴: まずローカルキャッシュで即描画し、サーバーの内容で置き換える
 try {

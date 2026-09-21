@@ -47,9 +47,17 @@ const DIALOG_HTML = `
   </form>
 </dialog>`;
 
-// ベースモデルの選択肢。値は loraLib が保存する表記そのもの
-// （読むときは loraLib.baseKind() で種類に寄せられる）
-const BASE_KINDS = ['krea2', 'qwen', 'wan'];
+// ベースモデルの選択肢。一覧は loraLib が持つ（こちらで持たない。
+// 二重管理して Qwen-Image 2.1 が漏れたのが元の不具合）。
+//
+// 選択中の種類が一覧に無くても候補に出す。補わないと <select> は一致する
+// option が無い値を代入されたときに空へ落ち、**「指定しない」が選ばれた状態**に
+// なる。そのまま登録するとベースモデル無しで入り、どのモデルの候補にも
+// 出てこない LoRA になる（気づきにくい）
+function baseKinds(selectedKind) {
+  const known = loraLib.baseKinds();
+  return selectedKind && !known.includes(selectedKind) ? [...known, selectedKind] : known;
+}
 
 let opts = {
   defaultRepo: '',
@@ -170,7 +178,7 @@ function applyFilter() {
 
 function renderBaseOptions(selectedKind) {
   els.baseSelect.innerHTML = '';
-  for (const kind of BASE_KINDS) {
+  for (const kind of baseKinds(selectedKind)) {
     const opt = document.createElement('option');
     // 保存されるのは表示名。読むときに loraLib.baseKind() で種類へ寄せる
     opt.value = loraLib.baseLabel(kind);
@@ -235,6 +243,8 @@ function initDialog() {
 /* ---------- 公開 API ---------- */
 
 window.hfImport = {
+  // テスト用。選択中の種類が候補に必ず含まれることを DOM 無しで確かめられる
+  baseKinds,
   init(options) {
     opts = { ...opts, ...options };
     document.body.insertAdjacentHTML('beforeend', DIALOG_HTML);

@@ -513,8 +513,21 @@ input, select, textarea {
   border-radius: var(--radius-control);
   padding: 8px 10px;
   width: 100%;
+  /* width: 100% だけでは縮まない。min-width の初期値 auto は「中身の幅」を
+     下限にするので、中身が画面より広いと箱ごと広がる。
+     **iOS Safari は <select> の中身を「いちばん長い選択肢」で測る**ため、
+     長いチェックポイント名（例「既定（qwen_image_2.1_Q8_0.gguf）」）が入ると
+     行が画面幅を超え、ページ全体が横にパンできてしまう。
+     .lora-head .lora-select には個別に入れてあったが、チェックポイント欄の
+     select は .lora-row の直下なのでそのルールが当たっていなかった。
+     ここで全体に効かせる（Chromium は select を勝手に切り詰めるので再現しない） */
+  min-width: 0;
+  max-width: 100%;
   transition: border-color var(--dur-quick) ease, box-shadow var(--dur-quick) ease;
 }
+
+/* 縮めた select の文字は「…」で切る（ぶつ切りだと壊れて見える） */
+select { text-overflow: ellipsis; }
 
 input:focus, select:focus, textarea:focus {
   outline: none;
@@ -2658,6 +2671,31 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 .lib-sort select { padding: 5px 8px; font-size: 13px; width: auto; }
 .lib-tools .spacer { flex: 1; }
 
+/* 一括操作バー。選択があるときだけ出る */
+.lib-bulk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel, transparent);
+}
+.lib-bulk .spacer { flex: 1; }
+.lib-bulk-count { font-size: 13px; font-weight: 600; white-space: nowrap; }
+.lib-bulk select { padding: 5px 8px; font-size: 13px; width: auto; }
+
+/* 一括選択のチェックボックス。見出し行の展開操作と取り合わないよう、
+   クリックは checkbox 側で止める */
+.lib-check {
+  flex-shrink: 0;
+  margin: 3px 0 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent, currentColor);
+}
+
 .lib-list {
   display: flex;
   flex-direction: column;
@@ -2735,6 +2773,13 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
   color: var(--accent);
   border-radius: 6px;
   padding: 1px 8px;
+  /* トリガーワードは 1 語が長いことがある（自分で学習した LoRA にありがち。
+     例 "Joshua_a_young_man_with_curly_brown_hair_photorealistic"）。
+     親の flex-wrap はチップ**同士**しか折り返さないので、1 つのチップが
+     画面より長いとそのまま行を押し広げ、ページが横にパンできてしまう。
+     語の途中でも折れるようにして、幅も器で止める */
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .lib-sub {
