@@ -2773,6 +2773,13 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
   color: var(--accent);
   border-radius: 6px;
   padding: 1px 8px;
+  /* トリガーワードは 1 語が長いことがある（自分で学習した LoRA にありがち。
+     例 "Joshua_a_young_man_with_curly_brown_hair_photorealistic"）。
+     親の flex-wrap はチップ**同士**しか折り返さないので、1 つのチップが
+     画面より長いとそのまま行を押し広げ、ページが横にパンできてしまう。
+     語の途中でも折れるようにして、幅も器で止める */
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .lib-sub {
