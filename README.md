@@ -371,6 +371,7 @@ node test/import.test.mjs        # Civitai 取り込みパイプライン
 node test/modal.test.mjs         # Modal（modal_comfy）ジョブ・ポーリング・エンドポイント振り分け
 node test/history.test.mjs       # 履歴 API（一覧の軽量化と 1 件取得）
 node test/lora-library.test.mjs  # LoRA ライブラリ（Modal へ渡す識別子など）
+node test/hf-import.test.mjs     # HF 一括登録（ベースモデルの候補づくり）
 node test/store.test.mjs         # localStorage のラッパー（容量あふれの扱い）と古い HTML の検出
 node test/gallery-pager.test.mjs # ギャラリーの分割描画
 node test/history-feed.test.mjs # 履歴の取得（ページ送り・絞り込み）
