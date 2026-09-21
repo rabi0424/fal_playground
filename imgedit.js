@@ -2860,7 +2860,8 @@ async function modalEditSubmit(input, endpoint) {
     // endpoint は URL そのものではなく Worker 側の許可リストのキー
     body: JSON.stringify({ ...input, endpoint, jobId }),
   });
-  if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
+  // 英語の本文をそのまま出さず、modal-errors.js で日本語にする
+  if (!res.ok) throw await modalErrors.fromResponse(res, '編集の受付に失敗しました');
   return { jobId };
 }
 
@@ -2869,9 +2870,9 @@ async function modalEditPoll(handle, note) {
   // 一時的な通信断は、次のポーリングで拾い直す
   if (!res) return { done: false, text: '編集中…' };
   if (res.status === 404) throw new Error('ジョブが見つかりませんでした（保持期間切れの可能性があります）');
-  if (!res.ok) throw new Error((await res.text()).slice(0, 300) || `HTTP ${res.status}`);
+  if (!res.ok) throw await modalErrors.fromResponse(res, '編集の状態を確認できませんでした');
   const job = await res.json();
-  if (job.status === 'error') throw new Error(job.error || '編集に失敗しました');
+  if (job.status === 'error') throw modalErrors.fromJobError(job.error, '編集に失敗しました');
   if (job.status !== 'done') return { done: false, text: '編集中…', note };
   return { done: true, result: job };
 }
@@ -3163,7 +3164,7 @@ const PROVIDERS = {
     // 名前だけで足せる（ベースモデルの表記に左右されない）
     loraByName: true,
     // 蒸留 LoRA 2 本と合わせて、API のサニティ上限（10 本）に収まる数
-    maxLoras: 8,
+    maxLoras: 16, // modal_comfy 側の MAX_LORAS と揃える
     fixedLoraNote: '標準の蒸留 2 本に追加',
     // 全画面を作り直すので、返る絵が数 px ずれることがある
     alignOutput: true,
@@ -3247,7 +3248,7 @@ const PROVIDERS = {
     // この API の LoRA も名前 / HF の resolve URL で指定するので、ライブラリに
     // 無いものも名前だけで足せる
     loraByName: true,
-    maxLoras: 8,
+    maxLoras: 16, // modal_comfy 側の MAX_LORAS と揃える
     nativeMask: true,
     requiresMask: true,
     // LanPaint は二値マスクを前提にしている（公式 README: "requires binary
@@ -3331,7 +3332,7 @@ const PROVIDERS = {
     // この API の LoRA も名前 / HF の resolve URL で指定するので、ライブラリに
     // 無いものも名前だけで足せる（Modal 側が Volume と既定リポジトリから引く）
     loraByName: true,
-    maxLoras: 8,
+    maxLoras: 16, // modal_comfy 側の MAX_LORAS と揃える
     // 画像全体を作り直すモデルなので、返ってくる絵が数 px ずれることがある
     alignOutput: true,
     pollMs: 2000,
@@ -3344,8 +3345,9 @@ const PROVIDERS = {
     buildInput(dataUri, size) {
       const input = {
         prompt: els.prompt.value.trim(),
-        // 参照画像の配列。API は 4 枚まで受けるが、この画面の入力欄は 1 枚なので
-        // 編集対象（= <image1>）だけを渡す
+        // 参照画像の配列。**API は 16 枚まで受ける**（ノードの Autogrow 入力
+        // image_1..image_16 の限界）が、この画面の入力欄は 1 枚なので
+        // 編集対象（= <image1>）だけを渡す。複数枚を使うには入力欄の追加が要る
         images: [dataUri],
         // **0 は「リサイズしない」の意味**（32 の倍数へ丸めるだけ）。
         // 既定の 1024 は「総ピクセル予算」で、1024×1536 を渡すと 832×1248 に

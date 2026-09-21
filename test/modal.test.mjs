@@ -404,9 +404,15 @@ test('ルーティング: endpoint フィールドで URL を選び、未知の�
   await post('/api/krea2/generate', { ...base, jobId: '2'.repeat(32), endpoint: 'constructor' });
   assert.match(seen.at(-1)[2], /krea2-comfy-api-exp/);
 
-  // Qwen-Image 2.1（別モデル・別コンテナ）
+  // 統合版（krea2_qwen_app）。Krea 2 の生成は krea2_generate なので
+  // URL は -comfyapi-krea2-generate になる
+  await post('/api/krea2/generate', { ...base, jobId: '4'.repeat(32), endpoint: 'unified' });
+  assert.match(seen.at(-1)[2], /krea2-qwen21-api-comfyapi-krea2-generate/);
+  assert.deepEqual(seen.at(-1).slice(3), ['generate', 'unified']);
+
+  // Qwen-Image 2.1（Krea 2 とは別モデル。統合版の同じコンテナに載っている）
   await post('/api/krea2/generate', { ...base, jobId: '3'.repeat(32), endpoint: 'qwen21' });
-  assert.match(seen.at(-1)[2], /qwen21-api-comfyapi-generate/);
+  assert.match(seen.at(-1)[2], /krea2-qwen21-api-comfyapi-qwen-generate/);
   assert.deepEqual(seen.at(-1).slice(3), ['generate', 'qwen21']);
 });
 
@@ -428,13 +434,16 @@ test('参照画像編集: qwen21 は images 配列で振り分け、image/mask �
 
   // マスク無しで通る（マスク編集の 2 つとは必須フィールドが違う）
   assert.equal((await post({ ...base, images: ['AAA'] })).status, 200);
-  assert.match(seen.at(-1)[2], /qwen21-api-comfyapi-edit/);
+  assert.match(seen.at(-1)[2], /krea2-qwen21-api-comfyapi-qwen-edit/);
   assert.deepEqual(seen.at(-1).slice(3), ['edit', 'qwen21-edit']);
   assert.deepEqual(seen.at(-1)[1].images, ['AAA']);
   assert.equal(seen.at(-1)[1].endpoint, undefined);
   assert.equal(seen.at(-1)[1].jobId, undefined);
 
-  assert.equal((await post({ ...base, jobId: '8'.repeat(32), images: ['A', 'B', 'C', 'D'] })).status, 200);
+  // 上限ちょうど（16 枚 = TextEncodeQwenImage21 の Autogrow 入力の限界）まで通る
+  const sixteen = Array.from({ length: 16 }, (_, i) => `IMG${i}`);
+  assert.equal((await post({ ...base, jobId: '8'.repeat(32), images: sixteen })).status, 200);
+  assert.deepEqual(seen.at(-1)[1].images, sixteen);
 
   // images の形が違えば弾く（DO に大きな本文を積む前に落とす）
   const bad = [
@@ -443,7 +452,7 @@ test('参照画像編集: qwen21 は images 配列で振り分け、image/mask �
     { images: 'AAA' },                    // 配列でない
     { images: ['A', ''] },                // 空文字が混ざる
     { images: ['A', 1] },                 // 文字列でない
-    { images: ['A', 'B', 'C', 'D', 'E'] }, // 上限 4 枚を超える
+    { images: Array.from({ length: 17 }, (_, i) => `IMG${i}`) }, // 上限 16 枚を超える
   ];
   for (const extra of bad) {
     const res = await post({ ...base, jobId: '9'.repeat(32), ...extra });
