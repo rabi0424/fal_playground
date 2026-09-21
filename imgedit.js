@@ -86,6 +86,17 @@ const SIZE_PRESETS = {
 // 旧バージョンは Qwen の解像度しか無かったので qwen_* で保存されている
 const migrateSizeValue = (value) => String(value ?? '').replace(/^qwen_/, 'ar_');
 
+// アップスケール生成。元画像（切り抜いて送るならその範囲）の各辺を n 倍して送る。
+// 比は変わらないので帯も引き伸ばしも起きず、モデルが同じ絵をより多い画素で
+// 描き直す。上限はプロバイダごと（maxSendPx）で、そこで頭打ちになる
+const UPSCALE_STEPS = [
+  { value: 'up_1_5', scale: 1.5 },
+  { value: 'up_2', scale: 2 },
+  { value: 'up_3', scale: 3 },
+  { value: 'up_4', scale: 4 },
+];
+const upscaleScale = (value) => UPSCALE_STEPS.find((u) => u.value === value)?.scale ?? null;
+
 // Runware の width / height の上限（64 の倍数・128〜2048）
 const RUNWARE_MAX_PX = 2048;
 
@@ -209,6 +220,7 @@ const els = {
   hfOpenBtn: $('#hfOpenBtn'),
   sizeSelect: $('#sizeSelect'),
   sizeHint: $('#sizeHint'),
+  fitSelect: $('#fitSelect'),
   numImages: $('#numImages'),
   steps: $('#steps'),
   q21Steps: $('#q21Steps'),
@@ -832,7 +844,11 @@ function nearestPresetSize(width, height, presets = sizePresets()) {
       < Math.abs(Math.log(best.width / best.height) - target) ? size : best));
 }
 
+// そのプロバイダへ送れる長辺の上限。アップスケールはここで頭打ちになる
+const maxSendPx = () => provider().maxSendPx ?? MAX_INPUT_PX;
+
 // 選択中の設定での送信サイズ。'none' はリサイズしない（長辺の上限のみ）。
+// 'up_*' は元画像の各辺を n 倍（プロバイダの上限まで）。
 // プロバイダ側に刻みの制約があれば最後に丸める（Runware は 64 の倍数）
 function sendSize(width = source?.width, height = source?.height) {
   if (!width || !height) return null;
@@ -845,8 +861,12 @@ function sendSize(width = source?.width, height = source?.height) {
   }
   const presets = sizePresets();
   const choice = els.sizeSelect.value;
-  const size = choice === 'none' ? fitWithin({ width, height }, MAX_INPUT_PX)
-    : presets.find((s) => s.value === choice) ?? nearestPresetSize(width, height, presets);
+  const scale = upscaleScale(choice);
+  // fitWithin は縮めるだけなので、先に n 倍してから上限へ収める（比は保たれる）
+  const size = scale
+    ? fitWithin({ width: width * scale, height: height * scale }, maxSendPx())
+    : choice === 'none' ? fitWithin({ width, height }, MAX_INPUT_PX)
+      : presets.find((s) => s.value === choice) ?? nearestPresetSize(width, height, presets);
   const snap = provider().snapSize;
   return snap ? snap(size) : { width: size.width, height: size.height };
 }
@@ -859,6 +879,10 @@ function renderSizeOptions() {
     { value: 'auto', label: '自動（近いアスペクト比に合わせる）' },
     ...sizePresets(),
     { value: 'none', label: `リサイズしない（長辺 ${MAX_INPUT_PX}px まで）` },
+    ...UPSCALE_STEPS.map((u) => ({
+      value: u.value,
+      label: `アップスケール ×${u.scale}（元の各辺を ${u.scale} 倍）`,
+    })),
   ];
   els.sizeSelect.innerHTML = '';
   for (const size of options) {
@@ -875,6 +899,95 @@ function renderSizeOptions() {
 function aspectStretch(size, from = source) {
   if (!from || !size) return 1;
   return (size.width / size.height) / (from.width / from.height);
+}
+
+/* ---------- 縦横比が合わないときの送り方（帯 / 引き伸ばし） ---------- */
+//
+// 送信サイズはモデルが得意な解像度なので、元画像の縦横比とは限らない。
+// これまでは送信サイズいっぱいに描き直していたので、比が違えば歪んだ絵を
+// モデルに見せていた（マスクを使えば合成で元の比へ戻るが、モデルが見るのは
+// 歪んだ絵のままなので、伸びた顔や潰れた円をそのまま描き直してしまう）。
+//
+// 既定では、代わりに中身を歪ませずに収めて、余った辺を帯で埋めて送る。
+// 返ってきた画像からは帯を切り取るので、出来上がりは元の縦横比のままになる
+//（マスクを使うときは合成が同じことをするので、切り取りはそちらに任せる）。
+// 「引き伸ばして送る」を選べばこれまで通り。帯のぶん中身の画素は減るので、
+// 送信サイズいっぱいを使いたいときはそちら
+
+// これ未満の食い違いは帯にしない（丸めで数 px ずれただけのときに、
+// 意味のない切り取りを 1 段増やさないため）
+const FIT_MIN_STRETCH = 0.005;
+
+// from の比を保ったまま size の中へ収めた枠。収まりきって帯が要らなければ null。
+// 設定を見ない純粋な計算にしてある（テストから切り出して確かめられるように）
+function letterbox(size, from) {
+  if (!size || !from || !(from.width > 0) || !(from.height > 0)) return null;
+  const stretch = (size.width / size.height) / (from.width / from.height);
+  if (Math.abs(1 - stretch) < FIT_MIN_STRETCH) return null;
+  const k = Math.min(size.width / from.width, size.height / from.height);
+  const width = Math.min(size.width, Math.max(1, Math.round(from.width * k)));
+  const height = Math.min(size.height, Math.max(1, Math.round(from.height * k)));
+  if (width >= size.width && height >= size.height) return null;
+  return {
+    outer: { width: size.width, height: size.height },
+    // 中央に置く。どちらかの辺だけが余るので、帯は左右か上下のどちらかに付く
+    inner: {
+      x: Math.round((size.width - width) / 2),
+      y: Math.round((size.height - height) / 2),
+      width,
+      height,
+    },
+  };
+}
+
+// 帯を付けて送る設定か
+const padSend = () => els.fitSelect.value !== 'stretch';
+
+// 実際に使う帯の枠。引き伸ばす設定なら null（これまで通り歪ませて送る）
+function fitFrame(size, from) {
+  return padSend() ? letterbox(size, from) : null;
+}
+
+// 何をどの枠で送るかを 1 か所で決める。実行（run）と送信サイズの説明
+//（renderSizeHint）の両方がこれを使う。別々に組み立てていると、説明と
+// 実際に送るものが黙ってずれる
+function sendPlan() {
+  const size = sendSize();
+  if (!source || !size) return null;
+  const api = provider();
+  // 描いている途中のひと塗りも数える（説明が塗りながら追いつくように）。
+  // 実行するときには塗り終わっているので、run から見れば mask.strokes と同じ
+  const useMask = maskOn() && activeStrokes().length > 0;
+  const grow = api.maskGrow ? api.maskGrow() : 0;
+  // 塗った範囲のまわりだけを切り抜いて送る（要らない周りを捨てる）
+  const region = useMask ? cropRegion(size) : null;
+  // 送るものの実寸。切り抜くならその範囲、でなければ元画像ぜんぶ
+  const from = region
+    ? {
+      width: Math.max(1, Math.round(region.width * source.width)),
+      height: Math.max(1, Math.round(region.height * source.height)),
+    }
+    : { width: source.width, height: source.height };
+  // 比が違うぶんは帯で埋める（既定）
+  const fit = fitFrame(size, from);
+  // マスクが縁に近い辺は、さらに広げてから送る（返ってきたら切り出す）。
+  // 切り抜いたなら周りは元画像で埋まっているので、広げる必要はない
+  const padded = useMask && api.nativeMask && api.padEdges && !region
+    ? padFrame(size, mask, grow, api.padEdges(), fit ? fit.inner : null) : null;
+  const frame = padded ?? fit;
+  return {
+    size,
+    api,
+    useMask,
+    grow,
+    region,
+    from,
+    fit,
+    padded,
+    frame,
+    outer: frame ? frame.outer : size,
+    inner: frame ? frame.inner : { x: 0, y: 0, width: size.width, height: size.height },
+  };
 }
 
 // 既に R2 にある画像か（同一オリジンの /api/image/... なら保存済み）。
@@ -959,40 +1072,55 @@ function renderSource() {
   renderSizeHint();
 }
 
-// 何をどのサイズで送るかを明示する。引き伸ばして送る場合はそれも出す
+// 何をどのサイズで送るかを明示する。帯を付ける・引き伸ばす場合はそれも出す
 function renderSizeHint() {
-  const size = sendSize();
-  if (!size) {
+  const plan = sendPlan();
+  if (!plan) {
     els.sizeHint.hidden = true;
     return;
   }
-  // 切り抜いて送るときに送るのは、元画像ぜんぶではなく切り抜いた範囲
-  const region = cropRegion(size);
-  const from = region
-    ? {
-      width: Math.round(region.width * source.width),
-      height: Math.round(region.height * source.height),
-    }
-    : { width: source.width, height: source.height };
+  const {
+    size, region, from, fit, inner, outer,
+  } = plan;
   const stretch = aspectStretch(size, from);
   const off = Math.abs(1 - stretch) * 100;
+  // 帯を付けるなら中身は歪まない。どちらに帯が付いて、中身が何 px になるかを出す。
   // 引き伸ばして送った場合、元の比率に戻るのはマスク合成のときだけ
   //（マスク無しはモデルの出力がそのまま結果になる）
-  const stretched = `${stretch > 1 ? '横' : '縦'}に ${off.toFixed(0)}% 引き伸ばして送り、`
-    + (maskOn() ? '合成で元の比率へ戻します' : '結果もその比率になります');
+  const how = fit
+    ? `${inner.width < outer.width ? '左右' : '上下'}に帯を付けて`
+      + ` ${inner.width}×${inner.height} で送り、結果から切り取ります`
+    : `${stretch > 1 ? '横' : '縦'}に ${off.toFixed(0)}% 引き伸ばして送り、`
+      + (maskOn() ? '合成で元の比率へ戻します' : '結果は元の比率へ戻します');
   els.sizeHint.hidden = false;
   els.sizeHint.textContent = `${region ? '切り抜き ' : ''}${from.width}×${from.height}`
     + ` → ${size.width}×${size.height} で送信`
-    + (off < 0.5 ? '（比率そのまま）' : `（${stretched}）`)
-    + padHintText(size);
-  els.sizeHint.classList.toggle('warn', off > 12);
+    + (off < 0.5 ? '（比率そのまま）' : `（${how}）`)
+    + upscaleHintText(plan)
+    + padHintText(plan);
+  // 帯を付けるなら歪まないので、大きく違っても警告にはしない
+  els.sizeHint.classList.toggle('warn', !fit && off > 12);
+}
+
+// アップスケール生成のときは、実際に何倍で送るかを添える。切り抜いて送る場合や
+// 上限で頭打ちになった場合は、選んだ倍率とは違う値になる
+function upscaleHintText(plan) {
+  const want = upscaleScale(els.sizeSelect.value);
+  if (!want || !(plan.from.width > 0)) return '';
+  const got = plan.size.width / plan.from.width;
+  const max = maxSendPx();
+  const capped = Math.max(plan.size.width, plan.size.height) >= max - 1;
+  return ` ・ アップスケール ×${want}`
+    + (Math.abs(got - want) < 0.05 ? '' : ` → 実際は ×${got.toFixed(1)}`)
+    + (capped ? `（長辺 ${max}px の上限）` : '')
+    // 合成は元解像度で行う（周りは描き直していないので、そこまで引き伸ばすと
+    // 描き直していない画素を水増しすることになる）。上げたぶんは合成で落ちる
+    + (plan.useMask ? ' ・ マスクを使うので、合成は元解像度に戻ります' : '');
 }
 
 // 縁の余白が付く場合、どの辺にどれだけ足すかを送信サイズの説明に添える
-function padHintText(size) {
-  const api = provider();
-  if (!api.padEdges || !api.nativeMask || !maskOn() || mask.strokes.length === 0) return '';
-  const frame = padFrame(size, mask, api.maskGrow ? api.maskGrow() : 0, api.padEdges());
+function padHintText(plan) {
+  const frame = plan.padded;
   if (!frame) return '';
   const sides = [['上', frame.pad.top], ['下', frame.pad.bottom],
     ['左', frame.pad.left], ['右', frame.pad.right]]
@@ -1284,14 +1412,23 @@ function maskDataUri(outer, inner, maskData = mask, grow = 0) {
   return canvas.toDataURL('image/png');
 }
 
-// 送信用の画像。余白は単色で塗り、元画像は inner の位置に置く
-function framedDataUri(img, outer, inner) {
+// 送信用の画像。余白（縁の余白・縦横比を合わせる帯）は単色で塗り、
+// 元画像は inner の位置に置く。region があれば、元画像ぜんぶではなく
+// その範囲（0..1）を切り抜いて置く
+function framedDataUri(img, outer, inner, region = null) {
   const canvas = makeCanvas(outer.width, outer.height);
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = borderColor(img);
+  ctx.fillStyle = borderColor(img, region);
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(img, inner.x, inner.y, inner.width, inner.height);
+  if (region) {
+    const w = img.naturalWidth || img.width;
+    const h = img.naturalHeight || img.height;
+    ctx.drawImage(img, region.x * w, region.y * h, region.width * w, region.height * h,
+      inner.x, inner.y, inner.width, inner.height);
+  } else {
+    ctx.drawImage(img, inner.x, inner.y, inner.width, inner.height);
+  }
   return canvas.toDataURL('image/jpeg', INPUT_QUALITY);
 }
 
@@ -1338,16 +1475,29 @@ function maskEdgeGaps(size, maskData, growPx) {
 }
 
 // 送信する枠。マスクが amount px より縁に近い辺へ余白を足す。
-// 足す必要が無ければ null（これまで通り素の送信サイズで送る）
-function padFrame(size, maskData, growPx, amount) {
+// 足す必要が無ければ null（これまで通り素の送信サイズで送る）。
+//
+// base は「size の中で元画像が入っている範囲」。帯を付けて送るときに渡す。
+// 帯はそれ自体がここで足したい余白と同じ働きをするので、マスクからの距離は
+// 帯の内側（= 元画像の枠）で測り、既にある帯のぶんは足す量から差し引く
+function padFrame(size, maskData, growPx, amount, base = null) {
   if (!(amount > 0)) return null;
-  const gap = maskEdgeGaps(size, maskData, growPx);
+  const inner0 = base ?? { x: 0, y: 0, width: size.width, height: size.height };
+  const gap = maskEdgeGaps(inner0, maskData, growPx);
   if (!gap) return null;
+  // 既にある帯の幅（帯が無ければ全て 0 で、これまでと同じ計算になる）
+  const band = {
+    left: inner0.x,
+    top: inner0.y,
+    right: size.width - inner0.x - inner0.width,
+    bottom: size.height - inner0.y - inner0.height,
+  };
+  const need = (g, span, have) => (g * span + have < amount ? Math.max(0, amount - have) : 0);
   const pad = {
-    left: gap.left * size.width < amount ? amount : 0,
-    right: gap.right * size.width < amount ? amount : 0,
-    top: gap.top * size.height < amount ? amount : 0,
-    bottom: gap.bottom * size.height < amount ? amount : 0,
+    left: need(gap.left, inner0.width, band.left),
+    right: need(gap.right, inner0.width, band.right),
+    top: need(gap.top, inner0.height, band.top),
+    bottom: need(gap.bottom, inner0.height, band.bottom),
   };
   if (!(pad.left || pad.right || pad.top || pad.bottom)) return null;
 
@@ -1360,11 +1510,11 @@ function padFrame(size, maskData, growPx, amount) {
   const outer = { width: snap(wantW * k), height: snap(wantH * k) };
 
   // 元画像が入る範囲。丸めた差は余白側で吸収し、中身は引き伸ばさない
-  const width = Math.min(outer.width, Math.max(64, Math.round(size.width * k)));
-  const height = Math.min(outer.height, Math.max(64, Math.round(size.height * k)));
+  const width = Math.min(outer.width, Math.max(64, Math.round(inner0.width * k)));
+  const height = Math.min(outer.height, Math.max(64, Math.round(inner0.height * k)));
   const inner = {
-    x: Math.min(Math.round(pad.left * k), outer.width - width),
-    y: Math.min(Math.round(pad.top * k), outer.height - height),
+    x: Math.min(Math.round((pad.left + inner0.x) * k), outer.width - width),
+    y: Math.min(Math.round((pad.top + inner0.y) * k), outer.height - height),
     width,
     height,
   };
@@ -1373,12 +1523,19 @@ function padFrame(size, maskData, growPx, amount) {
 
 // 余白を塗る単色。画像の外周の平均色にしておくと、モデルから見て不自然に
 // なりにくい（余白はマスクの外なので描き直されない）
-function borderColor(img) {
+function borderColor(img, region = null) {
   const s = 32;
   const c = makeCanvas(s, s);
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(img, 0, 0, s, s);
+  if (region) {
+    // 切り抜いて送るときは、帯が接するのは切り抜いた範囲の縁なので、そこから取る
+    const w = img.naturalWidth || img.width;
+    const h = img.naturalHeight || img.height;
+    ctx.drawImage(img, region.x * w, region.y * h, region.width * w, region.height * h, 0, 0, s, s);
+  } else {
+    ctx.drawImage(img, 0, 0, s, s);
+  }
   const d = ctx.getImageData(0, 0, s, s).data;
   let r = 0; let g = 0; let b = 0; let n = 0;
   for (let y = 0; y < s; y++) {
@@ -1594,18 +1751,6 @@ function remapMask(maskData, region, src) {
   };
 }
 
-// 送信用の画像。切り抜いた範囲を送信サイズいっぱいに描く
-function croppedDataUri(img, region, size) {
-  const w = img.naturalWidth || img.width;
-  const h = img.naturalHeight || img.height;
-  const canvas = makeCanvas(size.width, size.height);
-  const ctx = canvas.getContext('2d');
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(img, region.x * w, region.y * h, region.width * w, region.height * h,
-    0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL('image/jpeg', INPUT_QUALITY);
-}
-
 /* ---------- 切り抜き枠の表示と操作 ---------- */
 
 // 枠は線だけ描く（塗った範囲の見せ方を邪魔しない）。四隅にはつまみを置いて、
@@ -1722,14 +1867,15 @@ function maskOutsideCrop() {
 function cropHintText() {
   if (!source) return '入力画像を読み込むと、切り抜く範囲がここに出ます。';
   if (!cropActive()) return '塗ると、その範囲のまわりだけを切り抜いて送ります。';
-  const size = sendSize();
-  const region = cropRegion(size);
+  const plan = sendPlan();
+  const region = plan?.region;
   if (!region) return 'いまは画像ぜんぶが枠に入るので、切り抜かずに送ります。';
   const w = Math.round(region.width * source.width);
   const h = Math.round(region.height * source.height);
-  const zoom = size.width / w;
+  // 帯を付けて送るときに切り抜きが載るのは帯の内側なので、倍率もそちらで測る
+  const zoom = plan.inner.width / w;
   const how = cropManual ? '手で決めた枠' : '塗った範囲から自動';
-  return `切り抜き ${w}×${h}（${how}）を ${size.width}×${size.height} で送ります`
+  return `切り抜き ${w}×${h}（${how}）を ${plan.size.width}×${plan.size.height} で送ります`
     + `（${zoom.toFixed(1)} 倍）。四隅をドラッグすると枠を変えられます。`
     + (maskOutsideCrop() ? ' マスクが枠からはみ出しています（はみ出したぶんは描き直されません）。' : '');
 }
@@ -2686,6 +2832,7 @@ async function saveHistoryRecord(record) {
 //
 // sizeKind    … 送信サイズのプリセット（SIZE_PRESETS のキー）
 // snapSize    … プロバイダ側の刻み制約に丸める（省略可）
+// maxSendPx   … 送れる長辺の上限（省略時は MAX_INPUT_PX）。アップスケールの頭打ち
 // nativeMask  … マスクを API に渡せるか。渡せないものは合成だけで再現する
 // requiresMask… マスク前提のモデルか（マスク無しでは実行させない）
 // promptHint  … 指示文の書き方がモデルで大きく変わるときの補足（省略可）
@@ -2901,6 +3048,7 @@ const PROVIDERS = {
     pollMs: 1500,
 
     // 128〜2048 の 64 の倍数でないと 422 で弾かれる
+    maxSendPx: RUNWARE_MAX_PX,
     snapSize(size) {
       const clamp = (v) => Math.min(2048, Math.max(128, Math.round(v / 64) * 64));
       return { width: clamp(size.width), height: clamp(size.height) };
@@ -3028,6 +3176,7 @@ const PROVIDERS = {
     maskGrow: () => Number(els.wanMaskGrow.value) || 0,
     pollMs: 2500,
 
+    maxSendPx: WAN_DIM_MAX,
     snapSize: snap32,
 
     buildInput(dataUri, size, maskUri) {
@@ -3114,6 +3263,7 @@ const PROVIDERS = {
     promptHint: 'このモデルは「塗った範囲に何があってほしいか」だけを書きます（例:「赤いニット帽」）。'
       + '「帽子をかぶった男性の写真」のような画像全体の説明を書くと結果が悪くなります。',
     promptPlaceholder: '例: 赤いニット帽 / 白いシャツ',
+    maxSendPx: WAN_DIM_MAX,
     snapSize: snap32,
 
     buildInput(dataUri, size, maskUri) {
@@ -3188,6 +3338,7 @@ const PROVIDERS = {
     promptHint: 'このモデルは参照画像を <image1> と書いて参照します（例:「<image1> のシャツを赤いニットに変えて、顔・ポーズ・背景はそのまま」）。'
       + '変えない部分も「そのまま」と書いておくと保たれやすくなります。',
     promptPlaceholder: '例: <image1> のシャツを赤いニットに変えて、顔とポーズと背景はそのまま',
+    maxSendPx: WAN_DIM_MAX,
     snapSize: snap32,
 
     buildInput(dataUri, size) {
@@ -3610,31 +3761,23 @@ async function run() {
   setError('');
   setStatus('');
 
-  // 送るのはここで作る縮小版。元画像は合成の土台として R2 に残っている
-  const size = sendSize();
-  const api = provider();
+  // 送るのはここで作る縮小版。元画像は合成の土台として R2 に残っている。
   // 塗った範囲は「モデルへ渡すマスク」と「返ってきた画像の合成」の両方に使う。
-  // 渡せないプロバイダでは合成だけで同じ見た目に寄せる
-  const useMask = maskOn() && mask.strokes.length > 0;
-  const grow = api.maskGrow ? api.maskGrow() : 0;
-
-  // 塗った範囲のまわりだけを切り抜いて送る（要らない周りを捨てる）。
-  // 切り抜かないときは null で、これまで通り画像ぜんぶを送る
-  const region = useMask ? cropRegion(size) : null;
-
-  // マスクが画像の縁に近い辺は、単色で広げてから送る（返ってきたら切り出す）。
-  // 広げる必要が無ければ frame は null で、これまで通り素の枠で送る。
-  // 切り抜いたなら周りは元画像で埋まっているので、余白を足す必要はない
-  const frame = useMask && api.nativeMask && api.padEdges && !region
-    ? padFrame(size, mask, grow, api.padEdges()) : null;
-  const outer = frame ? frame.outer : size;
-  const inner = frame ? frame.inner : { x: 0, y: 0, width: size.width, height: size.height };
+  // 渡せないプロバイダでは合成だけで同じ見た目に寄せる。
+  // どの枠で送るか（切り抜き・縦横比の帯・縁の余白）は sendPlan がまとめて決める
+  const plan = sendPlan();
+  if (!plan) return;
+  const {
+    size, api, useMask, grow, region, frame, outer, inner,
+  } = plan;
 
   let dataUri;
   try {
     const img = await sourceImageEl();
-    if (region) dataUri = croppedDataUri(img, region, size);
-    else dataUri = frame ? framedDataUri(img, outer, inner) : toDataUri(img, size).dataUri;
+    // 枠が素の送信サイズと同じで切り抜きも無ければ、これまで通りそのまま描き直す
+    dataUri = frame || region
+      ? framedDataUri(img, outer, inner, region)
+      : toDataUri(img, size).dataUri;
   } catch (err) {
     setError(`入力画像を用意できませんでした: ${err.message}`);
     return;
@@ -3662,7 +3805,8 @@ async function run() {
     // 元画像と、実際に送った大きさ。合成は元解像度で行うので両方残す
     sourceSize: { width: source.width, height: source.height },
     sentSize: outer,
-    // 余白を足して送った場合の、元画像が入っている範囲。合成のときに切り出す
+    // 帯や余白を足して送った場合の、元画像が入っている範囲。
+    // マスクがあれば合成のとき、無ければ buildTrimmedRecord でここを切り出す
     crop: frame ? inner : null,
     // 切り抜いて送った場合の、元画像のどこを送ったか（0..1）。合成で元の位置へ戻す
     region,
@@ -3780,8 +3924,126 @@ async function waitAndFinish(job) {
     }
   }
 
+  // 返ってきた画像を入力と同じ縦横比に戻す。マスクを使うなら合成が元の解像度・
+  // 元の比で貼り戻すので、そちらに任せる
+  if (!job.mask && fitBack(saved)) {
+    setJobStatus(job, '縦横比を戻しています…', job.crop
+      ? '付けた帯を落としています' : '引き伸ばして送ったぶんを戻しています');
+    try {
+      saved = await buildFittedRecord(saved);
+      saved = await saveHistoryRecord(saved);
+    } catch (err) {
+      // 戻せなくても生成そのものは成功している。返ってきたままの結果を出す
+      setError(`縦横比を戻せませんでした（生成結果はそのまま残っています）: ${err.message}`);
+    }
+  }
+
   if (flagged > 0) setStatus(`安全性チェックにより ${flagged} 枚が塗り潰されて返りました`);
   renderResult(saved);
+}
+
+/* ---------- 返ってきた画像を入力の縦横比に戻す ---------- */
+//
+// 送信サイズはモデルが得意な解像度なので、入力と比が違うことがある。返ってきた
+// 画像はその送信サイズのままなので、何もしないと結果だけが歪んで並ぶ（入力画像の
+// カードに出しているのは元画像そのもので、送った画像ではない）。
+//
+// 帯を付けて送ったなら帯の内側を切り出すだけ。引き伸ばして送ったなら、詰まった
+// 軸を伸ばし返す。縮めるのではなく広げるのは、モデルが実際に描いた画素を捨てない
+// ため（縮めるとそのぶんの細部が消える）
+
+// この記録の出力を入力の比へ戻す必要があるか。戻すなら理由を返す
+function fitBack(record) {
+  if (record.crop) return 'trim';
+  const sent = record.sentSize;
+  const want = record.sourceSize;
+  if (!sent || !want || !(want.width > 0) || !(want.height > 0)) return null;
+  const stretch = (sent.width / sent.height) / (want.width / want.height);
+  return Math.abs(1 - stretch) < FIT_MIN_STRETCH ? null : 'unstretch';
+}
+
+// 中身（content）を、望む比（want）へ戻したときの大きさ。比が既に合っていれば
+// そのまま。合っていなければ詰まった軸を伸ばし返す。縮めるのではなく広げるのは、
+// モデルが実際に描いた画素を捨てないため（縮めるとそのぶんの細部が消える）。
+// 伸ばし返して大きくなりすぎないよう、最後に元画像と同じ上限へ収める
+//（iOS Safari の canvas 面積上限）
+function restoredSize(content, want) {
+  let { width, height } = content;
+  const aspect = want.width / want.height;
+  if (Math.abs(1 - (width / height) / aspect) >= FIT_MIN_STRETCH) {
+    if (width / height > aspect) height = Math.max(1, Math.round(width / aspect));
+    else width = Math.max(1, Math.round(height * aspect));
+  }
+  return fitWithin({ width, height }, MAX_ORIGINAL_PX, MAX_ORIGINAL_AREA);
+}
+
+// 入力の比（want）に戻した 1 枚。sent は送った大きさで、返りが違う大きさでも
+// 比で合わせられるようにしてある
+function fitToSource(img, { sent, crop, want }) {
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  const kx = w / (sent?.width || w);
+  const ky = h / (sent?.height || h);
+  // 帯の内側（crop）だけを切り出す。半画素ぶん内側から取るのは、補間が帯の画素を
+  // 拾って切り出した縁に帯の色が 1px にじむのを避けるため（合成の切り出しと同じ）
+  const src = crop
+    ? {
+      x: crop.x * kx + 0.5,
+      y: crop.y * ky + 0.5,
+      width: Math.max(1, crop.width * kx - 1),
+      height: Math.max(1, crop.height * ky - 1),
+    }
+    : { x: 0, y: 0, width: w, height: h };
+  // 切り出した中身を、入力の比へ戻した大きさで書き出す
+  const size = restoredSize({
+    width: Math.max(1, Math.round(crop ? crop.width * kx : w)),
+    height: Math.max(1, Math.round(crop ? crop.height * ky : h)),
+  }, want);
+  const out = makeCanvas(size.width, size.height);
+  const ctx = out.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, src.x, src.y, src.width, src.height, 0, 0, out.width, out.height);
+  return { dataUri: encodeWithin(out), width: out.width, height: out.height };
+}
+
+// 各出力を入力の比へ戻したレコード。返ってきたままの出力は残さない（帯は送るために
+// こちらが足したもので見るところが無く、引き伸ばしたままの絵も見せる意味がない。
+// どちらも保存領域を倍使う）。
+// 切り出し済みなので crop は落とす。残したままだと、後から「マスクを調整」した
+// ときに同じ範囲をもう一度切り出してしまう
+async function buildFittedRecord(record) {
+  const n = record.outputCount ?? record.images.length - 1;
+  const rest = record.images.slice(n); // [入力画像]
+  const how = fitBack(record);
+  const fitted = [];
+  for (const out of record.images.slice(0, n)) {
+    // 合成と同じく、画素を読むには同一オリジン（R2）である必要がある
+    const url = isSameOrigin(out.url) ? out.url : await captureImage(out.url);
+    const img = await loadImageForCanvas(url);
+    const { dataUri, width, height } = fitToSource(img, {
+      sent: record.sentSize,
+      crop: record.crop,
+      want: record.sourceSize,
+    });
+    const stored = await uploadDataUri(dataUri, {
+      // 焼き込みの種類は「編集の出力」。比を戻しただけで、中身は生成結果そのもの
+      kind: 'edit',
+      model: record.model,
+      prompt: record.prompt,
+      seed: record.seed ?? null,
+      loras: record.loras ?? [],
+      input: record.input ?? null,
+    });
+    fitted.push({ url: stored, width, height });
+  }
+  return {
+    ...record,
+    fitted: how,
+    crop: null,
+    // sentSize は「実際に送った大きさ」のままにして、出来上がりは別に持つ
+    resultSize: { width: fitted[0].width, height: fitted[0].height },
+    images: [...fitted, ...rest],
+  };
 }
 
 // 保存済みレコードの各出力をマスク合成し、結果を先頭に足したレコードを返す。
@@ -3872,6 +4134,14 @@ function cropMetaText(record) {
   return ` ・ 切り抜き ${w}×${h}（${(record.sentSize.width / w).toFixed(1)} 倍）`;
 }
 
+// 入力の比へ戻した場合、どう戻して何になったかを出す
+//（「送信」は実際に送った大きさなので、それだけでは出来上がりの大きさが分からない）
+function fitMetaText(record) {
+  if (!record.fitted || !record.resultSize) return '';
+  const how = record.fitted === 'trim' ? '帯を切って' : '比率を戻して';
+  return ` ・ ${how} ${record.resultSize.width}×${record.resultSize.height}`;
+}
+
 function renderResult(record) {
   shownResult = record;
   els.resultPanel.hidden = false;
@@ -3879,6 +4149,7 @@ function renderResult(record) {
     + (record.seed !== null && record.seed !== undefined ? ` ・ seed ${record.seed}` : '')
     + (record.sentSize ? ` ・ 送信 ${record.sentSize.width}×${record.sentSize.height}` : '')
     + cropMetaText(record)
+    + fitMetaText(record)
     + (record.masked && record.sourceSize
       ? ` ・ 合成 ${record.sourceSize.width}×${record.sourceSize.height}` : '')
     + (record.cost ? ` ・ $${Number(record.cost).toFixed(4)}` : '')
@@ -4022,6 +4293,7 @@ function saveForm() {
     prompt: els.prompt.value,
     provider: providerId,
     size: els.sizeSelect.value,
+    fit: els.fitSelect.value,
     numImages: els.numImages.value,
     steps: els.steps.value,
     guidance: els.guidance.value,
@@ -4083,6 +4355,8 @@ async function restoreForm() {
   // サイズの選択肢はプロバイダで変わるので、先に並べ直してから値を戻す
   renderSizeOptions();
   if (s.size) els.sizeSelect.value = migrateSizeValue(s.size);
+  // 帯を付けるのが標準。印が無い古い下書きも標準のままにする
+  els.fitSelect.value = s.fit === 'stretch' ? 'stretch' : 'pad';
   if (s.numImages) els.numImages.value = s.numImages;
   if (s.steps) els.steps.value = s.steps;
   if (s.guidance) els.guidance.value = s.guidance;
@@ -4234,7 +4508,7 @@ els.civitaiBtn.addEventListener('click', () => civitaiImport.open('lora'));
 els.rwAddLoraBtn.addEventListener('click', () => addRwLoraRow());
 els.rwPickLoraBtn.addEventListener('click', () => runwareLora.open());
 els.prompt.addEventListener('input', () => { syncRunBtn(); saveForm(); });
-for (const el of [els.sizeSelect, els.numImages, els.steps, els.guidance,
+for (const el of [els.sizeSelect, els.fitSelect, els.numImages, els.steps, els.guidance,
   els.acceleration, els.outputFormat, els.seed, els.seedLock, els.negativePrompt,
   els.rwSteps, els.rwCfg, els.rwTrueCfg, els.rwStrength, els.rwMaskMargin,
   els.rwMaskGrow, els.rwPadEdges, els.rwScheduler, els.rwOutputQuality,
@@ -4287,6 +4561,8 @@ els.sizeSelect.addEventListener('change', () => {
   renderCostHint();
   renderSizeHint();
 });
+// 帯か引き伸ばしかで、何をどう送るかの説明が変わる（送信サイズ自体は変わらない）
+els.fitSelect.addEventListener('change', renderSizeHint);
 
 /* ---------- マスクの操作 ---------- */
 
