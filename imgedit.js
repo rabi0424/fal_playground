@@ -1067,7 +1067,7 @@ function renderSizeHint() {
     ? `${inner.width < outer.width ? '左右' : '上下'}に帯を付けて`
       + ` ${inner.width}×${inner.height} で送り、結果から切り取ります`
     : `${stretch > 1 ? '横' : '縦'}に ${off.toFixed(0)}% 引き伸ばして送り、`
-      + (maskOn() ? '合成で元の比率へ戻します' : '結果もその比率になります');
+      + (maskOn() ? '合成で元の比率へ戻します' : '結果は元の比率へ戻します');
   els.sizeHint.hidden = false;
   els.sizeHint.textContent = `${region ? '切り抜き ' : ''}${from.width}×${from.height}`
     + ` → ${size.width}×${size.height} で送信`
@@ -3856,16 +3856,17 @@ async function waitAndFinish(job) {
     }
   }
 
-  // 縦横比を合わせる帯や縁の余白を付けて送った場合、返ってくる画像にはそのぶんも
-  // 写っている。マスクを使うなら合成が元の枠で切り出すので、そちらに任せる
-  if (job.crop && !job.mask) {
-    setJobStatus(job, '切り取り中…', '付けた帯を落として元の縦横比に戻しています');
+  // 返ってきた画像を入力と同じ縦横比に戻す。マスクを使うなら合成が元の解像度・
+  // 元の比で貼り戻すので、そちらに任せる
+  if (!job.mask && fitBack(saved)) {
+    setJobStatus(job, '縦横比を戻しています…', job.crop
+      ? '付けた帯を落としています' : '引き伸ばして送ったぶんを戻しています');
     try {
-      saved = await buildTrimmedRecord(saved);
+      saved = await buildFittedRecord(saved);
       saved = await saveHistoryRecord(saved);
     } catch (err) {
-      // 切り取れなくても生成そのものは成功している。帯付きのまま結果を出す
-      setError(`帯の切り取りに失敗しました（生成結果はそのまま残っています）: ${err.message}`);
+      // 戻せなくても生成そのものは成功している。返ってきたままの結果を出す
+      setError(`縦横比を戻せませんでした（生成結果はそのまま残っています）: ${err.message}`);
     }
   }
 
@@ -3873,44 +3874,91 @@ async function waitAndFinish(job) {
   renderResult(saved);
 }
 
-// 返ってきた画像から、元画像が入っていた範囲（crop）だけを切り出す。
-// sent は送った大きさ。返りが違う大きさでも比で合わせられるようにしておく
-function trimToCrop(img, sent, crop) {
+/* ---------- 返ってきた画像を入力の縦横比に戻す ---------- */
+//
+// 送信サイズはモデルが得意な解像度なので、入力と比が違うことがある。返ってきた
+// 画像はその送信サイズのままなので、何もしないと結果だけが歪んで並ぶ（入力画像の
+// カードに出しているのは元画像そのもので、送った画像ではない）。
+//
+// 帯を付けて送ったなら帯の内側を切り出すだけ。引き伸ばして送ったなら、詰まった
+// 軸を伸ばし返す。縮めるのではなく広げるのは、モデルが実際に描いた画素を捨てない
+// ため（縮めるとそのぶんの細部が消える）
+
+// この記録の出力を入力の比へ戻す必要があるか。戻すなら理由を返す
+function fitBack(record) {
+  if (record.crop) return 'trim';
+  const sent = record.sentSize;
+  const want = record.sourceSize;
+  if (!sent || !want || !(want.width > 0) || !(want.height > 0)) return null;
+  const stretch = (sent.width / sent.height) / (want.width / want.height);
+  return Math.abs(1 - stretch) < FIT_MIN_STRETCH ? null : 'unstretch';
+}
+
+// 中身（content）を、望む比（want）へ戻したときの大きさ。比が既に合っていれば
+// そのまま。合っていなければ詰まった軸を伸ばし返す。縮めるのではなく広げるのは、
+// モデルが実際に描いた画素を捨てないため（縮めるとそのぶんの細部が消える）。
+// 伸ばし返して大きくなりすぎないよう、最後に元画像と同じ上限へ収める
+//（iOS Safari の canvas 面積上限）
+function restoredSize(content, want) {
+  let { width, height } = content;
+  const aspect = want.width / want.height;
+  if (Math.abs(1 - (width / height) / aspect) >= FIT_MIN_STRETCH) {
+    if (width / height > aspect) height = Math.max(1, Math.round(width / aspect));
+    else width = Math.max(1, Math.round(height * aspect));
+  }
+  return fitWithin({ width, height }, MAX_ORIGINAL_PX, MAX_ORIGINAL_AREA);
+}
+
+// 入力の比（want）に戻した 1 枚。sent は送った大きさで、返りが違う大きさでも
+// 比で合わせられるようにしてある
+function fitToSource(img, { sent, crop, want }) {
   const w = img.naturalWidth || img.width;
   const h = img.naturalHeight || img.height;
   const kx = w / (sent?.width || w);
   const ky = h / (sent?.height || h);
-  const out = makeCanvas(
-    Math.max(1, Math.round(crop.width * kx)),
-    Math.max(1, Math.round(crop.height * ky)),
-  );
+  // 帯の内側（crop）だけを切り出す。半画素ぶん内側から取るのは、補間が帯の画素を
+  // 拾って切り出した縁に帯の色が 1px にじむのを避けるため（合成の切り出しと同じ）
+  const src = crop
+    ? {
+      x: crop.x * kx + 0.5,
+      y: crop.y * ky + 0.5,
+      width: Math.max(1, crop.width * kx - 1),
+      height: Math.max(1, crop.height * ky - 1),
+    }
+    : { x: 0, y: 0, width: w, height: h };
+  // 切り出した中身を、入力の比へ戻した大きさで書き出す
+  const size = restoredSize({
+    width: Math.max(1, Math.round(crop ? crop.width * kx : w)),
+    height: Math.max(1, Math.round(crop ? crop.height * ky : h)),
+  }, want);
+  const out = makeCanvas(size.width, size.height);
   const ctx = out.getContext('2d');
   ctx.imageSmoothingQuality = 'high';
-  // 半画素ぶん内側から取る。そのままだと補間が帯の画素を拾い、切り出した縁に
-  // 帯の色が 1px にじむ（合成のときの切り出しと同じ理由）
-  const i = 0.5;
-  ctx.drawImage(img,
-    crop.x * kx + i, crop.y * ky + i,
-    Math.max(1, crop.width * kx - i * 2), Math.max(1, crop.height * ky - i * 2),
-    0, 0, out.width, out.height);
+  ctx.drawImage(img, src.x, src.y, src.width, src.height, 0, 0, out.width, out.height);
   return { dataUri: encodeWithin(out), width: out.width, height: out.height };
 }
 
-// 各出力から帯を落としたレコード。帯付きの生の出力は残さない（帯は送るために
-// こちらが足したもので、見るところが無いうえ保存領域を倍使う）。
+// 各出力を入力の比へ戻したレコード。返ってきたままの出力は残さない（帯は送るために
+// こちらが足したもので見るところが無く、引き伸ばしたままの絵も見せる意味がない。
+// どちらも保存領域を倍使う）。
 // 切り出し済みなので crop は落とす。残したままだと、後から「マスクを調整」した
 // ときに同じ範囲をもう一度切り出してしまう
-async function buildTrimmedRecord(record) {
+async function buildFittedRecord(record) {
   const n = record.outputCount ?? record.images.length - 1;
   const rest = record.images.slice(n); // [入力画像]
-  const trimmed = [];
+  const how = fitBack(record);
+  const fitted = [];
   for (const out of record.images.slice(0, n)) {
     // 合成と同じく、画素を読むには同一オリジン（R2）である必要がある
     const url = isSameOrigin(out.url) ? out.url : await captureImage(out.url);
     const img = await loadImageForCanvas(url);
-    const { dataUri, width, height } = trimToCrop(img, record.sentSize, record.crop);
+    const { dataUri, width, height } = fitToSource(img, {
+      sent: record.sentSize,
+      crop: record.crop,
+      want: record.sourceSize,
+    });
     const stored = await uploadDataUri(dataUri, {
-      // 焼き込みの種類は「編集の出力」。帯を落としただけで、中身は生成結果そのもの
+      // 焼き込みの種類は「編集の出力」。比を戻しただけで、中身は生成結果そのもの
       kind: 'edit',
       model: record.model,
       prompt: record.prompt,
@@ -3918,16 +3966,15 @@ async function buildTrimmedRecord(record) {
       loras: record.loras ?? [],
       input: record.input ?? null,
     });
-    trimmed.push({ url: stored, width, height });
+    fitted.push({ url: stored, width, height });
   }
   return {
     ...record,
-    trimmed: true,
+    fitted: how,
     crop: null,
-    // 表示上の「送信」は、帯を落としたあとの大きさで見せたほうが分かりやすい
-    sentSize: { width: trimmed[0].width, height: trimmed[0].height },
-    paddedSize: record.sentSize ?? null,
-    images: [...trimmed, ...rest],
+    // sentSize は「実際に送った大きさ」のままにして、出来上がりは別に持つ
+    resultSize: { width: fitted[0].width, height: fitted[0].height },
+    images: [...fitted, ...rest],
   };
 }
 
@@ -4019,11 +4066,12 @@ function cropMetaText(record) {
   return ` ・ 切り抜き ${w}×${h}（${(record.sentSize.width / w).toFixed(1)} 倍）`;
 }
 
-// 縦横比を合わせる帯を付けて送った場合、帯込みで何を送ったかも出す
-//（「送信」は帯を落としたあとの大きさなので、それだけでは何が起きたか分からない）
-function trimMetaText(record) {
-  if (!record.trimmed || !record.paddedSize) return '';
-  return ` ・ 帯付き ${record.paddedSize.width}×${record.paddedSize.height} から切り取り`;
+// 入力の比へ戻した場合、どう戻して何になったかを出す
+//（「送信」は実際に送った大きさなので、それだけでは出来上がりの大きさが分からない）
+function fitMetaText(record) {
+  if (!record.fitted || !record.resultSize) return '';
+  const how = record.fitted === 'trim' ? '帯を切って' : '比率を戻して';
+  return ` ・ ${how} ${record.resultSize.width}×${record.resultSize.height}`;
 }
 
 function renderResult(record) {
@@ -4033,7 +4081,7 @@ function renderResult(record) {
     + (record.seed !== null && record.seed !== undefined ? ` ・ seed ${record.seed}` : '')
     + (record.sentSize ? ` ・ 送信 ${record.sentSize.width}×${record.sentSize.height}` : '')
     + cropMetaText(record)
-    + trimMetaText(record)
+    + fitMetaText(record)
     + (record.masked && record.sourceSize
       ? ` ・ 合成 ${record.sourceSize.width}×${record.sourceSize.height}` : '')
     + (record.cost ? ` ・ $${Number(record.cost).toFixed(4)}` : '')

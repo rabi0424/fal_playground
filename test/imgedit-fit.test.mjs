@@ -9,6 +9,8 @@
 //   - 縁の余白（padFrame）が、既にある帯のぶんを差し引いて足すこと
 //     （帯があるのに同じだけ広げると、要らない余白で中身が痩せる）
 //   - 余白を足した枠でも、中身の縦横比が保たれること
+//   - 結果を入力の比へ戻すか（fitBack）の判定と、戻したときの大きさ
+//     （restoredSize。詰まった軸を伸ばし返す＝モデルが描いた画素を捨てない）
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 
@@ -26,9 +28,9 @@ function pick(name) {
   throw new Error(`${name} の終わりが見つかりません`);
 }
 
-const CONST = /const (FIT_MIN_STRETCH|RUNWARE_MAX_PX) = [^;]+;/g;
+const CONST = /const (FIT_MIN_STRETCH|RUNWARE_MAX_PX|MAX_ORIGINAL_PX|MAX_ORIGINAL_AREA) = [^;]+;/g;
 const consts = SRC.match(CONST);
-assert.equal(consts?.length, 2, '定数の切り出しに失敗しました');
+assert.equal(consts?.length, 4, '定数の切り出しに失敗しました');
 
 // padFrame はマスクの画素を読む maskEdgeGaps を呼ぶので、そこだけ差し替える
 const build = new Function('gaps', `
@@ -36,10 +38,13 @@ const build = new Function('gaps', `
   const maskEdgeGaps = () => gaps;
   ${pick('letterbox')}
   ${pick('padFrame')}
-  return { letterbox, padFrame };
+  ${pick('fitWithin')}
+  ${pick('restoredSize')}
+  ${pick('fitBack')}
+  return { letterbox, padFrame, restoredSize, fitBack };
 `);
 
-const { letterbox } = build(null);
+const { letterbox, restoredSize, fitBack } = build(null);
 const aspect = (r) => r.width / r.height;
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg}: ${a} vs ${b}`);
 
@@ -127,4 +132,41 @@ const atLeft = { left: 0, right: 0.5, top: 0.5, bottom: 0.5 };
 assert.equal(build(null).padFrame(size, mask, 0, 96), null);
 assert.equal(build(atLeft).padFrame(size, mask, 0, 0), null, 'amount 0 は無効');
 
-console.log('ok: 画像編集の帯と縁の余白');
+/* ---- 結果を入力の比へ戻すかの判定 ---- */
+
+const src43 = { width: 4000, height: 3000 };
+assert.equal(fitBack({ crop: { x: 0, y: 166, width: 1328, height: 996 } }), 'trim',
+  '帯を付けて送ったなら、帯の内側を切り出す');
+assert.equal(
+  fitBack({ sentSize: { width: 1328, height: 1328 }, sourceSize: src43 }), 'unstretch',
+  '引き伸ばして送ったなら、伸ばし返す',
+);
+assert.equal(
+  fitBack({ sentSize: { width: 1328, height: 996 }, sourceSize: src43 }), null,
+  '比が同じなら何もしない',
+);
+assert.equal(fitBack({ sentSize: null, sourceSize: src43 }), null, '古い記録は触らない');
+
+/* ---- 戻したときの大きさ ---- */
+
+// 4:3 を 1:1 で送った（横が詰まっている）→ 横を伸ばし返す。
+// 縦を 996 まで縮めてしまうと、モデルが実際に描いた画素を捨てることになる
+assert.deepEqual(restoredSize({ width: 1328, height: 1328 }, src43),
+  { width: 1771, height: 1328 });
+
+// 縦長を 16:9 で送った（縦が詰まっている）→ 縦を伸ばし返す
+assert.deepEqual(restoredSize({ width: 1664, height: 928 }, { width: 1080, height: 1920 }),
+  { width: 1664, height: 2958 });
+
+// 既に比が合っていればそのまま（帯を切り出しただけのとき）
+assert.deepEqual(restoredSize({ width: 1328, height: 996 }, src43),
+  { width: 1328, height: 996 });
+
+// 伸ばし返した結果が大きくなりすぎるときは、比を保ったまま上限へ収める
+{
+  const out = restoredSize({ width: 2048, height: 2048 }, { width: 4000, height: 800 });
+  assert.ok(out.width <= 4096 && out.width * out.height <= 16 * 1024 * 1024);
+  near(out.width / out.height, 5, 0.01, '比は保ったまま収める');
+}
+
+console.log('ok: 画像編集の帯・縁の余白・縦横比の戻し');
