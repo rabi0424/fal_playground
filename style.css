@@ -2124,6 +2124,74 @@ a.ghost-btn {
   white-space: nowrap;
 }
 
+/* ---- グループ（グループごとのプロンプト） ---- */
+.round-prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.round-prompts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.lb-group {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.round-group-prompt {
+  display: flex;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.round-group-prompt .name {
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+.round-thumb-group {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 8px;
+}
+
+.group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.group-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.group-row input { flex: 1; min-width: 0; }
+.group-row .meta { flex-shrink: 0; }
+
+.group-assign label { justify-content: space-between; }
+.group-assign .plist-name { flex: 1; min-width: 0; }
+
+.group-assign select {
+  flex-shrink: 0;
+  max-width: 45%;
+  font-size: 13px;
+  padding: 2px 6px;
+}
+
 /* ---- セッション作成ダイアログ ---- */
 .session-dialog { width: min(560px, calc(100vw - 32px)); }
 
