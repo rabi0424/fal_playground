@@ -2236,6 +2236,14 @@ a.ghost-btn {
 
 .plist label:hover { background: var(--bg); }
 
+/* input への width: 100% が効いてチェックボックスが横いっぱいに伸びるのを止める */
+.plist input[type="checkbox"] {
+  width: auto;
+  flex-shrink: 0;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .plist .plist-name {
   overflow: hidden;
   text-overflow: ellipsis;

@@ -16,10 +16,40 @@
 
 /* ---------- constants ---------- */
 
+// 比較に使えるモデル。fal のほかに自前ホスト（Modal / modal_comfy）の各版も選べる。
+// id は生成画面（app.js）と同じものを使う（履歴レコードの model がそろうため）。
+//
+// - provider: 'modal' は Worker のジョブ API（/api/krea2/generate）経由。fal は
+//   キュー API（/api/fal/proxy）経由で、送るパラメータの名前も別物
+// - loraBase: 参加チェックポイントの候補を絞るベースモデル
+// - ckpt: セッションで UNet（チェックポイント）を指定できる版
+// - cfgMax: ガイダンスの上限（Krea 2 Turbo は蒸留版なので 0〜1）
 const ARENA_MODELS = [
-  { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA' },
-  { id: '__custom__', name: 'カスタム…' },
+  { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA（fal）', loraBase: 'krea2' },
+  { id: 'modal/krea2-turbo-exp', name: 'Krea 2 [turbo] 自前ホスト（Modal 実験版）', provider: 'modal', endpoint: 'exp', loraBase: 'krea2', cfgMax: 1 },
+  { id: 'modal/krea2-turbo-gpusnap', name: 'Krea 2 [turbo] 自前ホスト（Modal GPUスナップ版）', provider: 'modal', endpoint: 'gpusnap', loraBase: 'krea2', cfgMax: 1 },
+  { id: 'modal/krea2-turbo', name: 'Krea 2 [turbo] 自前ホスト（Modal 本番）', provider: 'modal', endpoint: 'prod', loraBase: 'krea2', cfgMax: 1 },
+  { id: 'modal/krea2-turbo-ckpt', name: 'Krea 2 [turbo] 自前ホスト（Modal チェックポイント指定版）', provider: 'modal', endpoint: 'ckpt', loraBase: 'krea2', ckpt: true, cfgMax: 1 },
+  { id: 'modal/krea2-turbo-wan', name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・編集と共有）', provider: 'modal', endpoint: 'wan', loraBase: 'krea2', ckpt: true, cfgMax: 1 },
+  { id: 'modal/krea2-turbo-lanpaint', name: 'Krea 2 [turbo] 自前ホスト（Modal LanPaint 版）', provider: 'modal', endpoint: 'lanpaint', loraBase: 'krea2', ckpt: true, cfgMax: 1 },
+  { id: 'modal/krea2-turbo-unified', name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', provider: 'modal', endpoint: 'unified', loraBase: 'krea2', ckpt: true, cfgMax: 1 },
+  { id: 'modal/qwen-image-2.1', name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版）', provider: 'modal', endpoint: 'qwen21', loraBase: 'qwen21', ckpt: true, ckptBase: 'qwen21', cfgMax: 10 },
+  { id: '__custom__', name: 'カスタム…（fal）', loraBase: 'krea2' },
 ];
+
+// 系統ごとの既定チェックポイント（app.js と同じ。表示に使うだけ）
+const DEFAULT_CKPTS = {
+  krea2: 'Krea-2-Turbo-Q8_0.gguf',
+  qwen21: 'qwen_image_2.1_Q8_0.gguf',
+};
+const DEFAULT_CKPT_BASE = 'krea2';
+
+const DEFAULT_LORA_BASE = 'krea2';
+
+// Modal は同時 1 コンテナで順に処理する。全員ぶんを一度に投げると、後ろのジョブが
+// サーバー側の打ち切り（30 分）に当たってしまうので、少しずつ流す。
+// 1 本走らせながら次を待たせておけばコンテナは温まったままなので、これで遅くならない
+const MODAL_ROUND_CONCURRENCY = 2;
 
 // app.js と同じ約 1MP のプリセット
 const SIZES = [
@@ -109,6 +139,8 @@ const els = {
   sessionScale: $('#sessionScale'),
   sessionCustomModelField: $('#sessionCustomModelField'),
   sessionCustomModel: $('#sessionCustomModel'),
+  sessionCkptField: $('#sessionCkptField'),
+  sessionCkpt: $('#sessionCkpt'),
   rangeStart: $('#rangeStart'),
   rangeEnd: $('#rangeEnd'),
   rangeAddBtn: $('#rangeAddBtn'),
@@ -149,15 +181,125 @@ async function falFetch(url, options = {}) {
   return res.json();
 }
 
+/* ---------- Modal（自前ホスト）のジョブ API ---------- */
+// 生成画面（app.js）と同じ経路。Worker にジョブを登録し、/api/krea2/job/<id> を
+// ポーリングして結果を受け取る。ジョブ ID はこちらで採番するので、同じ ID で
+// 送り直しても多重生成にならない（＝ラウンドの再開がそのまま使える）
+
+function makeModalJobId() {
+  if (crypto.randomUUID) return crypto.randomUUID().replaceAll('-', '');
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function modalErrorMessage(res) {
+  if (res.status === 404) {
+    return 'この配信環境では Modal 版は使えません（Cloudflare Workers でのホストが必要です）';
+  }
+  const text = await res.text().catch(() => '');
+  return modalErrors.toError(res.status, text).message;
+}
+
+async function modalSubmit(body) {
+  const res = await fetch('/api/krea2/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (isHtmlResponse(res)) throw new Error(ACCESS_EXPIRED_MSG);
+  if (!res.ok) throw new Error(await modalErrorMessage(res));
+  return res.json();
+}
+
+// 完了まで待つ。時間切れはサーバー側（30 分）に任せる ―― 参加者が多いと Modal 側の
+// 順番待ちで長くなるので、こちらで打ち切ると正常なジョブまで落としてしまう。
+// 一時的な接続エラーは数回まで無視して次のポーリングで拾う
+async function modalAwaitJob(jobId, roundId) {
+  let errors = 0;
+  while (true) {
+    await sleep(POLL_INTERVAL_MS + Math.random() * 500);
+    if (roundAborts.has(roundId)) throw new Error('中断されました');
+
+    const res = await fetch(`/api/krea2/job/${jobId}`).catch(() => null);
+    if (!res || isHtmlResponse(res)) {
+      if (++errors >= POLL_MAX_CONSECUTIVE_ERRORS) {
+        throw new Error(res ? ACCESS_EXPIRED_MSG : '接続できませんでした');
+      }
+      continue;
+    }
+    if (res.status === 404) {
+      throw new Error('ジョブが見つかりませんでした（サーバー側で期限切れになった可能性があります）');
+    }
+    if (!res.ok) throw new Error(await modalErrorMessage(res));
+    errors = 0;
+    const job = await res.json().catch(() => null);
+    if (job?.status === 'done') return job;
+    if (job?.status === 'error') throw modalErrors.fromJobError(job.error, '生成に失敗しました');
+  }
+}
+
 /* ---------- LoRA ライブラリ（共有モジュール経由・読み取りのみ） ---------- */
 
 const loadLoraLibrary = () => loraLib.load();
 const loraDisplayName = (path) => loraLib.fileName(path);
 const loraLabel = (path) => loraLib.label(path);
 
-// 比較アリーナは Krea 2 の LoRA を比べる画面なので、候補もそれだけに絞る
-function sortedLoraLibrary() {
-  return loraLib.forBase('krea2');
+// 候補はモデルの系統に合うものだけ（Krea 2 の LoRA は Qwen 2.1 には効かない）
+function sortedLoraLibrary(base = DEFAULT_LORA_BASE) {
+  return loraLib.forBase(base);
+}
+
+/* ---------- モデル（fal / Modal 自前ホスト） ---------- */
+
+function arenaModel(id) {
+  return ARENA_MODELS.find((m) => m.id === id) ?? null;
+}
+
+// セッションが自前ホスト（Modal）かどうか。作成時に控えた値を正とし、
+// 無ければ id から引く（古いセッションは fal しか無かったので fal になる）
+function isModalSession(session) {
+  return (session.provider ?? arenaModel(session.modelId)?.provider) === 'modal';
+}
+
+function sessionEndpoint(session) {
+  return session.modalEndpoint ?? arenaModel(session.modelId)?.endpoint ?? 'exp';
+}
+
+function sessionCfgMax(session) {
+  return session.cfgMax ?? arenaModel(session.modelId)?.cfgMax ?? null;
+}
+
+/* ---------- チェックポイント（UNet）ライブラリ（読み取りのみ） ---------- */
+// 登録は生成画面の「チェックポイント」欄で行う。ここでは選ぶだけ
+
+function loadCkptLibrary() {
+  try {
+    return JSON.parse(falStore.get(LS_CKPTS)) || [];
+  } catch {
+    return [];
+  }
+}
+
+function ckptDisplayName(path) {
+  const seg = String(path).split('?')[0].split('/').filter(Boolean).pop() || path;
+  try {
+    return decodeURIComponent(seg);
+  } catch {
+    return seg;
+  }
+}
+
+function ckptsForBase(base = DEFAULT_CKPT_BASE) {
+  return loadCkptLibrary()
+    .filter((item) => (item.base ?? DEFAULT_CKPT_BASE) === base)
+    .map((item) => ({ path: item.path, name: item.name || ckptDisplayName(item.path) }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true, sensitivity: 'base' }));
+}
+
+function ckptLabel(path) {
+  if (!path) return '';
+  const item = loadCkptLibrary().find((x) => x.path === path);
+  return item?.name || ckptDisplayName(path);
 }
 
 /* ---------- arena state ---------- */
@@ -416,8 +558,13 @@ function setArenaError(text) {
   els.arenaError.textContent = text || '';
 }
 
+function roundSize(round) {
+  return SIZES.find((s) => s.value === round.settings?.size) || SIZES[0];
+}
+
+// fal のキュー API に送る入力
 function buildRoundInput(session, round, participant) {
-  const size = SIZES.find((s) => s.value === round.settings?.size) || SIZES[0];
+  const size = roundSize(round);
   const input = {
     prompt: roundPromptFor(session, round, participant),
     num_images: 1,
@@ -437,6 +584,32 @@ function buildRoundInput(session, round, participant) {
   if (round.settings?.guidance !== '' && round.settings?.guidance != null) {
     input.guidance_scale = Number(round.settings.guidance);
   }
+  return input;
+}
+
+// Modal（modal_comfy）に送る入力。fal とは項目名が違う
+// （image_size → width/height、num_inference_steps → steps、guidance_scale → cfg、
+//  loras の path/scale → name/strength）
+function buildModalRoundInput(session, round, participant) {
+  const size = roundSize(round);
+  const input = {
+    prompt: roundPromptFor(session, round, participant),
+    width: size.width,
+    height: size.height,
+    seed: round.seed,
+    endpoint: sessionEndpoint(session),
+    // LoRA は URL のまま渡す（名前だけに落とすと、別リポジトリから取り込んだものが
+    // Modal 側で解決できず 404 になる）
+    loras: [{ name: loraLib.modalRef(participant.path), strength: session.scale }],
+  };
+  if (round.settings?.steps !== '' && round.settings?.steps != null) {
+    input.steps = Number(round.settings.steps);
+  }
+  if (round.settings?.guidance !== '' && round.settings?.guidance != null) {
+    input.cfg = Number(round.settings.guidance);
+  }
+  // セッションで指定した UNet（空なら Modal 側の既定）
+  if (session.checkpoint) input.checkpoint = session.checkpoint;
   return input;
 }
 
@@ -517,8 +690,19 @@ async function startRound() {
   }
   if (generatingSessions.has(session.id)) return;
 
+  // Krea 2 Turbo は蒸留版なのでガイダンスの範囲が狭い（0〜1）。範囲外は Modal 側が
+  // 422 で弾くので、全員ぶん送ってから全部失敗するより先にここで伝える
+  const cfgMax = sessionCfgMax(session);
+  const guidance = els.roundGuidance.value;
+  if (cfgMax !== null && guidance !== '' && (Number(guidance) < 0 || Number(guidance) > cfgMax)) {
+    setArenaError(`この API のガイダンスは 0〜${cfgMax} の範囲で指定してください`);
+    return;
+  }
+
   const n = session.participants.length;
-  if (n >= 10 && !confirm(`${n} 個のチェックポイントで ${n} 枚を一斉生成します。よろしいですか？`)) {
+  // Modal は同時 1 コンテナなので、枚数がそのまま待ち時間になる
+  const note = isModalSession(session) ? '（Modal は 1 枚ずつ順に処理するので時間がかかります）' : '';
+  if (n >= 10 && !confirm(`${n} 個のチェックポイントで ${n} 枚を一斉生成します${note}。よろしいですか？`)) {
     return;
   }
   setArenaError('');
@@ -556,39 +740,8 @@ async function runRound(session, round) {
   updateGenerateUI(session, round);
 
   try {
-    // 1. 未送信の参加者をすべてキューに投入する
-    for (const p of session.participants) {
-      if (round.results[p.id] || round.pending[p.id]) continue;
-      if (roundAborts.has(round.id)) break;
-      try {
-        const sub = await falFetch(`https://queue.fal.run/${session.modelId}`, {
-          method: 'POST',
-          body: JSON.stringify(buildRoundInput(session, round, p)),
-        });
-        round.pending[p.id] = { status_url: sub.status_url, response_url: sub.response_url };
-      } catch (err) {
-        round.results[p.id] = { error: `送信失敗: ${err.message}` };
-      }
-      saveArena();
-      updateGenerateUI(session, round);
-    }
-
-    // 2. 全参加者の完了を並行して待つ
-    await Promise.all(session.participants.map(async (p) => {
-      const pend = round.pending[p.id];
-      if (!pend || round.results[p.id]) return;
-      try {
-        const r = await awaitRequest(pend, round.id);
-        const img = r.images?.[0];
-        if (!img) throw new Error('画像が返されませんでした');
-        round.results[p.id] = { url: img.url, width: img.width, height: img.height };
-      } catch (err) {
-        round.results[p.id] = { error: err.message };
-      }
-      delete round.pending[p.id];
-      saveArena();
-      updateGenerateUI(session, round);
-    }));
+    if (isModalSession(session)) await runRoundModal(session, round);
+    else await runRoundFal(session, round);
 
     await finalizeRound(session, round);
   } finally {
@@ -596,6 +749,91 @@ async function runRound(session, round) {
     roundAborts.delete(round.id);
     updateGenerateUI(session, null);
     renderSessionBody(session);
+  }
+}
+
+// fal: 全員ぶんをキューに投入してから、完了を並行して待つ
+async function runRoundFal(session, round) {
+  // 1. 未送信の参加者をすべてキューに投入する
+  for (const p of session.participants) {
+    if (round.results[p.id] || round.pending[p.id]) continue;
+    if (roundAborts.has(round.id)) break;
+    try {
+      const sub = await falFetch(`https://queue.fal.run/${session.modelId}`, {
+        method: 'POST',
+        body: JSON.stringify(buildRoundInput(session, round, p)),
+      });
+      round.pending[p.id] = { status_url: sub.status_url, response_url: sub.response_url };
+    } catch (err) {
+      round.results[p.id] = { error: `送信失敗: ${err.message}` };
+    }
+    saveArena();
+    updateGenerateUI(session, round);
+  }
+
+  // 2. 全参加者の完了を並行して待つ
+  await Promise.all(session.participants.map(async (p) => {
+    const pend = round.pending[p.id];
+    if (!pend || round.results[p.id]) return;
+    try {
+      const r = await awaitRequest(pend, round.id);
+      const img = r.images?.[0];
+      if (!img) throw new Error('画像が返されませんでした');
+      round.results[p.id] = { url: img.url, width: img.width, height: img.height };
+    } catch (err) {
+      round.results[p.id] = { error: err.message };
+    }
+    delete round.pending[p.id];
+    saveArena();
+    updateGenerateUI(session, round);
+  }));
+}
+
+// Modal: 同時 1 コンテナで順に処理されるので、少しずつ投げて待つ。
+// 送信済みのジョブ ID は pending に控えてあり、同じ ID で送り直しても
+// サーバー側が無視するので、ページを閉じたあとの再開でも二重生成にならない
+async function runRoundModal(session, round) {
+  const size = roundSize(round);
+  const queue = session.participants.filter((p) => !round.results[p.id]);
+  let next = 0;
+
+  const worker = async () => {
+    while (next < queue.length) {
+      const p = queue[next++];
+      if (roundAborts.has(round.id)) return;
+      try {
+        const jobId = round.pending[p.id]?.jobId ?? makeModalJobId();
+        if (round.pending[p.id]?.jobId !== jobId) {
+          round.pending[p.id] = { jobId };
+          saveArena();
+        }
+        await modalSubmit({ ...buildModalRoundInput(session, round, p), jobId });
+        const r = await modalAwaitJob(jobId, round.id);
+        if (!r.url) throw new Error('画像が返されませんでした');
+        round.results[p.id] = {
+          url: r.url,
+          width: r.width ?? size.width,
+          height: r.height ?? size.height,
+        };
+      } catch (err) {
+        round.results[p.id] = { error: err.message };
+      }
+      delete round.pending[p.id];
+      saveArena();
+      updateGenerateUI(session, round);
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(MODAL_ROUND_CONCURRENCY, queue.length) }, worker));
+
+  // 中断したときは、まだ順番が来ていなかったぶんも結果を埋めておく
+  // （「画像 N 枚」とだけ出て、残りがどうなったのか分からないのを避ける）
+  if (roundAborts.has(round.id)) {
+    for (const p of queue) {
+      if (!round.results[p.id]) round.results[p.id] = { error: '中断されました' };
+    }
+    saveArena();
   }
 }
 
@@ -892,8 +1130,10 @@ function renderSessionHead(session) {
   els.sessionTitle.textContent = session.name;
   const groups = activeGroups(session);
   const groupText = groups.length > 1 ? ` ・ ${groups.length} グループ` : '';
+  const ckptText = session.checkpoint ? ` ・ UNet ${ckptLabel(session.checkpoint)}` : '';
   els.sessionMeta.textContent =
-    `${session.modelId} ・ ${session.participants.length} チェックポイント${groupText} ・ scale ${session.scale}`;
+    `${session.modelId} ・ ${session.participants.length} チェックポイント${groupText}`
+    + ` ・ scale ${session.scale}${ckptText}`;
 }
 
 function renderSessionBody(session) {
@@ -1416,15 +1656,14 @@ function updatePlistCount() {
   els.plistCount.textContent = `${n} 個を選択中`;
 }
 
-function openSessionDialog() {
-  dialogSetError('');
-  els.sessionName.value = `セッション ${new Date().toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}`;
-  els.sessionScale.value = '1';
-  els.sessionModel.value = ARENA_MODELS[0].id;
-  els.sessionCustomModel.value = '';
-  els.sessionCustomModelField.hidden = true;
+// いま選ばれているモデル（カスタムは fal 扱い）
+function dialogModel() {
+  return arenaModel(els.sessionModel.value);
+}
 
-  const lib = sortedLoraLibrary();
+// 参加候補の一覧。モデルの系統に合う LoRA だけを出す
+function renderPlist(base) {
+  const lib = sortedLoraLibrary(base);
   els.plist.innerHTML = '';
   els.rangeStart.innerHTML = '';
   els.rangeEnd.innerHTML = '';
@@ -1451,10 +1690,54 @@ function openSessionDialog() {
   });
   if (lib.length > 0) els.rangeEnd.value = String(lib.length - 1);
   updatePlistCount();
+  return lib;
+}
 
-  if (lib.length === 0) {
-    dialogSetError('LoRA ライブラリが空です。生成画面の「Hugging Face から一括登録」などでチェックポイントを登録してください。');
+// チェックポイント指定版で使う UNet の候補（登録は生成画面で行う）
+function populateSessionCkpt(base) {
+  const prev = els.sessionCkpt.value;
+  els.sessionCkpt.innerHTML = '';
+  const defOpt = document.createElement('option');
+  defOpt.value = '';
+  defOpt.textContent = `既定（${DEFAULT_CKPTS[base] ?? DEFAULT_CKPTS[DEFAULT_CKPT_BASE]}）`;
+  els.sessionCkpt.appendChild(defOpt);
+  for (const item of ckptsForBase(base)) {
+    const opt = document.createElement('option');
+    opt.value = item.path;
+    opt.textContent = item.name;
+    opt.title = item.path;
+    els.sessionCkpt.appendChild(opt);
   }
+  els.sessionCkpt.value = prev;
+  if (els.sessionCkpt.value !== prev) els.sessionCkpt.value = '';
+}
+
+// モデルを変えると、使える LoRA もチェックポイントも変わる
+function syncSessionModelFields() {
+  const model = dialogModel();
+  els.sessionCustomModelField.hidden = els.sessionModel.value !== '__custom__';
+  els.sessionCkptField.hidden = !model?.ckpt;
+  if (model?.ckpt) populateSessionCkpt(model.ckptBase ?? DEFAULT_CKPT_BASE);
+
+  const base = model?.loraBase ?? DEFAULT_LORA_BASE;
+  if (els.plist.dataset.base !== base) {
+    els.plist.dataset.base = base;
+    const lib = renderPlist(base);
+    dialogSetError(lib.length === 0
+      ? 'このモデルの系統に合う LoRA がライブラリにありません。生成画面の「Hugging Face から一括登録」などで登録してください。'
+      : '');
+  }
+}
+
+function openSessionDialog() {
+  dialogSetError('');
+  els.sessionName.value = `セッション ${new Date().toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}`;
+  els.sessionScale.value = '1';
+  els.sessionModel.value = ARENA_MODELS[0].id;
+  els.sessionCustomModel.value = '';
+  els.sessionCkpt.value = '';
+  delete els.plist.dataset.base; // モデルが同じでも一覧は作り直す（登録が増えている）
+  syncSessionModelFields();
   els.sessionDialog.showModal();
 }
 
@@ -1486,10 +1769,16 @@ function createSessionFromDialog() {
   }
   const scale = Number(els.sessionScale.value);
 
+  const model = dialogModel();
   const session = {
     id: makeId('s'),
     name: els.sessionName.value.trim() || 'セッション',
     modelId,
+    // 自前ホスト（Modal）は送り先も送る形も別物。あとでモデル一覧から消えても
+    // 動くように、セッションに控えておく
+    ...(model?.provider === 'modal' ? { provider: 'modal', modalEndpoint: model.endpoint } : {}),
+    ...(model?.cfgMax != null ? { cfgMax: model.cfgMax } : {}),
+    ...(model?.ckpt && els.sessionCkpt.value ? { checkpoint: els.sessionCkpt.value } : {}),
     scale: Number.isFinite(scale) && scale > 0 ? scale : 1,
     createdAt: Date.now(),
     participants: paths.map((path, i) => ({ id: `p${i + 1}`, path })),
@@ -1512,9 +1801,7 @@ function initSessionDialog() {
     opt.textContent = m.name;
     els.sessionModel.appendChild(opt);
   }
-  els.sessionModel.addEventListener('change', () => {
-    els.sessionCustomModelField.hidden = els.sessionModel.value !== '__custom__';
-  });
+  els.sessionModel.addEventListener('change', syncSessionModelFields);
 
   els.rangeAddBtn.addEventListener('click', applyRangeSelection);
   els.plistAllBtn.addEventListener('click', () => {

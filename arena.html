@@ -19,6 +19,7 @@
 <script src="store.js" defer></script>
 <script src="lora-library.js" defer></script>
 <script src="device-sync.js" defer></script>
+<script src="modal-errors.js" defer></script>
 <script src="arena-chart.js" defer></script>
 <script src="arena.js" defer></script>
 </head>
@@ -174,6 +175,11 @@
     <label class="field" id="sessionCustomModelField" hidden>
       <span class="label">カスタムモデル ID</span>
       <input id="sessionCustomModel" type="text" placeholder="fal-ai/..." spellcheck="false">
+    </label>
+
+    <label class="field" id="sessionCkptField" hidden>
+      <span class="label">チェックポイント（UNet）</span>
+      <select id="sessionCkpt" title="このセッションの全ラウンドで使う UNet。登録は生成画面の「チェックポイント」欄から行います"></select>
     </label>
 
     <div class="field">
