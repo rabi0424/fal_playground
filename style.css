@@ -616,6 +616,16 @@ details.lora-accordion { display: block; }
 
 .lora-accordion > :not(summary) { margin-top: 8px; }
 
+/* 畳んでいる間だけ、summary に今の選択内容を添える（開けば中身で分かる） */
+.accordion-note {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.accordion-note:not(:empty)::before { content: "："; }
+
+.lora-accordion[open] > summary .accordion-note { display: none; }
+
 .lora-list {
   display: flex;
   flex-direction: column;

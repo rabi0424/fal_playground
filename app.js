@@ -117,6 +117,8 @@ const els = {
   ckptUnregBtn: $('#ckptUnregBtn'),
   ckptHfBtn: $('#ckptHfBtn'),
   ckptCivitaiBtn: $('#ckptCivitaiBtn'),
+  ckptLabel: $('#ckptLabel'),
+  ckptSummaryNote: $('#ckptSummaryNote'),
   prompt: $('#prompt'),
   loraField: $('#loraField'),
   loraLabel: $('#loraLabel'),
@@ -856,6 +858,29 @@ function syncCkptRow() {
   els.ckptPath.hidden = !urlMode;
   // 既定・直接入力では「登録解除」を出さない
   els.ckptUnregBtn.hidden = urlMode || els.ckptSelect.value === '';
+  syncCkptAccordion();
+}
+
+// 畳んだときに何を使うのか分かるよう、summary に今の選択を添える
+function ckptSummaryText() {
+  if (els.ckptSelect.value === LORA_URL_OPTION) {
+    const value = els.ckptPath.value.trim();
+    return value ? ckptDisplayName(value) : '直接入力';
+  }
+  return els.ckptSelect.selectedOptions[0]?.textContent ?? '';
+}
+
+// 自分で開閉したあとは、その状態を尊重する（登録・モデル変更で勝手に畳まない）
+let ckptToggledByUser = false;
+
+function syncCkptAccordion() {
+  els.ckptSummaryNote.textContent = ckptSummaryText();
+  // 選べるものが既定の 1 つだけなら、開いていても選びようがないので畳んでおく
+  // （「URL / ファイル名を入力…」は選択肢ではなく入力欄の呼び出しなので数えない）。
+  // ただし既定以外を使っているときは、隠さずに見せる
+  if (!ckptToggledByUser) {
+    els.ckptField.open = sortedCkptLibrary().length > 0 || els.ckptSelect.value !== '';
+  }
 }
 
 // 生成に使うチェックポイント指定（空文字なら既定 = フィールド省略）
@@ -866,8 +891,10 @@ function selectedCkpt() {
 }
 
 function initCkptField() {
+  els.ckptLabel.addEventListener('click', () => { ckptToggledByUser = true; });
   populateCkptSelect('');
   els.ckptSelect.addEventListener('change', syncCkptRow);
+  els.ckptPath.addEventListener('input', syncCkptAccordion);
 
   // URL を入力したら自動登録して、その項目を選択状態にする
   //（素のファイル名は登録せずそのまま送る: Volume に既にあるものを指す用途）
