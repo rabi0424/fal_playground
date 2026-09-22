@@ -505,6 +505,20 @@ function addLoraRow(path = '', scale, listEl = els.loraList, off = false) {
   select.className = 'lora-select';
   head.appendChild(select);
 
+  // お気に入りの付け外し。★ を付けたものは候補の先頭に並ぶ
+  //（ライブラリ管理画面を開かなくても、使いながら整理できるように）
+  const favBtn = document.createElement('button');
+  favBtn.className = 'lib-star lora-fav';
+  favBtn.type = 'button';
+  favBtn.textContent = '★';
+  favBtn.addEventListener('click', () => {
+    const current = select.value;
+    if (current === LORA_URL_OPTION) return;
+    loraLib.toggleFav(current);
+    refreshLoraSelects(); // 並び順と★印をすべての行に反映する
+  });
+  head.appendChild(favBtn);
+
   const delBtn = document.createElement('button');
   delBtn.className = 'ghost-btn small';
   delBtn.type = 'button';
@@ -704,7 +718,19 @@ function syncLoraRow(row) {
   const urlMode = path === LORA_URL_OPTION;
   row.querySelector('.lora-path').hidden = !urlMode;
   row.querySelector('.lora-unreg').hidden = urlMode;
+  syncLoraFavBtn(row, urlMode ? '' : path);
   renderLoraTrigger(row, urlMode ? '' : path);
+}
+
+// ★ ボタンの状態。URL 直接入力（未登録）のときは付けようがないので隠す
+function syncLoraFavBtn(row, path) {
+  const btn = row.querySelector('.lora-fav');
+  if (!btn) return;
+  btn.hidden = !path;
+  const on = !!path && loraLib.isFav(path);
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', String(on));
+  btn.title = on ? 'お気に入りから外す' : 'お気に入りに入れる（候補の先頭に並びます）';
 }
 
 // 選択中の LoRA のトリガーワードと、プロンプトへ足すボタン

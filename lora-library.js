@@ -129,6 +129,26 @@ function baseChoices(selected, extras = []) {
   return out;
 }
 
+// お気に入り（★）。付けたものは sorted() が先頭へ回すので、どの画面でも
+// 候補の上に並ぶ。付け外しはライブラリ管理画面と各画面の LoRA 行から行う
+function isFav(path) {
+  return !!entry(path)?.fav;
+}
+
+function setFav(path, on) {
+  const items = load();
+  const item = items.find((i) => i.path === path);
+  if (!item) return false;
+  if (on) item.fav = true;
+  else delete item.fav;
+  save(items); // 利用者の操作なので、書けなかったことは飲み込まない
+  return !!on;
+}
+
+function toggleFav(path) {
+  return setFav(path, !isFav(path));
+}
+
 // ★ を先頭に、あとは表示名順（数字は数値として比較する）
 function sorted(items = load()) {
   return [...items].sort((a, b) => {
@@ -216,6 +236,9 @@ window.loraLib = {
   baseChoices,
   sorted,
   forBase,
+  isFav,
+  setFav,
+  toggleFav,
   register,
   unregister,
   migrate,

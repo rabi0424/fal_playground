@@ -695,6 +695,12 @@ details.lora-accordion { display: block; }
   min-width: 0;
 }
 
+/* LoRA 行の ★（お気に入り）。ライブラリ管理画面の★と同じ見た目・同じ意味 */
+.lora-fav {
+  align-self: center;
+  cursor: pointer;
+}
+
 /* 有効 / 無効の切り替え。押すたびに入れ替わるので、ボタンには「今の状態」を出す */
 .lora-onoff {
   flex-shrink: 0;

@@ -169,4 +169,32 @@ check('空は null', loraLib.baseKind(''), null);
   check('容量あふれは日本語で伝える', message.includes('保存領域がいっぱい'), true);
 }
 
+/* ---- お気に入り（★） ---- */
+
+// 付けたものは sorted() の先頭に来る（どの画面でも候補の上に並ぶ）
+{
+  const store = {};
+  const lib = loadLib(store);
+  const a = 'https://huggingface.co/owner/repo/resolve/main/aaa.safetensors';
+  const z = 'https://huggingface.co/owner/repo/resolve/main/zzz.safetensors';
+  lib.register(a);
+  lib.register(z);
+  checkList('既定は表示名順', Array.from(lib.sorted(), (i) => i.path), [a, z]);
+
+  check('付ける前は false', lib.isFav(z), false);
+  check('toggleFav は新しい状態を返す', lib.toggleFav(z), true);
+  check('付けたら isFav が true', lib.isFav(z), true);
+  checkList('★ が先頭に来る', Array.from(lib.sorted(), (i) => i.path), [z, a]);
+  check('保存もされる', JSON.parse(store.fal_lora_library).find((i) => i.path === z).fav, true);
+
+  check('外すと false に戻る', lib.toggleFav(z), false);
+  checkList('外すと表示名順に戻る', Array.from(lib.sorted(), (i) => i.path), [a, z]);
+  check('外したら項目に fav は残らない',
+    'fav' in JSON.parse(store.fal_lora_library).find((i) => i.path === z), false);
+
+  // 未登録の path に付けようとしても、ライブラリを壊さない
+  check('未登録には付かない', lib.setFav('https://huggingface.co/x/y/resolve/main/none.safetensors', true), false);
+  check('件数は変わらない', lib.load().length, 2);
+}
+
 console.log(`ok: ${passed} checks passed`);

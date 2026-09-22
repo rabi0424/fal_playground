@@ -368,9 +368,23 @@ function refreshLoraRows() {
     const select = row.querySelector('.lora-select');
     populateLoraSelect(select, select.value);
     row.querySelector('.lora-path').hidden = select.value !== LORA_NAME_OPTION;
+    syncLoraFavBtn(row);
     renderRowTrigger(row);
   }
   syncAddLoraBtn();
+}
+
+// ★ ボタンの状態。名前を直接入力した行はライブラリに無いので隠す
+function syncLoraFavBtn(row) {
+  const btn = row.querySelector('.lora-fav');
+  if (!btn) return;
+  const path = row.querySelector('.lora-select').value;
+  const known = !!path && path !== LORA_NAME_OPTION;
+  btn.hidden = !known;
+  const on = known && loraLib.isFav(path);
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', String(on));
+  btn.title = on ? 'お気に入りから外す' : 'お気に入りに入れる（候補の先頭に並びます）';
 }
 
 function addLoraRow(path = '', scale, off = false) {
@@ -397,6 +411,18 @@ function addLoraRow(path = '', scale, off = false) {
   select.className = 'lora-select';
   populateLoraSelect(select, path);
   head.appendChild(select);
+
+  // お気に入りの付け外し（生成画面と同じ）。★ を付けたものは候補の先頭に並ぶ
+  const favBtn = document.createElement('button');
+  favBtn.className = 'lib-star lora-fav';
+  favBtn.type = 'button';
+  favBtn.textContent = '★';
+  favBtn.addEventListener('click', () => {
+    const current = select.value;
+    if (current === LORA_NAME_OPTION) return;
+    loraLib.toggleFav(current); // onChange → refreshLoraRows で並び順も★印も入れ替わる
+  });
+  head.appendChild(favBtn);
 
   const delBtn = document.createElement('button');
   delBtn.className = 'ghost-btn small';
@@ -469,6 +495,7 @@ function addLoraRow(path = '', scale, off = false) {
   select.addEventListener('change', () => {
     nameInput.hidden = select.value !== LORA_NAME_OPTION;
     if (select.value === LORA_NAME_OPTION) nameInput.focus();
+    syncLoraFavBtn(row);
     if (!row.dataset.scaleTouched && select.value !== LORA_NAME_OPTION) {
       const def = loraDefaultScale(select.value);
       slider.value = String(def);
@@ -479,6 +506,7 @@ function addLoraRow(path = '', scale, off = false) {
   });
 
   els.loraList.appendChild(row);
+  syncLoraFavBtn(row);
   renderRowTrigger(row);
   syncAddLoraBtn();
 }
