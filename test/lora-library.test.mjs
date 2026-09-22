@@ -240,4 +240,41 @@ check('空は null', loraLib.baseKind(''), null);
     Array.from(lib.forBase(null), (i) => i.path).sort(), paths.slice(0, 2));
 }
 
+/* ---- トリガーワードの挿入 ---- */
+
+// 末尾（既定）: 区切りを二重にしない
+check('空なら語だけ', loraLib.insertTriggers('', ['ohwx'], 'end'), 'ohwx');
+check('末尾に足す', loraLib.insertTriggers('a cat', ['ohwx'], 'end'), 'a cat, ohwx');
+check('末尾がカンマなら空白だけ', loraLib.insertTriggers('a cat,', ['ohwx'], 'end'), 'a cat, ohwx');
+check('読点でも同じ', loraLib.insertTriggers('猫、', ['ohwx'], 'end'), '猫、 ohwx');
+
+// 冒頭: 先頭の区切りは食わせる
+check('冒頭に足す', loraLib.insertTriggers('a cat', ['ohwx'], 'head'), 'ohwx, a cat');
+check('複数語もまとめて', loraLib.insertTriggers('a cat', ['ohwx', 'zwx'], 'head'), 'ohwx, zwx, a cat');
+check('先頭のカンマは食う', loraLib.insertTriggers(', a cat', ['ohwx'], 'head'), 'ohwx, a cat');
+check('冒頭でも空なら語だけ', loraLib.insertTriggers('  ', ['ohwx'], 'head'), 'ohwx');
+
+// 既に書かれている語は足さない（足すものが無ければ null）
+check('入っていれば null', loraLib.insertTriggers('a ohwx cat', ['ohwx'], 'head'), null);
+check('大文字小文字は問わない', loraLib.insertTriggers('a OHWX cat', ['ohwx'], 'end'), null);
+check('足りない語だけ入れる',
+  loraLib.insertTriggers('a ohwx cat', ['ohwx', 'zwx'], 'end'), 'a ohwx cat, zwx');
+check('語が無ければ null', loraLib.insertTriggers('a cat', [], 'end'), null);
+
+// 位置と自動挿入は LoRA ごとの設定（未設定は末尾・自動なし）
+{
+  const lib = loadLib({});
+  const p = 'https://huggingface.co/owner/repo/resolve/main/t.safetensors';
+  lib.register(p);
+  check('既定は末尾', lib.triggerPlace(p), 'end');
+  check('既定は自動なし', lib.triggerAuto(p), false);
+  const items = lib.load();
+  items[0].triggerPlace = 'head';
+  items[0].triggerAuto = true;
+  lib.save(items);
+  check('冒頭を覚える', lib.triggerPlace(p), 'head');
+  check('自動を覚える', lib.triggerAuto(p), true);
+  check('未登録は既定', lib.triggerPlace('https://huggingface.co/x/y/resolve/main/none.safetensors'), 'end');
+}
+
 console.log(`ok: ${passed} checks passed`);

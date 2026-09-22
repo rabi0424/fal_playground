@@ -451,7 +451,47 @@ function renderEditor(item) {
     scheduleSave(item.path, (i) => { i.trigger = trigInput.value; });
   });
   box.appendChild(field('トリガーワード', trigInput,
-    'カンマ区切り。生成画面の「挿入」でプロンプト末尾に足せます。'));
+    'カンマ区切り。生成画面と画像編集の「挿入」でプロンプトに足せます。'));
+
+  /* トリガーワードの入れ方 */
+  // 位置と自動挿入は 1 組で考えるものなので、同じ欄にまとめる
+  const trigOpts = document.createElement('div');
+  trigOpts.className = 'lib-trigger-opts';
+
+  const placeSelect = document.createElement('select');
+  for (const [value, text] of [['end', '末尾に足す（既定）'], ['head', '冒頭に足す']]) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = text;
+    placeSelect.appendChild(opt);
+  }
+  placeSelect.value = item.triggerPlace === 'head' ? 'head' : 'end';
+  placeSelect.addEventListener('change', () => {
+    scheduleSave(item.path, (i) => {
+      if (placeSelect.value === 'head') i.triggerPlace = 'head';
+      else delete i.triggerPlace;
+    });
+  });
+  trigOpts.appendChild(placeSelect);
+
+  const autoLabel = document.createElement('label');
+  autoLabel.className = 'check-row';
+  const autoCheck = document.createElement('input');
+  autoCheck.type = 'checkbox';
+  autoCheck.checked = !!item.triggerAuto;
+  autoCheck.addEventListener('change', () => {
+    scheduleSave(item.path, (i) => {
+      if (autoCheck.checked) i.triggerAuto = true;
+      else delete i.triggerAuto;
+    });
+  });
+  const autoText = document.createElement('span');
+  autoText.textContent = 'この LoRA を選んだら自動で入れる';
+  autoLabel.append(autoCheck, autoText);
+  trigOpts.appendChild(autoLabel);
+
+  box.appendChild(field('トリガーワードの入れ方', trigOpts,
+    '自動挿入は、LoRA 行に追加したときとプルダウンで選び直したときに走ります（すでに書かれている語は足しません）。下書きの復元や履歴からの再利用では走りません。'));
 
   /* 既定 scale */
   const scaleWrap = document.createElement('div');

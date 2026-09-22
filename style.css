@@ -2850,6 +2850,17 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 .lib-eye:hover { opacity: 0.75; }
 .lib-eye.on { opacity: 0.8; }
 
+/* トリガーワードの入れ方（挿入位置 + 自動挿入）。狭い画面では縦に折る */
+.lib-trigger-opts {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.lib-trigger-opts select { width: auto; }
+.lib-trigger-opts .check-row { color: var(--muted); }
+
 /* 非表示にしたものは、一覧でもそれと分かるように薄くする */
 .lib-card.is-hidden .lib-name { color: var(--muted); }
 

@@ -165,6 +165,35 @@ function isFav(path) {
 const setFav = (path, on) => setFlag(path, 'fav', on);
 const toggleFav = (path) => setFav(path, !isFav(path));
 
+// トリガーワードの挿入位置。既定は末尾で、'head' を選んだものだけ冒頭に入る
+// （構図や画風を決める語のように、先頭にあるほど効く指定のためのもの）
+function triggerPlace(path) {
+  return entry(path)?.triggerPlace === 'head' ? 'head' : 'end';
+}
+
+// その LoRA を行に選んだとき、トリガーワードを自動で入れるか
+function triggerAuto(path) {
+  return !!entry(path)?.triggerAuto;
+}
+
+// まだ入っていない語だけを place 側に足した本文を返す。足すものが無ければ null
+//（＝呼ぶ側は何もしない）。プロンプト欄を持つ画面が同じ挙動になるよう、
+// 文字列の組み立てはここに 1 つだけ置く
+function insertTriggers(text, words, place = 'end') {
+  const current = String(text ?? '');
+  const lower = current.toLowerCase();
+  const missing = (words ?? []).filter((w) => w && !lower.includes(String(w).toLowerCase()));
+  if (missing.length === 0) return null;
+
+  const add = missing.join(', ');
+  if (current.trim() === '') return add;
+  if (place === 'head') {
+    // 先頭の区切り文字は食わせる（", , foo" にしない）
+    return `${add}, ${current.replace(/^[\s,、]+/, '')}`;
+  }
+  return current + (/[,、]\s*$/.test(current) ? ' ' : ', ') + add;
+}
+
 // 非表示。**候補から外すだけ**で、レコードも付けた情報（表示名・トリガー
 // ワード・既定 scale・メモ）もそのまま残る。使わなくなったチェックポイントを
 // 削除せずに畳んでおくためのもので、戻すのはライブラリ管理画面の「非表示」から
@@ -258,6 +287,9 @@ window.loraLib = {
   labelOf,
   defaultScale,
   triggerWords,
+  triggerPlace,
+  triggerAuto,
+  insertTriggers,
   baseKind,
   baseLabel: (kind) => BASE_LABELS[kind] ?? kind,
   baseKinds: () => [...BASE_KINDS],

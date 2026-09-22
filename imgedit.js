@@ -387,7 +387,8 @@ function syncLoraFavBtn(row) {
   btn.title = on ? 'お気に入りから外す' : 'お気に入りに入れる（候補の先頭に並びます）';
 }
 
-function addLoraRow(path = '', scale, off = false) {
+// auto: 利用者が自分で足した行かどうか。復元では自動挿入を走らせない
+function addLoraRow(path = '', scale, off = false, auto = false) {
   const library = sortedLoraLibrary();
   // 名前で指定できるプロバイダなら、ライブラリが空でも行は作れる
   const byName = !!provider().loraByName;
@@ -502,6 +503,7 @@ function addLoraRow(path = '', scale, off = false) {
       num.value = String(def);
     }
     renderRowTrigger(row);
+    autoInsertTriggers(select.value);
     saveForm();
   });
 
@@ -509,6 +511,7 @@ function addLoraRow(path = '', scale, off = false) {
   syncLoraFavBtn(row);
   renderRowTrigger(row);
   syncAddLoraBtn();
+  if (auto) autoInsertTriggers(select.value);
 }
 
 // 選択中の LoRA のトリガーワードと、プロンプトへ足すボタン
@@ -526,23 +529,29 @@ function renderRowTrigger(row) {
     chip.textContent = word;
     box.appendChild(chip);
   }
+  const place = loraLib.triggerPlace(path);
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'ghost-btn small';
   btn.textContent = '挿入';
-  btn.title = 'トリガーワードを指示文の末尾に追加します';
-  btn.addEventListener('click', () => insertTriggerWords(words));
+  btn.title = `トリガーワードを指示文の${place === 'head' ? '冒頭' : '末尾'}に追加します`;
+  btn.addEventListener('click', () => insertTriggerWords(words, place));
   box.appendChild(btn);
 }
 
-function insertTriggerWords(words) {
-  const current = els.prompt.value;
-  const lower = current.toLowerCase();
-  const missing = words.filter((w) => !lower.includes(w.toLowerCase()));
-  if (missing.length === 0) return;
-  const sep = current.trim() === '' ? '' : (/[,、]\s*$/.test(current) ? ' ' : ', ');
-  els.prompt.value = current + sep + missing.join(', ');
+// 入れる位置（末尾 / 冒頭）は LoRA ごとの設定（ライブラリ管理で変えられる）
+function insertTriggerWords(words, place = 'end') {
+  const next = loraLib.insertTriggers(els.prompt.value, words, place);
+  if (next === null) return;
+  els.prompt.value = next;
   saveForm();
+}
+
+// 「選んだら自動で入れる」LoRA のトリガーワードを入れる。
+// 下書きの復元では呼ばない（保存した文面をそのまま出すため）
+function autoInsertTriggers(path) {
+  if (!path || path === LORA_NAME_OPTION || !loraLib.triggerAuto(path)) return;
+  insertTriggerWords(loraTriggerWords(path), loraLib.triggerPlace(path));
 }
 
 function syncAddLoraBtn() {
@@ -4539,7 +4548,7 @@ for (const type of ['dragleave', 'drop']) {
 }
 els.uploadArea.addEventListener('drop', (e) => loadFile(e.dataTransfer?.files?.[0]));
 
-els.addLoraBtn.addEventListener('click', () => addLoraRow());
+els.addLoraBtn.addEventListener('click', () => addLoraRow('', undefined, false, true));
 els.civitaiBtn.addEventListener('click', () => civitaiImport.open('lora'));
 els.rwAddLoraBtn.addEventListener('click', () => addRwLoraRow());
 els.rwPickLoraBtn.addEventListener('click', () => runwareLora.open());

@@ -480,7 +480,8 @@ function updateCustomSize() {
 
 /* ---------- LoRA ---------- */
 
-function addLoraRow(path = '', scale, listEl = els.loraList, off = false) {
+// auto: 利用者が自分で足した行かどうか。復元では自動挿入を走らせない
+function addLoraRow(path = '', scale, listEl = els.loraList, off = false, auto = false) {
   // 履歴の再利用などで未登録の URL が来たら自動登録する。
   // ベースモデルは今選んでいるモデルのものとして控える（候補の絞り込みに使う）
   if (path) registerLora(path, currentBaseMeta());
@@ -607,6 +608,9 @@ function addLoraRow(path = '', scale, listEl = els.loraList, off = false) {
       num.value = String(def);
     }
     syncLoraRow(row);
+    // 比較モードの試行ごとの LoRA は、1 つのプロンプトを共有していて
+    // 全部の語を混ぜると比較にならないので、共通 LoRA の行だけを対象にする
+    if (listEl === els.loraList) autoInsertTriggers(select.value);
   });
   for (const input of [slider, num]) {
     input.addEventListener('input', () => { row.dataset.scaleTouched = '1'; });
@@ -624,6 +628,7 @@ function addLoraRow(path = '', scale, listEl = els.loraList, off = false) {
 
   listEl.appendChild(row);
   syncLoraRow(row);
+  if (auto && listEl === els.loraList) autoInsertTriggers(select.value);
 }
 
 function loadLoraLibrary() {
@@ -761,24 +766,30 @@ function renderLoraTrigger(row, path) {
     chip.textContent = word;
     box.appendChild(chip);
   }
+  const place = loraLib.triggerPlace(path);
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'ghost-btn small';
   btn.textContent = '挿入';
-  btn.title = 'トリガーワードをプロンプトの末尾に追加します';
-  btn.addEventListener('click', () => insertTriggerWords(words));
+  btn.title = `トリガーワードをプロンプトの${place === 'head' ? '冒頭' : '末尾'}に追加します`;
+  btn.addEventListener('click', () => insertTriggerWords(words, place));
   box.appendChild(btn);
 }
 
-// プロンプト末尾にトリガーワードを足す。既に書かれている語は足さない
-function insertTriggerWords(words) {
-  const current = els.prompt.value;
-  const lower = current.toLowerCase();
-  const missing = words.filter((w) => !lower.includes(w.toLowerCase()));
-  if (missing.length === 0) return;
-  const sep = current.trim() === '' ? '' : (/[,、]\s*$/.test(current) ? ' ' : ', ');
-  els.prompt.value = current + sep + missing.join(', ');
+// トリガーワードをプロンプトに足す。既に書かれている語は足さない。
+// 入れる位置（末尾 / 冒頭）は LoRA ごとの設定（ライブラリ管理で変えられる）
+function insertTriggerWords(words, place = 'end') {
+  const next = loraLib.insertTriggers(els.prompt.value, words, place);
+  if (next === null) return;
+  els.prompt.value = next;
   els.prompt.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+// 「選んだら自動で入れる」LoRA のトリガーワードを入れる。
+// 下書きの復元や履歴の再利用では呼ばない（保存した文面をそのまま出すため）
+function autoInsertTriggers(path) {
+  if (!path || path === LORA_URL_OPTION || !loraLib.triggerAuto(path)) return;
+  insertTriggerWords(loraTriggerWords(path), loraLib.triggerPlace(path));
 }
 
 function collectLorasFrom(listEl) {
@@ -2805,7 +2816,7 @@ document.addEventListener('visibilitychange', () => {
 els.generateBtn.addEventListener('click', generate);
 // 生成完了時に出る「生成結果へ」。押されたときだけ結果まで送る
 els.jumpResult?.addEventListener('click', scrollToDetail);
-els.addLoraBtn.addEventListener('click', () => addLoraRow());
+els.addLoraBtn.addEventListener('click', () => addLoraRow('', undefined, els.loraList, false, true));
 els.compareToggle.addEventListener('change', () => setCompareMode(els.compareToggle.checked));
 els.addVariantBtn.addEventListener('click', () => addVariant());
 
