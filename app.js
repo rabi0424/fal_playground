@@ -671,9 +671,14 @@ function populateLoraSelect(select, selected) {
   const items = sortedLoraLibrary();
   const known = new Set(items.map((i) => i.path));
   if (selected && selected !== LORA_URL_OPTION && !known.has(selected) && loraLib.entry(selected)) {
+    // 候補から外れていても選択は失わせない。外れている理由を添える
+    //（別のベースモデル向け / 非表示。両方ならベースモデルのほうが重い）
+    const wrongBase = loraLib.baseKind(loraLib.entry(selected).base) !== modelLoraBase();
     const opt = document.createElement('option');
     opt.value = selected;
-    opt.textContent = `⚠ ${loraLabel(selected)}（このモデル向けではありません）`;
+    opt.textContent = wrongBase
+      ? `⚠ ${loraLabel(selected)}（このモデル向けではありません）`
+      : `${loraLabel(selected)}（非表示）`;
     opt.title = selected;
     select.appendChild(opt);
   }
@@ -692,13 +697,21 @@ function populateLoraSelect(select, selected) {
   if (select.value !== selected) select.value = LORA_URL_OPTION;
 }
 
-// 別のベースモデル向けで隠した件数を知らせる（黙って消えると混乱するため）
+// 候補から外した件数を知らせる（黙って消えると混乱するため）。
+// 外す理由は「別のベースモデル向け」と「非表示にしたもの」の 2 つ
 function syncLoraFilterHint() {
   const want = modelLoraBase();
-  const hidden = want ? loraLib.load().filter((i) => loraLib.baseKind(i.base) !== want).length : 0;
-  els.loraFilterHint.hidden = hidden === 0;
-  els.loraFilterHint.textContent = hidden === 0 ? ''
-    : `${loraLib.baseLabel(want)} 以外の LoRA ${hidden} 件は候補から外しています（ベースモデルはライブラリ管理で直せます）`;
+  const all = loraLib.load();
+  const otherBase = want ? all.filter((i) => !i.hidden && loraLib.baseKind(i.base) !== want).length : 0;
+  const hidden = all.filter((i) => i.hidden && (!want || loraLib.baseKind(i.base) === want)).length;
+  const parts = [];
+  if (otherBase > 0) {
+    parts.push(`${loraLib.baseLabel(want)} 以外の LoRA ${otherBase} 件`);
+  }
+  if (hidden > 0) parts.push(`非表示にした ${hidden} 件`);
+  els.loraFilterHint.hidden = parts.length === 0;
+  els.loraFilterHint.textContent = parts.length === 0 ? ''
+    : `${parts.join(' と ')}は候補から外しています（ライブラリ管理で直せます）`;
 }
 
 function refreshLoraSelects() {

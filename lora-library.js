@@ -129,25 +129,52 @@ function baseChoices(selected, extras = []) {
   return out;
 }
 
+// 印（fav / hidden）の付け外し。false は持たせずキーごと消すので、
+// 付けていないものは今までどおり項目が増えない
+function setFlag(path, key, on) {
+  const items = load();
+  const item = items.find((i) => i.path === path);
+  if (!item) return false;
+  if (on) item[key] = true;
+  else delete item[key];
+  save(items); // 利用者の操作なので、書けなかったことは飲み込まない
+  return !!on;
+}
+
+// 一括用。何件でも保存は 1 回（同期にも 1 回ぶんしか流れない）
+function setFlagMany(paths, key, on) {
+  const want = new Set(paths);
+  const items = load();
+  let changed = 0;
+  for (const item of items) {
+    if (!want.has(item.path) || !!item[key] === !!on) continue;
+    if (on) item[key] = true;
+    else delete item[key];
+    changed++;
+  }
+  if (changed > 0) save(items);
+  return changed;
+}
+
 // お気に入り（★）。付けたものは sorted() が先頭へ回すので、どの画面でも
 // 候補の上に並ぶ。付け外しはライブラリ管理画面と各画面の LoRA 行から行う
 function isFav(path) {
   return !!entry(path)?.fav;
 }
 
-function setFav(path, on) {
-  const items = load();
-  const item = items.find((i) => i.path === path);
-  if (!item) return false;
-  if (on) item.fav = true;
-  else delete item.fav;
-  save(items); // 利用者の操作なので、書けなかったことは飲み込まない
-  return !!on;
+const setFav = (path, on) => setFlag(path, 'fav', on);
+const toggleFav = (path) => setFav(path, !isFav(path));
+
+// 非表示。**候補から外すだけ**で、レコードも付けた情報（表示名・トリガー
+// ワード・既定 scale・メモ）もそのまま残る。使わなくなったチェックポイントを
+// 削除せずに畳んでおくためのもので、戻すのはライブラリ管理画面の「非表示」から
+function isHidden(path) {
+  return !!entry(path)?.hidden;
 }
 
-function toggleFav(path) {
-  return setFav(path, !isFav(path));
-}
+const setHidden = (path, on) => setFlag(path, 'hidden', on);
+const toggleHidden = (path) => setHidden(path, !isHidden(path));
+const setHiddenMany = (paths, on) => setFlagMany(paths, 'hidden', on);
 
 // ★ を先頭に、あとは表示名順（数字は数値として比較する）
 function sorted(items = load()) {
@@ -157,9 +184,10 @@ function sorted(items = load()) {
   });
 }
 
-// そのモデルで使えるものだけ。want が null なら制限しない
-function forBase(want) {
-  const all = sorted();
+// そのモデルで使えるものだけ。want が null なら制限しない。
+// 非表示にしたものは既定で外す（一覧に出すのはライブラリ管理画面だけ）
+function forBase(want, { includeHidden = false } = {}) {
+  const all = sorted().filter((item) => includeHidden || !item.hidden);
   return want ? all.filter((item) => baseKind(item.base) === want) : all;
 }
 
@@ -239,6 +267,10 @@ window.loraLib = {
   isFav,
   setFav,
   toggleFav,
+  isHidden,
+  setHidden,
+  toggleHidden,
+  setHiddenMany,
   register,
   unregister,
   migrate,

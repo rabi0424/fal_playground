@@ -2835,6 +2835,24 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 .lib-star.on { color: #eab308; }
 .lib-star:active { transform: scale(1.25); }
 
+/* 非表示の付け外し。押せることが分かる程度の主張でよいので★より控えめに */
+.lib-eye {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  flex-shrink: 0;
+  cursor: pointer;
+  opacity: 0.35;
+  transition: opacity var(--dur-quick) ease;
+}
+.lib-eye:hover { opacity: 0.75; }
+.lib-eye.on { opacity: 0.8; }
+
+/* 非表示にしたものは、一覧でもそれと分かるように薄くする */
+.lib-card.is-hidden .lib-name { color: var(--muted); }
+
 .lib-badge {
   font-size: 11px;
   border-radius: 5px;

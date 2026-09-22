@@ -197,4 +197,47 @@ check('空は null', loraLib.baseKind(''), null);
   check('件数は変わらない', lib.load().length, 2);
 }
 
+/* ---- 非表示 ---- */
+
+// 候補（forBase）からは外れるが、レコードと付けた情報は残る
+{
+  const store = {};
+  const lib = loadLib(store);
+  const keep = 'https://huggingface.co/owner/repo/resolve/main/keep.safetensors';
+  const gone = 'https://huggingface.co/owner/repo/resolve/main/gone.safetensors';
+  lib.register(keep, { base: 'Krea 2' });
+  lib.register(gone, { base: 'Krea 2' });
+
+  check('既定は表示', lib.isHidden(gone), false);
+  check('隠すと true', lib.toggleHidden(gone), true);
+  checkList('候補からは消える', Array.from(lib.forBase('krea2'), (i) => i.path), [keep]);
+  checkList('includeHidden なら出る',
+    Array.from(lib.forBase('krea2', { includeHidden: true }), (i) => i.path).sort(), [gone, keep]);
+  check('レコードは残る', lib.load().length, 2);
+  check('付けた情報も残る', lib.entry(gone).base, 'Krea 2');
+  check('戻せる', lib.toggleHidden(gone), false);
+  checkList('戻すと候補に出る',
+    Array.from(lib.forBase('krea2'), (i) => i.path).sort(), [gone, keep]);
+}
+
+// 一括は「実際に変わった件数」を返し、保存は 1 回だけ
+{
+  const store = {};
+  const lib = loadLib(store);
+  const paths = ['a', 'b', 'c'].map((n) => `https://huggingface.co/owner/repo/resolve/main/${n}.safetensors`);
+  for (const p of paths) lib.register(p);
+  let writes = 0;
+  const onChange = () => { writes++; };
+  lib.onChange = onChange;
+
+  check('3 件まとめて隠す', lib.setHiddenMany(paths, true), 3);
+  check('保存は 1 回', writes, 1);
+  check('すべて非表示', lib.forBase(null).length, 0);
+  check('もう一度隠しても変わらない', lib.setHiddenMany(paths, true), 0);
+  check('変化が無ければ保存もしない', writes, 1);
+  check('2 件だけ戻す', lib.setHiddenMany(paths.slice(0, 2), false), 2);
+  checkList('戻した 2 件が候補に出る',
+    Array.from(lib.forBase(null), (i) => i.path).sort(), paths.slice(0, 2));
+}
+
 console.log(`ok: ${passed} checks passed`);

@@ -353,7 +353,7 @@ function populateLoraSelect(select, selected = '') {
   if (selected) {
     const opt = document.createElement('option');
     opt.value = selected;
-    opt.textContent = loraLabel(selected);
+    opt.textContent = loraLib.isHidden(selected) ? `${loraLabel(selected)}（非表示）` : loraLabel(selected);
     select.insertBefore(opt, select.firstChild);
     select.value = selected;
     return;
@@ -554,12 +554,18 @@ function syncAddLoraBtn() {
   els.addLoraBtn.disabled = count >= max || (usable === 0 && !provider().loraByName);
   els.addLoraBtn.title = count >= max ? `LoRA はこのモデルでは最大 ${max} 個までです` : '';
 
-  // 使える LoRA が無い / 別のベースモデル向けを隠したことを伝える
-  const hidden = loraLib.load().length - usable;
-  els.loraHint.hidden = usable > 0 && hidden === 0;
+  // 使える LoRA が無い / 候補から外したものがあることを伝える
+  // （外す理由は「別のベースモデル向け」と「非表示にしたもの」の 2 つ）
+  const all = loraLib.load();
+  const hiddenCount = all.filter((i) => i.hidden && loraLib.baseKind(i.base) === loraBase()).length;
+  const otherBase = all.length - usable - hiddenCount;
+  const parts = [];
+  if (otherBase > 0) parts.push(`${base} 以外の LoRA ${otherBase} 件`);
+  if (hiddenCount > 0) parts.push(`非表示にした ${hiddenCount} 件`);
+  els.loraHint.hidden = usable > 0 && parts.length === 0;
   els.loraHint.textContent = usable === 0
     ? `${base} 用の LoRA が登録されていません。下の「Hugging Face から一括登録」「Civitai から取り込み」で追加できます（別のベースモデル用の LoRA はこのモデルでは使えません）。`
-    : `${base} 以外の LoRA ${hidden} 件は候補から外しています（ベースモデルはライブラリ管理で直せます）。`;
+    : `${parts.join(' と ')}は候補から外しています（ライブラリ管理で直せます）。`;
 }
 
 // 候補に無くなった LoRA 行を落とす。ベースモデルはプロバイダで変わるので、
