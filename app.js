@@ -119,6 +119,7 @@ const els = {
   ckptCivitaiBtn: $('#ckptCivitaiBtn'),
   ckptLabel: $('#ckptLabel'),
   ckptSummaryNote: $('#ckptSummaryNote'),
+  warmRing: $('#warmRing'),
   prompt: $('#prompt'),
   loraField: $('#loraField'),
   loraLabel: $('#loraLabel'),
@@ -402,6 +403,9 @@ function initForm() {
 
 function updateModelFields() {
   const model = MODELS.find((m) => m.id === els.modelSelect.value) || MODELS[0];
+  // Modal 版に切り替えたときは、起点をサーバーに訊き直してからリングを出す
+  if (model.provider === 'modal') fetchWarmState();
+  syncWarmRing();
   els.customModelField.hidden = model.id !== '__custom__';
   els.ckptField.hidden = !model.ckpt;
   els.loraField.hidden = !model.lora;
@@ -1279,6 +1283,100 @@ function buildInput({ loras, seed, numImages } = {}) {
   return input;
 }
 
+/* ---------- Modal のウォーム表示 ---------- */
+//
+// Modal のコンテナはアイドルが続くと落ち、次の生成はコールドスタート（35〜60 秒）
+// になる。あと何秒もつかを数字で出すと急かされるので、**減っていくリングだけ**を
+// 生成ボタンの隣に置く（残り 30 秒で黄、10 秒で赤）。
+//
+// 起点（最後にコンテナを使い終わった時刻）はサーバー（/api/krea2/warm）が持つ。
+// どの端末・どの画面（生成 / 画像編集 / 比較アリーナ）から投げたジョブも Worker を
+// 通るので、そこが唯一の正になる。残りの計算だけをこちらで毎秒行う
+
+const WARM_SOON_MS = 30_000; // ここから黄
+const WARM_LAST_MS = 10_000; // ここから赤
+const WARM_ARC_LEN = 2 * Math.PI * 9; // リングの円周（r=9・CSS の dasharray と同じ）
+
+let warmWindowMs = 180_000; // サーバーの値で上書きする（modal_comfy の設定次第）
+let warmAt = {}; // endpoint -> 最後に使い終わった時刻
+let warmTimer = null;
+let warmFetching = null;
+
+// 選択中のモデルが Modal 版ならそのエンドポイント、そうでなければ null
+function currentModalEndpoint() {
+  const model = MODELS.find((m) => m.id === els.modelSelect.value);
+  return model?.provider === 'modal' ? model.modalEndpoint : null;
+}
+
+async function fetchWarmState() {
+  if (warmFetching) return warmFetching;
+  warmFetching = (async () => {
+    try {
+      const res = await fetch('/api/krea2/warm');
+      if (!res.ok || isHtmlResponse(res)) return;
+      const data = await res.json();
+      if (Number(data?.windowMs) > 0) warmWindowMs = Number(data.windowMs);
+      if (data?.endpoints) warmAt = { ...warmAt, ...data.endpoints };
+    } catch {
+      // 取れなければ手元の記録のまま（オフラインなど）
+    } finally {
+      warmFetching = null;
+    }
+  })();
+  await warmFetching;
+  renderWarmRing();
+}
+
+// 自分のジョブが終わったときは、問い合わせずにその場で起点を更新する
+function noteWarm(endpoint) {
+  if (!endpoint) return;
+  warmAt[endpoint] = Date.now();
+  renderWarmRing();
+}
+
+// 残り時間から見た目を決める。リングは「残り / 全体」ぶんだけ描く
+function warmView(endpoint, now = Date.now()) {
+  if (!endpoint) return null;
+  if ([...runningJobs].some((j) => j.kind === 'modal')) {
+    return { level: 'busy', ratio: 1, label: '生成中（コンテナは動いています）' };
+  }
+  const left = (warmAt[endpoint] ?? 0) + warmWindowMs - now;
+  if (left <= 0) return { level: 'cold', ratio: 0, label: '冷えています（次の生成はコールドスタート）' };
+  if (left <= WARM_LAST_MS) return { level: 'last', ratio: left / warmWindowMs, label: 'まもなく冷えます' };
+  if (left <= WARM_SOON_MS) return { level: 'soon', ratio: left / warmWindowMs, label: 'もうすぐ冷えます' };
+  return { level: 'warm', ratio: left / warmWindowMs, label: 'ウォーム（すぐ生成できます）' };
+}
+
+function renderWarmRing() {
+  const endpoint = currentModalEndpoint();
+  const view = warmView(endpoint);
+  els.warmRing.hidden = !view;
+  if (!view) return;
+  els.warmRing.classList.remove('warm', 'soon', 'last', 'cold', 'busy');
+  els.warmRing.classList.add(view.level);
+  els.warmRing.setAttribute('aria-label', view.label);
+  els.warmRing.title = view.label;
+  const arc = els.warmRing.querySelector('.warm-arc');
+  arc.style.strokeDashoffset = String(WARM_ARC_LEN * (1 - view.ratio));
+}
+
+// 表示が要るあいだだけ 1 秒ごとに描き直す（タブが裏なら止める）
+function syncWarmRing() {
+  const want = !!currentModalEndpoint() && document.visibilityState === 'visible';
+  renderWarmRing();
+  if (want && warmTimer === null) {
+    warmTimer = setInterval(() => {
+      const before = warmView(currentModalEndpoint())?.level;
+      renderWarmRing();
+      // 冷えた瞬間に一度だけ確かめる（ほかの端末が温め直しているかもしれない）
+      if (before !== 'cold' && warmView(currentModalEndpoint())?.level === 'cold') fetchWarmState();
+    }, 1000);
+  } else if (!want && warmTimer !== null) {
+    clearInterval(warmTimer);
+    warmTimer = null;
+  }
+}
+
 /* ---------- generation ---------- */
 
 // 生成中でも追加リクエストを送れるよう、実行中のジョブは複数を並行に扱う。
@@ -1329,6 +1427,7 @@ function makeExpandable(el) {
 function updateJobHint() {
   if (!els.jobHint) return;
   els.jobHint.hidden = ![...runningJobs].some((j) => j.kind === 'modal');
+  renderWarmRing(); // 実行中はコンテナが動いている＝リングも満ちた表示にする
 }
 
 // 1 件 = 1 行: [スピナー + 状態] [プロンプト（省略表示）] [✕]
@@ -1834,6 +1933,7 @@ async function runModalJobFrom(job) {
     entry.result = {
       url: r.url, seed: r.seed, elapsedMs: r.elapsedMs ?? null, execMs: r.execMs ?? null,
     };
+    noteWarm(job.input?.endpoint); // コンテナがアイドルに戻った時刻
     saveActiveJob(job);
   }
 
@@ -2810,7 +2910,10 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     deviceSync.pull();
     reloadHistory();
+    // 裏にいるあいだに他の画面・端末が温めているかもしれない
+    if (currentModalEndpoint()) fetchWarmState();
   }
+  syncWarmRing(); // 裏では 1 秒ごとの描き直しを止める
 });
 
 els.generateBtn.addEventListener('click', generate);

@@ -56,6 +56,27 @@ const JOB_POLL_DELAY_MS = 2000;
 // 異常終了すると過去の時刻のまま居座ることがあり、その状態を「張られている」と
 // 判定すると誰もジョブを進めなくなる（取り込みが resolve のまま永久に止まる）
 const ALARM_OVERDUE_MS = 60 * 1000;
+
+// Modal のコンテナがアイドルで落ちるまでの時間（scaledown_window）。生成画面の
+// ウォーム表示に使う目安で、実際の値は modal_comfy 側の設定なので環境変数で
+// 上書きできるようにしてある（ここを過ぎたら次はコールドスタート）
+const MODAL_WARM_MS_DEFAULT = 3 * 60 * 1000;
+
+// **同じコンテナを共有するエンドポイントの組**。片方を使えばもう片方も
+// ウォームになるので、最後に使った時刻はこの組ごとに 1 つ持つ
+// （統合版は Krea 2 の生成・Qwen 2.1 の生成・参照画像編集で 1 コンテナ）
+const MODAL_WARM_GROUPS = {
+  exp: 'exp',
+  gpusnap: 'gpusnap',
+  prod: 'prod',
+  ckpt: 'ckpt',
+  wan: 'wan',
+  'wan-edit': 'wan',
+  lanpaint: 'lanpaint',
+  unified: 'krea2-qwen21',
+  qwen21: 'krea2-qwen21',
+  'qwen21-edit': 'krea2-qwen21',
+};
 const JOB_MAX_SUBMIT_ATTEMPTS = 2; // 送信自体の再試行上限（多重生成・多重課金の防止）
 
 // 画像に焼き込む kind。ジョブの kind から引く（既定は生成）
@@ -2242,6 +2263,8 @@ export class SyncState extends DurableObject {
         ? Math.round(execSeconds * 1000)
         : null;
       await this.ctx.storage.put(key, job);
+      // コンテナがアイドルに戻った時刻。生成画面のウォーム表示の起点になる
+      await this.markWarm(job.endpointKey);
     } catch (err) {
       // ネットワーク断など。pending のまま次の alarm で再試行する
       //（送信済みで pollUrl 未取得の場合は attempts 上限で打ち切られる）。
@@ -2253,6 +2276,27 @@ export class SyncState extends DurableObject {
         // 控えられなくても再試行は続く
       }
     }
+  }
+
+  // 最後にその組のコンテナを使い終わった時刻を控える。どの端末から投げた
+  // ジョブでも Worker を通るので、ここが唯一の正になる
+  async markWarm(endpointKey) {
+    const group = MODAL_WARM_GROUPS[endpointKey];
+    if (!group) return;
+    const warm = (await this.ctx.storage.get('krea2:warm')) ?? {};
+    warm[group] = Date.now();
+    await this.ctx.storage.put('krea2:warm', warm);
+  }
+
+  // エンドポイントごとの「最後に使い終わった時刻」。同じコンテナを共有する
+  // ものには同じ値が入る（呼ぶ側に組み分けを持たせないため、ここで展開する）
+  async getWarm() {
+    const warm = (await this.ctx.storage.get('krea2:warm')) ?? {};
+    const endpoints = {};
+    for (const [endpointKey, group] of Object.entries(MODAL_WARM_GROUPS)) {
+      if (warm[group]) endpoints[endpointKey] = warm[group];
+    }
+    return endpoints;
   }
 
   modalHeaders() {
@@ -3765,6 +3809,20 @@ export default {
 
       await stub.startKrea2Job(jobId, payload, target.url, target.kind, target.key);
       return Response.json({ queued: true, jobId });
+    }
+
+    // Modal のウォーム状態。エンドポイントごとの「最後に使い終わった時刻」と、
+    // アイドルで落ちるまでの時間を返す。残り時間の計算はクライアント側で行う
+    // （1 秒ごとの表示更新のたびに問い合わせる必要がないように）
+    if (url.pathname === '/api/krea2/warm') {
+      if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
+      const seconds = Number(env.MODAL_WARM_SECONDS);
+      const windowMs = Number.isFinite(seconds) && seconds > 0
+        ? Math.round(seconds * 1000)
+        : MODAL_WARM_MS_DEFAULT;
+      return Response.json({ windowMs, endpoints: await stub.getWarm() }, {
+        headers: { 'Cache-Control': 'no-store' },
+      });
     }
 
     // 生成ジョブの状態取得（クライアントはこれをポーリングして結果を受け取る）

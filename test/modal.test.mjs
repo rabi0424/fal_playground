@@ -543,6 +543,45 @@ test('編集: 画像とマスクが無ければ 422 で弾く', async () => {
   assert.equal((await post({ prompt: 'x', image: 'A', mask: 'B' })).status, 422); // jobId 無し
 });
 
+/*
+ * ウォーム表示の起点。
+ *
+ * どの画面・どの端末から投げても Worker を通るので、最後にコンテナを使い
+ * 終わった時刻はここだけが知っている。同じコンテナを共有するエンドポイント
+ * （統合版と Qwen 2.1、Wan の生成と編集など）には同じ時刻を配る
+ */
+test('ウォーム: 使い終わった時刻を控え、同じコンテナの相手にも配る', async () => {
+  const mod = await loadWorker();
+  const { stub, storage } = makeDo(mod);
+  globalThis.fetch = makeModal().fetch;
+
+  assert.deepEqual(await stub.getWarm(), {}); // まだ一度も動かしていない
+
+  const before = Date.now();
+  await stub.startKrea2Job('b'.repeat(32), { prompt: 'x' },
+    'https://x--y.modal.run/generate', 'generate', 'unified');
+  await runAlarms(stub, storage);
+  assert.equal((await stub.getKrea2Job('b'.repeat(32))).status, 'done');
+
+  const warm = await stub.getWarm();
+  assert.ok(warm.unified >= before, '使い終わった時刻を控える');
+  // 統合版は Qwen 2.1 の生成・参照画像編集と 1 コンテナ
+  assert.equal(warm.qwen21, warm.unified);
+  assert.equal(warm['qwen21-edit'], warm.unified);
+  // 別アプリのコンテナには配らない
+  assert.equal(warm.ckpt, undefined);
+  assert.equal(warm.wan, undefined);
+
+  // 編集（wan-edit）を流すと Wan の生成側もウォームになる
+  await stub.startKrea2Job('c'.repeat(32), {
+    prompt: 'y', image: 'data:image/png;base64,AA', mask: 'data:image/png;base64,BB',
+  }, 'https://x--y.modal.run/edit', 'edit', 'wan-edit');
+  await runAlarms(stub, storage);
+  const warm2 = await stub.getWarm();
+  assert.ok(warm2.wan >= before);
+  assert.equal(warm2['wan-edit'], warm2.wan);
+});
+
 /* ---- 実行 ---- */
 
 let failed = 0;

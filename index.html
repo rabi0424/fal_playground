@@ -165,7 +165,16 @@
     </details>
 
     <div class="generate-area">
-      <button id="generateBtn" class="primary-btn">生成する</button>
+      <div class="generate-row">
+        <button id="generateBtn" class="primary-btn">生成する</button>
+        <!-- Modal 版のウォーム残り時間。減っていくリングだけで、秒数は出さない -->
+        <span id="warmRing" class="warm-ring" role="img" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle class="warm-track" cx="12" cy="12" r="9"></circle>
+            <circle class="warm-arc" cx="12" cy="12" r="9"></circle>
+          </svg>
+        </span>
+      </div>
       <div class="job-stack">
         <div id="jobList" class="job-list"></div>
         <div id="jobHint" class="job-hint" hidden>コールドスタート時は 1 分ほどかかります</div>

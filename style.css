@@ -972,6 +972,63 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
   }
 }
 
+/* 生成ボタンの行。ウォーム表示のリングをボタンの右に並べる */
+.generate-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.generate-row .primary-btn { flex: 1; min-width: 0; }
+
+/* ウォームの残り時間。秒数は出さず、リングが減るだけ（急かさないため）。
+   残り 30 秒で黄、10 秒で赤。冷えているときは輪郭だけ残す */
+.warm-ring {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: block;
+}
+
+.warm-ring svg {
+  width: 100%;
+  height: 100%;
+  /* 12 時の位置から時計回りに減る */
+  transform: rotate(-90deg);
+}
+
+.warm-ring circle {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.warm-track { stroke: var(--border); }
+
+.warm-arc {
+  stroke: var(--success);
+  /* 円周（2πr, r=9）。残りぶんだけ描く指定は JS が stroke-dashoffset で行う */
+  stroke-dasharray: 56.55;
+  transition: stroke-dashoffset var(--dur-quick) linear, stroke var(--dur-quick) ease;
+}
+
+.warm-ring.soon .warm-arc { stroke: var(--warn); }
+.warm-ring.last .warm-arc { stroke: var(--danger); }
+.warm-ring.cold .warm-arc { stroke: transparent; }
+
+/* 生成中はコンテナが動いているので、満ちたまま静かに脈打たせる */
+.warm-ring.busy .warm-arc { animation: warm-pulse 1.6s ease-in-out infinite; }
+
+@keyframes warm-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .warm-ring.busy .warm-arc { animation: none; }
+  .warm-arc { transition: none; }
+}
+
 /* ---------- running jobs ---------- */
 /* 生成中も追加リクエストを送れるため、実行中のジョブは 1 件 = 1 行の
    コンパクトな表示で並べる。件数が多いときはリスト内でスクロールし、
