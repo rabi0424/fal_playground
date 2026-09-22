@@ -353,7 +353,7 @@ function populateLoraSelect(select, selected = '') {
   if (selected) {
     const opt = document.createElement('option');
     opt.value = selected;
-    opt.textContent = loraLabel(selected);
+    opt.textContent = loraLib.isHidden(selected) ? `${loraLabel(selected)}（非表示）` : loraLabel(selected);
     select.insertBefore(opt, select.firstChild);
     select.value = selected;
     return;
@@ -368,12 +368,27 @@ function refreshLoraRows() {
     const select = row.querySelector('.lora-select');
     populateLoraSelect(select, select.value);
     row.querySelector('.lora-path').hidden = select.value !== LORA_NAME_OPTION;
+    syncLoraFavBtn(row);
     renderRowTrigger(row);
   }
   syncAddLoraBtn();
 }
 
-function addLoraRow(path = '', scale, off = false) {
+// ★ ボタンの状態。名前を直接入力した行はライブラリに無いので隠す
+function syncLoraFavBtn(row) {
+  const btn = row.querySelector('.lora-fav');
+  if (!btn) return;
+  const path = row.querySelector('.lora-select').value;
+  const known = !!path && path !== LORA_NAME_OPTION;
+  btn.hidden = !known;
+  const on = known && loraLib.isFav(path);
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', String(on));
+  btn.title = on ? 'お気に入りから外す' : 'お気に入りに入れる（候補の先頭に並びます）';
+}
+
+// auto: 利用者が自分で足した行かどうか。復元では自動挿入を走らせない
+function addLoraRow(path = '', scale, off = false, auto = false) {
   const library = sortedLoraLibrary();
   // 名前で指定できるプロバイダなら、ライブラリが空でも行は作れる
   const byName = !!provider().loraByName;
@@ -397,6 +412,18 @@ function addLoraRow(path = '', scale, off = false) {
   select.className = 'lora-select';
   populateLoraSelect(select, path);
   head.appendChild(select);
+
+  // お気に入りの付け外し（生成画面と同じ）。★ を付けたものは候補の先頭に並ぶ
+  const favBtn = document.createElement('button');
+  favBtn.className = 'lib-star lora-fav';
+  favBtn.type = 'button';
+  favBtn.textContent = '★';
+  favBtn.addEventListener('click', () => {
+    const current = select.value;
+    if (current === LORA_NAME_OPTION) return;
+    loraLib.toggleFav(current); // onChange → refreshLoraRows で並び順も★印も入れ替わる
+  });
+  head.appendChild(favBtn);
 
   const delBtn = document.createElement('button');
   delBtn.className = 'ghost-btn small';
@@ -469,18 +496,22 @@ function addLoraRow(path = '', scale, off = false) {
   select.addEventListener('change', () => {
     nameInput.hidden = select.value !== LORA_NAME_OPTION;
     if (select.value === LORA_NAME_OPTION) nameInput.focus();
+    syncLoraFavBtn(row);
     if (!row.dataset.scaleTouched && select.value !== LORA_NAME_OPTION) {
       const def = loraDefaultScale(select.value);
       slider.value = String(def);
       num.value = String(def);
     }
     renderRowTrigger(row);
+    autoInsertTriggers(select.value);
     saveForm();
   });
 
   els.loraList.appendChild(row);
+  syncLoraFavBtn(row);
   renderRowTrigger(row);
   syncAddLoraBtn();
+  if (auto) autoInsertTriggers(select.value);
 }
 
 // 選択中の LoRA のトリガーワードと、プロンプトへ足すボタン
@@ -498,23 +529,29 @@ function renderRowTrigger(row) {
     chip.textContent = word;
     box.appendChild(chip);
   }
+  const place = loraLib.triggerPlace(path);
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'ghost-btn small';
   btn.textContent = '挿入';
-  btn.title = 'トリガーワードを指示文の末尾に追加します';
-  btn.addEventListener('click', () => insertTriggerWords(words));
+  btn.title = `トリガーワードを指示文の${place === 'head' ? '冒頭' : '末尾'}に追加します`;
+  btn.addEventListener('click', () => insertTriggerWords(words, place));
   box.appendChild(btn);
 }
 
-function insertTriggerWords(words) {
-  const current = els.prompt.value;
-  const lower = current.toLowerCase();
-  const missing = words.filter((w) => !lower.includes(w.toLowerCase()));
-  if (missing.length === 0) return;
-  const sep = current.trim() === '' ? '' : (/[,、]\s*$/.test(current) ? ' ' : ', ');
-  els.prompt.value = current + sep + missing.join(', ');
+// 入れる位置（末尾 / 冒頭）は LoRA ごとの設定（ライブラリ管理で変えられる）
+function insertTriggerWords(words, place = 'end') {
+  const next = loraLib.insertTriggers(els.prompt.value, words, place);
+  if (next === null) return;
+  els.prompt.value = next;
   saveForm();
+}
+
+// 「選んだら自動で入れる」LoRA のトリガーワードを入れる。
+// 下書きの復元では呼ばない（保存した文面をそのまま出すため）
+function autoInsertTriggers(path) {
+  if (!path || path === LORA_NAME_OPTION || !loraLib.triggerAuto(path)) return;
+  insertTriggerWords(loraTriggerWords(path), loraLib.triggerPlace(path));
 }
 
 function syncAddLoraBtn() {
@@ -526,12 +563,18 @@ function syncAddLoraBtn() {
   els.addLoraBtn.disabled = count >= max || (usable === 0 && !provider().loraByName);
   els.addLoraBtn.title = count >= max ? `LoRA はこのモデルでは最大 ${max} 個までです` : '';
 
-  // 使える LoRA が無い / 別のベースモデル向けを隠したことを伝える
-  const hidden = loraLib.load().length - usable;
-  els.loraHint.hidden = usable > 0 && hidden === 0;
+  // 使える LoRA が無い / 候補から外したものがあることを伝える
+  // （外す理由は「別のベースモデル向け」と「非表示にしたもの」の 2 つ）
+  const all = loraLib.load();
+  const hiddenCount = all.filter((i) => i.hidden && loraLib.baseKind(i.base) === loraBase()).length;
+  const otherBase = all.length - usable - hiddenCount;
+  const parts = [];
+  if (otherBase > 0) parts.push(`${base} 以外の LoRA ${otherBase} 件`);
+  if (hiddenCount > 0) parts.push(`非表示にした ${hiddenCount} 件`);
+  els.loraHint.hidden = usable > 0 && parts.length === 0;
   els.loraHint.textContent = usable === 0
     ? `${base} 用の LoRA が登録されていません。下の「Hugging Face から一括登録」「Civitai から取り込み」で追加できます（別のベースモデル用の LoRA はこのモデルでは使えません）。`
-    : `${base} 以外の LoRA ${hidden} 件は候補から外しています（ベースモデルはライブラリ管理で直せます）。`;
+    : `${parts.join(' と ')}は候補から外しています（ライブラリ管理で直せます）。`;
 }
 
 // 候補に無くなった LoRA 行を落とす。ベースモデルはプロバイダで変わるので、
@@ -4505,7 +4548,7 @@ for (const type of ['dragleave', 'drop']) {
 }
 els.uploadArea.addEventListener('drop', (e) => loadFile(e.dataTransfer?.files?.[0]));
 
-els.addLoraBtn.addEventListener('click', () => addLoraRow());
+els.addLoraBtn.addEventListener('click', () => addLoraRow('', undefined, false, true));
 els.civitaiBtn.addEventListener('click', () => civitaiImport.open('lora'));
 els.rwAddLoraBtn.addEventListener('click', () => addRwLoraRow());
 els.rwPickLoraBtn.addEventListener('click', () => runwareLora.open());

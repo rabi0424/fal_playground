@@ -129,6 +129,82 @@ function baseChoices(selected, extras = []) {
   return out;
 }
 
+// 印（fav / hidden）の付け外し。false は持たせずキーごと消すので、
+// 付けていないものは今までどおり項目が増えない
+function setFlag(path, key, on) {
+  const items = load();
+  const item = items.find((i) => i.path === path);
+  if (!item) return false;
+  if (on) item[key] = true;
+  else delete item[key];
+  save(items); // 利用者の操作なので、書けなかったことは飲み込まない
+  return !!on;
+}
+
+// 一括用。何件でも保存は 1 回（同期にも 1 回ぶんしか流れない）
+function setFlagMany(paths, key, on) {
+  const want = new Set(paths);
+  const items = load();
+  let changed = 0;
+  for (const item of items) {
+    if (!want.has(item.path) || !!item[key] === !!on) continue;
+    if (on) item[key] = true;
+    else delete item[key];
+    changed++;
+  }
+  if (changed > 0) save(items);
+  return changed;
+}
+
+// お気に入り（★）。付けたものは sorted() が先頭へ回すので、どの画面でも
+// 候補の上に並ぶ。付け外しはライブラリ管理画面と各画面の LoRA 行から行う
+function isFav(path) {
+  return !!entry(path)?.fav;
+}
+
+const setFav = (path, on) => setFlag(path, 'fav', on);
+const toggleFav = (path) => setFav(path, !isFav(path));
+
+// トリガーワードの挿入位置。既定は末尾で、'head' を選んだものだけ冒頭に入る
+// （構図や画風を決める語のように、先頭にあるほど効く指定のためのもの）
+function triggerPlace(path) {
+  return entry(path)?.triggerPlace === 'head' ? 'head' : 'end';
+}
+
+// その LoRA を行に選んだとき、トリガーワードを自動で入れるか
+function triggerAuto(path) {
+  return !!entry(path)?.triggerAuto;
+}
+
+// まだ入っていない語だけを place 側に足した本文を返す。足すものが無ければ null
+//（＝呼ぶ側は何もしない）。プロンプト欄を持つ画面が同じ挙動になるよう、
+// 文字列の組み立てはここに 1 つだけ置く
+function insertTriggers(text, words, place = 'end') {
+  const current = String(text ?? '');
+  const lower = current.toLowerCase();
+  const missing = (words ?? []).filter((w) => w && !lower.includes(String(w).toLowerCase()));
+  if (missing.length === 0) return null;
+
+  const add = missing.join(', ');
+  if (current.trim() === '') return add;
+  if (place === 'head') {
+    // 先頭の区切り文字は食わせる（", , foo" にしない）
+    return `${add}, ${current.replace(/^[\s,、]+/, '')}`;
+  }
+  return current + (/[,、]\s*$/.test(current) ? ' ' : ', ') + add;
+}
+
+// 非表示。**候補から外すだけ**で、レコードも付けた情報（表示名・トリガー
+// ワード・既定 scale・メモ）もそのまま残る。使わなくなったチェックポイントを
+// 削除せずに畳んでおくためのもので、戻すのはライブラリ管理画面の「非表示」から
+function isHidden(path) {
+  return !!entry(path)?.hidden;
+}
+
+const setHidden = (path, on) => setFlag(path, 'hidden', on);
+const toggleHidden = (path) => setHidden(path, !isHidden(path));
+const setHiddenMany = (paths, on) => setFlagMany(paths, 'hidden', on);
+
 // ★ を先頭に、あとは表示名順（数字は数値として比較する）
 function sorted(items = load()) {
   return [...items].sort((a, b) => {
@@ -137,9 +213,10 @@ function sorted(items = load()) {
   });
 }
 
-// そのモデルで使えるものだけ。want が null なら制限しない
-function forBase(want) {
-  const all = sorted();
+// そのモデルで使えるものだけ。want が null なら制限しない。
+// 非表示にしたものは既定で外す（一覧に出すのはライブラリ管理画面だけ）
+function forBase(want, { includeHidden = false } = {}) {
+  const all = sorted().filter((item) => includeHidden || !item.hidden);
   return want ? all.filter((item) => baseKind(item.base) === want) : all;
 }
 
@@ -210,12 +287,22 @@ window.loraLib = {
   labelOf,
   defaultScale,
   triggerWords,
+  triggerPlace,
+  triggerAuto,
+  insertTriggers,
   baseKind,
   baseLabel: (kind) => BASE_LABELS[kind] ?? kind,
   baseKinds: () => [...BASE_KINDS],
   baseChoices,
   sorted,
   forBase,
+  isFav,
+  setFav,
+  toggleFav,
+  isHidden,
+  setHidden,
+  toggleHidden,
+  setHiddenMany,
   register,
   unregister,
   migrate,

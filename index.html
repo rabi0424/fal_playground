@@ -49,8 +49,8 @@
       <input id="customModel" type="text" placeholder="fal-ai/..." spellcheck="false">
     </label>
 
-    <div class="field" id="ckptField" hidden>
-      <span class="label">チェックポイント</span>
+    <details class="field lora-accordion collapsible" id="ckptField" hidden open>
+      <summary class="label" id="ckptLabel">チェックポイント<span class="accordion-note" id="ckptSummaryNote"></span></summary>
       <div class="lora-row ckpt-row">
         <select id="ckptSelect" class="lora-select" title="生成に使うチェックポイント（UNet）。URL 登録したものは初回使用時に Modal Volume へ取り込まれます"></select>
         <input id="ckptPath" class="lora-path" type="text" placeholder="https://huggingface.co/owner/repo/resolve/main/... または Volume 内のファイル名" spellcheck="false" autocomplete="off" hidden>
@@ -61,7 +61,7 @@
         </div>
       </div>
       <div class="ckpt-hint">初回使用時は Hugging Face から Modal Volume への取り込みが走るため、サイズにより数分かかります（2 回目以降はキャッシュ）</div>
-    </div>
+    </details>
 
     <label class="field prompt-field">
       <span class="label">プロンプト</span>
@@ -165,7 +165,16 @@
     </details>
 
     <div class="generate-area">
-      <button id="generateBtn" class="primary-btn">生成する</button>
+      <div class="generate-row">
+        <button id="generateBtn" class="primary-btn">生成する</button>
+        <!-- Modal 版のウォーム残り時間。減っていくリングだけで、秒数は出さない -->
+        <span id="warmRing" class="warm-ring" role="img" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle class="warm-track" cx="12" cy="12" r="9"></circle>
+            <circle class="warm-arc" cx="12" cy="12" r="9"></circle>
+          </svg>
+        </span>
+      </div>
       <div class="job-stack">
         <div id="jobList" class="job-list"></div>
         <div id="jobHint" class="job-hint" hidden>コールドスタート時は 1 分ほどかかります</div>

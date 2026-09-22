@@ -169,4 +169,112 @@ check('空は null', loraLib.baseKind(''), null);
   check('容量あふれは日本語で伝える', message.includes('保存領域がいっぱい'), true);
 }
 
+/* ---- お気に入り（★） ---- */
+
+// 付けたものは sorted() の先頭に来る（どの画面でも候補の上に並ぶ）
+{
+  const store = {};
+  const lib = loadLib(store);
+  const a = 'https://huggingface.co/owner/repo/resolve/main/aaa.safetensors';
+  const z = 'https://huggingface.co/owner/repo/resolve/main/zzz.safetensors';
+  lib.register(a);
+  lib.register(z);
+  checkList('既定は表示名順', Array.from(lib.sorted(), (i) => i.path), [a, z]);
+
+  check('付ける前は false', lib.isFav(z), false);
+  check('toggleFav は新しい状態を返す', lib.toggleFav(z), true);
+  check('付けたら isFav が true', lib.isFav(z), true);
+  checkList('★ が先頭に来る', Array.from(lib.sorted(), (i) => i.path), [z, a]);
+  check('保存もされる', JSON.parse(store.fal_lora_library).find((i) => i.path === z).fav, true);
+
+  check('外すと false に戻る', lib.toggleFav(z), false);
+  checkList('外すと表示名順に戻る', Array.from(lib.sorted(), (i) => i.path), [a, z]);
+  check('外したら項目に fav は残らない',
+    'fav' in JSON.parse(store.fal_lora_library).find((i) => i.path === z), false);
+
+  // 未登録の path に付けようとしても、ライブラリを壊さない
+  check('未登録には付かない', lib.setFav('https://huggingface.co/x/y/resolve/main/none.safetensors', true), false);
+  check('件数は変わらない', lib.load().length, 2);
+}
+
+/* ---- 非表示 ---- */
+
+// 候補（forBase）からは外れるが、レコードと付けた情報は残る
+{
+  const store = {};
+  const lib = loadLib(store);
+  const keep = 'https://huggingface.co/owner/repo/resolve/main/keep.safetensors';
+  const gone = 'https://huggingface.co/owner/repo/resolve/main/gone.safetensors';
+  lib.register(keep, { base: 'Krea 2' });
+  lib.register(gone, { base: 'Krea 2' });
+
+  check('既定は表示', lib.isHidden(gone), false);
+  check('隠すと true', lib.toggleHidden(gone), true);
+  checkList('候補からは消える', Array.from(lib.forBase('krea2'), (i) => i.path), [keep]);
+  checkList('includeHidden なら出る',
+    Array.from(lib.forBase('krea2', { includeHidden: true }), (i) => i.path).sort(), [gone, keep]);
+  check('レコードは残る', lib.load().length, 2);
+  check('付けた情報も残る', lib.entry(gone).base, 'Krea 2');
+  check('戻せる', lib.toggleHidden(gone), false);
+  checkList('戻すと候補に出る',
+    Array.from(lib.forBase('krea2'), (i) => i.path).sort(), [gone, keep]);
+}
+
+// 一括は「実際に変わった件数」を返し、保存は 1 回だけ
+{
+  const store = {};
+  const lib = loadLib(store);
+  const paths = ['a', 'b', 'c'].map((n) => `https://huggingface.co/owner/repo/resolve/main/${n}.safetensors`);
+  for (const p of paths) lib.register(p);
+  let writes = 0;
+  const onChange = () => { writes++; };
+  lib.onChange = onChange;
+
+  check('3 件まとめて隠す', lib.setHiddenMany(paths, true), 3);
+  check('保存は 1 回', writes, 1);
+  check('すべて非表示', lib.forBase(null).length, 0);
+  check('もう一度隠しても変わらない', lib.setHiddenMany(paths, true), 0);
+  check('変化が無ければ保存もしない', writes, 1);
+  check('2 件だけ戻す', lib.setHiddenMany(paths.slice(0, 2), false), 2);
+  checkList('戻した 2 件が候補に出る',
+    Array.from(lib.forBase(null), (i) => i.path).sort(), paths.slice(0, 2));
+}
+
+/* ---- トリガーワードの挿入 ---- */
+
+// 末尾（既定）: 区切りを二重にしない
+check('空なら語だけ', loraLib.insertTriggers('', ['ohwx'], 'end'), 'ohwx');
+check('末尾に足す', loraLib.insertTriggers('a cat', ['ohwx'], 'end'), 'a cat, ohwx');
+check('末尾がカンマなら空白だけ', loraLib.insertTriggers('a cat,', ['ohwx'], 'end'), 'a cat, ohwx');
+check('読点でも同じ', loraLib.insertTriggers('猫、', ['ohwx'], 'end'), '猫、 ohwx');
+
+// 冒頭: 先頭の区切りは食わせる
+check('冒頭に足す', loraLib.insertTriggers('a cat', ['ohwx'], 'head'), 'ohwx, a cat');
+check('複数語もまとめて', loraLib.insertTriggers('a cat', ['ohwx', 'zwx'], 'head'), 'ohwx, zwx, a cat');
+check('先頭のカンマは食う', loraLib.insertTriggers(', a cat', ['ohwx'], 'head'), 'ohwx, a cat');
+check('冒頭でも空なら語だけ', loraLib.insertTriggers('  ', ['ohwx'], 'head'), 'ohwx');
+
+// 既に書かれている語は足さない（足すものが無ければ null）
+check('入っていれば null', loraLib.insertTriggers('a ohwx cat', ['ohwx'], 'head'), null);
+check('大文字小文字は問わない', loraLib.insertTriggers('a OHWX cat', ['ohwx'], 'end'), null);
+check('足りない語だけ入れる',
+  loraLib.insertTriggers('a ohwx cat', ['ohwx', 'zwx'], 'end'), 'a ohwx cat, zwx');
+check('語が無ければ null', loraLib.insertTriggers('a cat', [], 'end'), null);
+
+// 位置と自動挿入は LoRA ごとの設定（未設定は末尾・自動なし）
+{
+  const lib = loadLib({});
+  const p = 'https://huggingface.co/owner/repo/resolve/main/t.safetensors';
+  lib.register(p);
+  check('既定は末尾', lib.triggerPlace(p), 'end');
+  check('既定は自動なし', lib.triggerAuto(p), false);
+  const items = lib.load();
+  items[0].triggerPlace = 'head';
+  items[0].triggerAuto = true;
+  lib.save(items);
+  check('冒頭を覚える', lib.triggerPlace(p), 'head');
+  check('自動を覚える', lib.triggerAuto(p), true);
+  check('未登録は既定', lib.triggerPlace('https://huggingface.co/x/y/resolve/main/none.safetensors'), 'end');
+}
+
 console.log(`ok: ${passed} checks passed`);

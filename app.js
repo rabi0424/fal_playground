@@ -117,6 +117,9 @@ const els = {
   ckptUnregBtn: $('#ckptUnregBtn'),
   ckptHfBtn: $('#ckptHfBtn'),
   ckptCivitaiBtn: $('#ckptCivitaiBtn'),
+  ckptLabel: $('#ckptLabel'),
+  ckptSummaryNote: $('#ckptSummaryNote'),
+  warmRing: $('#warmRing'),
   prompt: $('#prompt'),
   loraField: $('#loraField'),
   loraLabel: $('#loraLabel'),
@@ -400,6 +403,9 @@ function initForm() {
 
 function updateModelFields() {
   const model = MODELS.find((m) => m.id === els.modelSelect.value) || MODELS[0];
+  // Modal 版に切り替えたときは、起点をサーバーに訊き直してからリングを出す
+  if (model.provider === 'modal') fetchWarmState();
+  syncWarmRing();
   els.customModelField.hidden = model.id !== '__custom__';
   els.ckptField.hidden = !model.ckpt;
   els.loraField.hidden = !model.lora;
@@ -478,7 +484,8 @@ function updateCustomSize() {
 
 /* ---------- LoRA ---------- */
 
-function addLoraRow(path = '', scale, listEl = els.loraList, off = false) {
+// auto: 利用者が自分で足した行かどうか。復元では自動挿入を走らせない
+function addLoraRow(path = '', scale, listEl = els.loraList, off = false, auto = false) {
   // 履歴の再利用などで未登録の URL が来たら自動登録する。
   // ベースモデルは今選んでいるモデルのものとして控える（候補の絞り込みに使う）
   if (path) registerLora(path, currentBaseMeta());
@@ -502,6 +509,20 @@ function addLoraRow(path = '', scale, listEl = els.loraList, off = false) {
   const select = document.createElement('select');
   select.className = 'lora-select';
   head.appendChild(select);
+
+  // お気に入りの付け外し。★ を付けたものは候補の先頭に並ぶ
+  //（ライブラリ管理画面を開かなくても、使いながら整理できるように）
+  const favBtn = document.createElement('button');
+  favBtn.className = 'lib-star lora-fav';
+  favBtn.type = 'button';
+  favBtn.textContent = '★';
+  favBtn.addEventListener('click', () => {
+    const current = select.value;
+    if (current === LORA_URL_OPTION) return;
+    loraLib.toggleFav(current);
+    refreshLoraSelects(); // 並び順と★印をすべての行に反映する
+  });
+  head.appendChild(favBtn);
 
   const delBtn = document.createElement('button');
   delBtn.className = 'ghost-btn small';
@@ -591,6 +612,9 @@ function addLoraRow(path = '', scale, listEl = els.loraList, off = false) {
       num.value = String(def);
     }
     syncLoraRow(row);
+    // 比較モードの試行ごとの LoRA は、1 つのプロンプトを共有していて
+    // 全部の語を混ぜると比較にならないので、共通 LoRA の行だけを対象にする
+    if (listEl === els.loraList) autoInsertTriggers(select.value);
   });
   for (const input of [slider, num]) {
     input.addEventListener('input', () => { row.dataset.scaleTouched = '1'; });
@@ -608,6 +632,7 @@ function addLoraRow(path = '', scale, listEl = els.loraList, off = false) {
 
   listEl.appendChild(row);
   syncLoraRow(row);
+  if (auto && listEl === els.loraList) autoInsertTriggers(select.value);
 }
 
 function loadLoraLibrary() {
@@ -655,9 +680,14 @@ function populateLoraSelect(select, selected) {
   const items = sortedLoraLibrary();
   const known = new Set(items.map((i) => i.path));
   if (selected && selected !== LORA_URL_OPTION && !known.has(selected) && loraLib.entry(selected)) {
+    // 候補から外れていても選択は失わせない。外れている理由を添える
+    //（別のベースモデル向け / 非表示。両方ならベースモデルのほうが重い）
+    const wrongBase = loraLib.baseKind(loraLib.entry(selected).base) !== modelLoraBase();
     const opt = document.createElement('option');
     opt.value = selected;
-    opt.textContent = `⚠ ${loraLabel(selected)}（このモデル向けではありません）`;
+    opt.textContent = wrongBase
+      ? `⚠ ${loraLabel(selected)}（このモデル向けではありません）`
+      : `${loraLabel(selected)}（非表示）`;
     opt.title = selected;
     select.appendChild(opt);
   }
@@ -676,13 +706,21 @@ function populateLoraSelect(select, selected) {
   if (select.value !== selected) select.value = LORA_URL_OPTION;
 }
 
-// 別のベースモデル向けで隠した件数を知らせる（黙って消えると混乱するため）
+// 候補から外した件数を知らせる（黙って消えると混乱するため）。
+// 外す理由は「別のベースモデル向け」と「非表示にしたもの」の 2 つ
 function syncLoraFilterHint() {
   const want = modelLoraBase();
-  const hidden = want ? loraLib.load().filter((i) => loraLib.baseKind(i.base) !== want).length : 0;
-  els.loraFilterHint.hidden = hidden === 0;
-  els.loraFilterHint.textContent = hidden === 0 ? ''
-    : `${loraLib.baseLabel(want)} 以外の LoRA ${hidden} 件は候補から外しています（ベースモデルはライブラリ管理で直せます）`;
+  const all = loraLib.load();
+  const otherBase = want ? all.filter((i) => !i.hidden && loraLib.baseKind(i.base) !== want).length : 0;
+  const hidden = all.filter((i) => i.hidden && (!want || loraLib.baseKind(i.base) === want)).length;
+  const parts = [];
+  if (otherBase > 0) {
+    parts.push(`${loraLib.baseLabel(want)} 以外の LoRA ${otherBase} 件`);
+  }
+  if (hidden > 0) parts.push(`非表示にした ${hidden} 件`);
+  els.loraFilterHint.hidden = parts.length === 0;
+  els.loraFilterHint.textContent = parts.length === 0 ? ''
+    : `${parts.join(' と ')}は候補から外しています（ライブラリ管理で直せます）`;
 }
 
 function refreshLoraSelects() {
@@ -702,7 +740,19 @@ function syncLoraRow(row) {
   const urlMode = path === LORA_URL_OPTION;
   row.querySelector('.lora-path').hidden = !urlMode;
   row.querySelector('.lora-unreg').hidden = urlMode;
+  syncLoraFavBtn(row, urlMode ? '' : path);
   renderLoraTrigger(row, urlMode ? '' : path);
+}
+
+// ★ ボタンの状態。URL 直接入力（未登録）のときは付けようがないので隠す
+function syncLoraFavBtn(row, path) {
+  const btn = row.querySelector('.lora-fav');
+  if (!btn) return;
+  btn.hidden = !path;
+  const on = !!path && loraLib.isFav(path);
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', String(on));
+  btn.title = on ? 'お気に入りから外す' : 'お気に入りに入れる（候補の先頭に並びます）';
 }
 
 // 選択中の LoRA のトリガーワードと、プロンプトへ足すボタン
@@ -720,24 +770,30 @@ function renderLoraTrigger(row, path) {
     chip.textContent = word;
     box.appendChild(chip);
   }
+  const place = loraLib.triggerPlace(path);
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'ghost-btn small';
   btn.textContent = '挿入';
-  btn.title = 'トリガーワードをプロンプトの末尾に追加します';
-  btn.addEventListener('click', () => insertTriggerWords(words));
+  btn.title = `トリガーワードをプロンプトの${place === 'head' ? '冒頭' : '末尾'}に追加します`;
+  btn.addEventListener('click', () => insertTriggerWords(words, place));
   box.appendChild(btn);
 }
 
-// プロンプト末尾にトリガーワードを足す。既に書かれている語は足さない
-function insertTriggerWords(words) {
-  const current = els.prompt.value;
-  const lower = current.toLowerCase();
-  const missing = words.filter((w) => !lower.includes(w.toLowerCase()));
-  if (missing.length === 0) return;
-  const sep = current.trim() === '' ? '' : (/[,、]\s*$/.test(current) ? ' ' : ', ');
-  els.prompt.value = current + sep + missing.join(', ');
+// トリガーワードをプロンプトに足す。既に書かれている語は足さない。
+// 入れる位置（末尾 / 冒頭）は LoRA ごとの設定（ライブラリ管理で変えられる）
+function insertTriggerWords(words, place = 'end') {
+  const next = loraLib.insertTriggers(els.prompt.value, words, place);
+  if (next === null) return;
+  els.prompt.value = next;
   els.prompt.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+// 「選んだら自動で入れる」LoRA のトリガーワードを入れる。
+// 下書きの復元や履歴の再利用では呼ばない（保存した文面をそのまま出すため）
+function autoInsertTriggers(path) {
+  if (!path || path === LORA_URL_OPTION || !loraLib.triggerAuto(path)) return;
+  insertTriggerWords(loraTriggerWords(path), loraLib.triggerPlace(path));
 }
 
 function collectLorasFrom(listEl) {
@@ -856,6 +912,29 @@ function syncCkptRow() {
   els.ckptPath.hidden = !urlMode;
   // 既定・直接入力では「登録解除」を出さない
   els.ckptUnregBtn.hidden = urlMode || els.ckptSelect.value === '';
+  syncCkptAccordion();
+}
+
+// 畳んだときに何を使うのか分かるよう、summary に今の選択を添える
+function ckptSummaryText() {
+  if (els.ckptSelect.value === LORA_URL_OPTION) {
+    const value = els.ckptPath.value.trim();
+    return value ? ckptDisplayName(value) : '直接入力';
+  }
+  return els.ckptSelect.selectedOptions[0]?.textContent ?? '';
+}
+
+// 自分で開閉したあとは、その状態を尊重する（登録・モデル変更で勝手に畳まない）
+let ckptToggledByUser = false;
+
+function syncCkptAccordion() {
+  els.ckptSummaryNote.textContent = ckptSummaryText();
+  // 選べるものが既定の 1 つだけなら、開いていても選びようがないので畳んでおく
+  // （「URL / ファイル名を入力…」は選択肢ではなく入力欄の呼び出しなので数えない）。
+  // ただし既定以外を使っているときは、隠さずに見せる
+  if (!ckptToggledByUser) {
+    els.ckptField.open = sortedCkptLibrary().length > 0 || els.ckptSelect.value !== '';
+  }
 }
 
 // 生成に使うチェックポイント指定（空文字なら既定 = フィールド省略）
@@ -866,8 +945,10 @@ function selectedCkpt() {
 }
 
 function initCkptField() {
+  els.ckptLabel.addEventListener('click', () => { ckptToggledByUser = true; });
   populateCkptSelect('');
   els.ckptSelect.addEventListener('change', syncCkptRow);
+  els.ckptPath.addEventListener('input', syncCkptAccordion);
 
   // URL を入力したら自動登録して、その項目を選択状態にする
   //（素のファイル名は登録せずそのまま送る: Volume に既にあるものを指す用途）
@@ -1202,6 +1283,100 @@ function buildInput({ loras, seed, numImages } = {}) {
   return input;
 }
 
+/* ---------- Modal のウォーム表示 ---------- */
+//
+// Modal のコンテナはアイドルが続くと落ち、次の生成はコールドスタート（35〜60 秒）
+// になる。あと何秒もつかを数字で出すと急かされるので、**減っていくリングだけ**を
+// 生成ボタンの隣に置く（残り 30 秒で黄、10 秒で赤）。
+//
+// 起点（最後にコンテナを使い終わった時刻）はサーバー（/api/krea2/warm）が持つ。
+// どの端末・どの画面（生成 / 画像編集 / 比較アリーナ）から投げたジョブも Worker を
+// 通るので、そこが唯一の正になる。残りの計算だけをこちらで毎秒行う
+
+const WARM_SOON_MS = 30_000; // ここから黄
+const WARM_LAST_MS = 10_000; // ここから赤
+const WARM_ARC_LEN = 2 * Math.PI * 9; // リングの円周（r=9・CSS の dasharray と同じ）
+
+let warmWindowMs = 180_000; // サーバーの値で上書きする（modal_comfy の設定次第）
+let warmAt = {}; // endpoint -> 最後に使い終わった時刻
+let warmTimer = null;
+let warmFetching = null;
+
+// 選択中のモデルが Modal 版ならそのエンドポイント、そうでなければ null
+function currentModalEndpoint() {
+  const model = MODELS.find((m) => m.id === els.modelSelect.value);
+  return model?.provider === 'modal' ? model.modalEndpoint : null;
+}
+
+async function fetchWarmState() {
+  if (warmFetching) return warmFetching;
+  warmFetching = (async () => {
+    try {
+      const res = await fetch('/api/krea2/warm');
+      if (!res.ok || isHtmlResponse(res)) return;
+      const data = await res.json();
+      if (Number(data?.windowMs) > 0) warmWindowMs = Number(data.windowMs);
+      if (data?.endpoints) warmAt = { ...warmAt, ...data.endpoints };
+    } catch {
+      // 取れなければ手元の記録のまま（オフラインなど）
+    } finally {
+      warmFetching = null;
+    }
+  })();
+  await warmFetching;
+  renderWarmRing();
+}
+
+// 自分のジョブが終わったときは、問い合わせずにその場で起点を更新する
+function noteWarm(endpoint) {
+  if (!endpoint) return;
+  warmAt[endpoint] = Date.now();
+  renderWarmRing();
+}
+
+// 残り時間から見た目を決める。リングは「残り / 全体」ぶんだけ描く
+function warmView(endpoint, now = Date.now()) {
+  if (!endpoint) return null;
+  if ([...runningJobs].some((j) => j.kind === 'modal')) {
+    return { level: 'busy', ratio: 1, label: '生成中（コンテナは動いています）' };
+  }
+  const left = (warmAt[endpoint] ?? 0) + warmWindowMs - now;
+  if (left <= 0) return { level: 'cold', ratio: 0, label: '冷えています（次の生成はコールドスタート）' };
+  if (left <= WARM_LAST_MS) return { level: 'last', ratio: left / warmWindowMs, label: 'まもなく冷えます' };
+  if (left <= WARM_SOON_MS) return { level: 'soon', ratio: left / warmWindowMs, label: 'もうすぐ冷えます' };
+  return { level: 'warm', ratio: left / warmWindowMs, label: 'ウォーム（すぐ生成できます）' };
+}
+
+function renderWarmRing() {
+  const endpoint = currentModalEndpoint();
+  const view = warmView(endpoint);
+  els.warmRing.hidden = !view;
+  if (!view) return;
+  els.warmRing.classList.remove('warm', 'soon', 'last', 'cold', 'busy');
+  els.warmRing.classList.add(view.level);
+  els.warmRing.setAttribute('aria-label', view.label);
+  els.warmRing.title = view.label;
+  const arc = els.warmRing.querySelector('.warm-arc');
+  arc.style.strokeDashoffset = String(WARM_ARC_LEN * (1 - view.ratio));
+}
+
+// 表示が要るあいだだけ 1 秒ごとに描き直す（タブが裏なら止める）
+function syncWarmRing() {
+  const want = !!currentModalEndpoint() && document.visibilityState === 'visible';
+  renderWarmRing();
+  if (want && warmTimer === null) {
+    warmTimer = setInterval(() => {
+      const before = warmView(currentModalEndpoint())?.level;
+      renderWarmRing();
+      // 冷えた瞬間に一度だけ確かめる（ほかの端末が温め直しているかもしれない）
+      if (before !== 'cold' && warmView(currentModalEndpoint())?.level === 'cold') fetchWarmState();
+    }, 1000);
+  } else if (!want && warmTimer !== null) {
+    clearInterval(warmTimer);
+    warmTimer = null;
+  }
+}
+
 /* ---------- generation ---------- */
 
 // 生成中でも追加リクエストを送れるよう、実行中のジョブは複数を並行に扱う。
@@ -1252,6 +1427,7 @@ function makeExpandable(el) {
 function updateJobHint() {
   if (!els.jobHint) return;
   els.jobHint.hidden = ![...runningJobs].some((j) => j.kind === 'modal');
+  renderWarmRing(); // 実行中はコンテナが動いている＝リングも満ちた表示にする
 }
 
 // 1 件 = 1 行: [スピナー + 状態] [プロンプト（省略表示）] [✕]
@@ -1757,6 +1933,7 @@ async function runModalJobFrom(job) {
     entry.result = {
       url: r.url, seed: r.seed, elapsedMs: r.elapsedMs ?? null, execMs: r.execMs ?? null,
     };
+    noteWarm(job.input?.endpoint); // コンテナがアイドルに戻った時刻
     saveActiveJob(job);
   }
 
@@ -2733,13 +2910,16 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     deviceSync.pull();
     reloadHistory();
+    // 裏にいるあいだに他の画面・端末が温めているかもしれない
+    if (currentModalEndpoint()) fetchWarmState();
   }
+  syncWarmRing(); // 裏では 1 秒ごとの描き直しを止める
 });
 
 els.generateBtn.addEventListener('click', generate);
 // 生成完了時に出る「生成結果へ」。押されたときだけ結果まで送る
 els.jumpResult?.addEventListener('click', scrollToDetail);
-els.addLoraBtn.addEventListener('click', () => addLoraRow());
+els.addLoraBtn.addEventListener('click', () => addLoraRow('', undefined, els.loraList, false, true));
 els.compareToggle.addEventListener('change', () => setCompareMode(els.compareToggle.checked));
 els.addVariantBtn.addEventListener('click', () => addVariant());
 

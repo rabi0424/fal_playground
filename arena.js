@@ -16,10 +16,40 @@
 
 /* ---------- constants ---------- */
 
+// 比較に使えるモデル。fal のほかに自前ホスト（Modal / modal_comfy）の各版も選べる。
+// id は生成画面（app.js）と同じものを使う（履歴レコードの model がそろうため）。
+//
+// - provider: 'modal' は Worker のジョブ API（/api/krea2/generate）経由。fal は
+//   キュー API（/api/fal/proxy）経由で、送るパラメータの名前も別物
+// - loraBase: 参加チェックポイントの候補を絞るベースモデル
+// - ckpt: セッションで UNet（チェックポイント）を指定できる版
+// - cfgMax: ガイダンスの上限（Krea 2 Turbo は蒸留版なので 0〜1）
 const ARENA_MODELS = [
-  { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA' },
-  { id: '__custom__', name: 'カスタム…' },
+  { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA（fal）', loraBase: 'krea2' },
+  { id: 'modal/krea2-turbo-exp', name: 'Krea 2 [turbo] 自前ホスト（Modal 実験版）', provider: 'modal', endpoint: 'exp', loraBase: 'krea2', cfgMax: 1 },
+  { id: 'modal/krea2-turbo-gpusnap', name: 'Krea 2 [turbo] 自前ホスト（Modal GPUスナップ版）', provider: 'modal', endpoint: 'gpusnap', loraBase: 'krea2', cfgMax: 1 },
+  { id: 'modal/krea2-turbo', name: 'Krea 2 [turbo] 自前ホスト（Modal 本番）', provider: 'modal', endpoint: 'prod', loraBase: 'krea2', cfgMax: 1 },
+  { id: 'modal/krea2-turbo-ckpt', name: 'Krea 2 [turbo] 自前ホスト（Modal チェックポイント指定版）', provider: 'modal', endpoint: 'ckpt', loraBase: 'krea2', ckpt: true, cfgMax: 1 },
+  { id: 'modal/krea2-turbo-wan', name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・編集と共有）', provider: 'modal', endpoint: 'wan', loraBase: 'krea2', ckpt: true, cfgMax: 1 },
+  { id: 'modal/krea2-turbo-lanpaint', name: 'Krea 2 [turbo] 自前ホスト（Modal LanPaint 版）', provider: 'modal', endpoint: 'lanpaint', loraBase: 'krea2', ckpt: true, cfgMax: 1 },
+  { id: 'modal/krea2-turbo-unified', name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', provider: 'modal', endpoint: 'unified', loraBase: 'krea2', ckpt: true, cfgMax: 1 },
+  { id: 'modal/qwen-image-2.1', name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版）', provider: 'modal', endpoint: 'qwen21', loraBase: 'qwen21', ckpt: true, ckptBase: 'qwen21', cfgMax: 10 },
+  { id: '__custom__', name: 'カスタム…（fal）', loraBase: 'krea2' },
 ];
+
+// 系統ごとの既定チェックポイント（app.js と同じ。表示に使うだけ）
+const DEFAULT_CKPTS = {
+  krea2: 'Krea-2-Turbo-Q8_0.gguf',
+  qwen21: 'qwen_image_2.1_Q8_0.gguf',
+};
+const DEFAULT_CKPT_BASE = 'krea2';
+
+const DEFAULT_LORA_BASE = 'krea2';
+
+// Modal は同時 1 コンテナで順に処理する。全員ぶんを一度に投げると、後ろのジョブが
+// サーバー側の打ち切り（30 分）に当たってしまうので、少しずつ流す。
+// 1 本走らせながら次を待たせておけばコンテナは温まったままなので、これで遅くならない
+const MODAL_ROUND_CONCURRENCY = 2;
 
 // app.js と同じ約 1MP のプリセット
 const SIZES = [
@@ -65,7 +95,18 @@ const els = {
   sessionTitle: $('#sessionTitle'),
   sessionMeta: $('#sessionMeta'),
   deleteSessionBtn: $('#deleteSessionBtn'),
-  roundPrompt: $('#roundPrompt'),
+  roundPromptList: $('#roundPromptList'),
+  groupEditBtn: $('#groupEditBtn'),
+  groupDialog: $('#groupDialog'),
+  groupList: $('#groupList'),
+  groupAddBtn: $('#groupAddBtn'),
+  groupAssign: $('#groupAssign'),
+  groupRangeStart: $('#groupRangeStart'),
+  groupRangeEnd: $('#groupRangeEnd'),
+  groupRangeTarget: $('#groupRangeTarget'),
+  groupRangeBtn: $('#groupRangeBtn'),
+  groupDialogError: $('#groupDialogError'),
+  groupSaveBtn: $('#groupSaveBtn'),
   roundSize: $('#roundSize'),
   roundSteps: $('#roundSteps'),
   roundGuidance: $('#roundGuidance'),
@@ -98,6 +139,8 @@ const els = {
   sessionScale: $('#sessionScale'),
   sessionCustomModelField: $('#sessionCustomModelField'),
   sessionCustomModel: $('#sessionCustomModel'),
+  sessionCkptField: $('#sessionCkptField'),
+  sessionCkpt: $('#sessionCkpt'),
   rangeStart: $('#rangeStart'),
   rangeEnd: $('#rangeEnd'),
   rangeAddBtn: $('#rangeAddBtn'),
@@ -138,24 +181,137 @@ async function falFetch(url, options = {}) {
   return res.json();
 }
 
+/* ---------- Modal（自前ホスト）のジョブ API ---------- */
+// 生成画面（app.js）と同じ経路。Worker にジョブを登録し、/api/krea2/job/<id> を
+// ポーリングして結果を受け取る。ジョブ ID はこちらで採番するので、同じ ID で
+// 送り直しても多重生成にならない（＝ラウンドの再開がそのまま使える）
+
+function makeModalJobId() {
+  if (crypto.randomUUID) return crypto.randomUUID().replaceAll('-', '');
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function modalErrorMessage(res) {
+  if (res.status === 404) {
+    return 'この配信環境では Modal 版は使えません（Cloudflare Workers でのホストが必要です）';
+  }
+  const text = await res.text().catch(() => '');
+  return modalErrors.toError(res.status, text).message;
+}
+
+async function modalSubmit(body) {
+  const res = await fetch('/api/krea2/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (isHtmlResponse(res)) throw new Error(ACCESS_EXPIRED_MSG);
+  if (!res.ok) throw new Error(await modalErrorMessage(res));
+  return res.json();
+}
+
+// 完了まで待つ。時間切れはサーバー側（30 分）に任せる ―― 参加者が多いと Modal 側の
+// 順番待ちで長くなるので、こちらで打ち切ると正常なジョブまで落としてしまう。
+// 一時的な接続エラーは数回まで無視して次のポーリングで拾う
+async function modalAwaitJob(jobId, roundId) {
+  let errors = 0;
+  while (true) {
+    await sleep(POLL_INTERVAL_MS + Math.random() * 500);
+    if (roundAborts.has(roundId)) throw new Error('中断されました');
+
+    const res = await fetch(`/api/krea2/job/${jobId}`).catch(() => null);
+    if (!res || isHtmlResponse(res)) {
+      if (++errors >= POLL_MAX_CONSECUTIVE_ERRORS) {
+        throw new Error(res ? ACCESS_EXPIRED_MSG : '接続できませんでした');
+      }
+      continue;
+    }
+    if (res.status === 404) {
+      throw new Error('ジョブが見つかりませんでした（サーバー側で期限切れになった可能性があります）');
+    }
+    if (!res.ok) throw new Error(await modalErrorMessage(res));
+    errors = 0;
+    const job = await res.json().catch(() => null);
+    if (job?.status === 'done') return job;
+    if (job?.status === 'error') throw modalErrors.fromJobError(job.error, '生成に失敗しました');
+  }
+}
+
 /* ---------- LoRA ライブラリ（共有モジュール経由・読み取りのみ） ---------- */
 
 const loadLoraLibrary = () => loraLib.load();
 const loraDisplayName = (path) => loraLib.fileName(path);
 const loraLabel = (path) => loraLib.label(path);
 
-// 比較アリーナは Krea 2 の LoRA を比べる画面なので、候補もそれだけに絞る
-function sortedLoraLibrary() {
-  return loraLib.forBase('krea2');
+// 候補はモデルの系統に合うものだけ（Krea 2 の LoRA は Qwen 2.1 には効かない）
+function sortedLoraLibrary(base = DEFAULT_LORA_BASE) {
+  return loraLib.forBase(base);
+}
+
+/* ---------- モデル（fal / Modal 自前ホスト） ---------- */
+
+function arenaModel(id) {
+  return ARENA_MODELS.find((m) => m.id === id) ?? null;
+}
+
+// セッションが自前ホスト（Modal）かどうか。作成時に控えた値を正とし、
+// 無ければ id から引く（古いセッションは fal しか無かったので fal になる）
+function isModalSession(session) {
+  return (session.provider ?? arenaModel(session.modelId)?.provider) === 'modal';
+}
+
+function sessionEndpoint(session) {
+  return session.modalEndpoint ?? arenaModel(session.modelId)?.endpoint ?? 'exp';
+}
+
+function sessionCfgMax(session) {
+  return session.cfgMax ?? arenaModel(session.modelId)?.cfgMax ?? null;
+}
+
+/* ---------- チェックポイント（UNet）ライブラリ（読み取りのみ） ---------- */
+// 登録は生成画面の「チェックポイント」欄で行う。ここでは選ぶだけ
+
+function loadCkptLibrary() {
+  try {
+    return JSON.parse(falStore.get(LS_CKPTS)) || [];
+  } catch {
+    return [];
+  }
+}
+
+function ckptDisplayName(path) {
+  const seg = String(path).split('?')[0].split('/').filter(Boolean).pop() || path;
+  try {
+    return decodeURIComponent(seg);
+  } catch {
+    return seg;
+  }
+}
+
+function ckptsForBase(base = DEFAULT_CKPT_BASE) {
+  return loadCkptLibrary()
+    .filter((item) => (item.base ?? DEFAULT_CKPT_BASE) === base)
+    .map((item) => ({ path: item.path, name: item.name || ckptDisplayName(item.path) }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true, sensitivity: 'base' }));
+}
+
+function ckptLabel(path) {
+  if (!path) return '';
+  const item = loadCkptLibrary().find((x) => x.path === path);
+  return item?.name || ckptDisplayName(path);
 }
 
 /* ---------- arena state ---------- */
 // {
 //   sessions: [{
 //     id, name, modelId, scale, createdAt,
-//     participants: [{ id, path }],
+//     participants: [{ id, path, group }],
+//     groups: [{ id, name, prompt }],        // グループごとのプロンプト（最後に使ったもの）
 //     settings: { size, steps, guidance },   // 最後に使ったラウンド設定
 //     rounds: [{ id, prompt, seed, ts, status: 'generating'|'done',
+//                prompts: [{ id, name, prompt }],  // グループごとのプロンプト（生成時の控え）
+//                assign: { pid: gid },             // 生成時の所属（あとで分け直しても崩れないように）
 //                settings, results: { pid: { url, width, height, error } },
 //                pending: { pid: { status_url, response_url } }, historyId }],
 //     matches: [{ id, roundId, a, b, winner: 'a'|'b'|'draw', ts }],
@@ -215,6 +371,52 @@ function participantShortNames(session) {
     map[p.id] = cut > 0 && names[i].length > cut ? `…${names[i].slice(cut)}` : names[i];
   });
   return map;
+}
+
+/* ---------- グループ ---------- */
+// トリガーワードが違う LoRA（別人物・別データセット）は、同じプロンプトでは
+// 比べられない。参加者をグループに分け、ラウンドではグループごとのプロンプトで
+// 生成する。投票とランキングはグループをまたいで行うので、総合順位はそのまま出る。
+// groups を持たない古いセッションは「1 グループだけ」として扱う
+
+const DEFAULT_GROUP_ID = 'g1';
+
+function ensureGroups(session) {
+  if (!Array.isArray(session.groups) || session.groups.length === 0) {
+    session.groups = [{ id: DEFAULT_GROUP_ID, name: 'グループ 1', prompt: '' }];
+  }
+  return session.groups;
+}
+
+// 参加者の所属グループ。消えたグループを指していたら先頭に寄せる
+function groupOf(session, participant) {
+  const groups = ensureGroups(session);
+  return groups.find((g) => g.id === participant.group) ?? groups[0];
+}
+
+function groupMembers(session, groupId) {
+  return session.participants.filter((p) => groupOf(session, p).id === groupId);
+}
+
+// 生成に使うグループ。1 つも入っていないグループはプロンプトを訊かない
+function activeGroups(session) {
+  return ensureGroups(session).filter((g) => groupMembers(session, g.id).length > 0);
+}
+
+// ラウンドの表題に使う 1 行。全グループが同じ文言ならそのまま見せる
+function summarizePrompts(prompts) {
+  const uniq = [...new Set(prompts.map((p) => p.prompt))];
+  if (uniq.length <= 1) return uniq[0] ?? '';
+  return prompts.map((p) => `${p.name}: ${p.prompt}`).join(' ／ ');
+}
+
+// この参加者に送るプロンプト。生成時の控え（assign / prompts）を優先するので、
+// あとでグループを分け直しても過去のラウンドの表示はずれない
+function roundPromptFor(session, round, participant) {
+  const list = round.prompts;
+  if (!Array.isArray(list) || list.length === 0) return round.prompt;
+  const gid = round.assign?.[participant.id] ?? groupOf(session, participant).id;
+  return list.find((g) => g.id === gid)?.prompt ?? round.prompt;
 }
 
 /* ---------- Elo ---------- */
@@ -356,10 +558,15 @@ function setArenaError(text) {
   els.arenaError.textContent = text || '';
 }
 
+function roundSize(round) {
+  return SIZES.find((s) => s.value === round.settings?.size) || SIZES[0];
+}
+
+// fal のキュー API に送る入力
 function buildRoundInput(session, round, participant) {
-  const size = SIZES.find((s) => s.value === round.settings?.size) || SIZES[0];
+  const size = roundSize(round);
   const input = {
-    prompt: round.prompt,
+    prompt: roundPromptFor(session, round, participant),
     num_images: 1,
     seed: round.seed,
     image_size: { width: size.width, height: size.height },
@@ -380,25 +587,132 @@ function buildRoundInput(session, round, participant) {
   return input;
 }
 
+// Modal（modal_comfy）に送る入力。fal とは項目名が違う
+// （image_size → width/height、num_inference_steps → steps、guidance_scale → cfg、
+//  loras の path/scale → name/strength）
+function buildModalRoundInput(session, round, participant) {
+  const size = roundSize(round);
+  const input = {
+    prompt: roundPromptFor(session, round, participant),
+    width: size.width,
+    height: size.height,
+    seed: round.seed,
+    endpoint: sessionEndpoint(session),
+    // LoRA は URL のまま渡す（名前だけに落とすと、別リポジトリから取り込んだものが
+    // Modal 側で解決できず 404 になる）
+    loras: [{ name: loraLib.modalRef(participant.path), strength: session.scale }],
+  };
+  if (round.settings?.steps !== '' && round.settings?.steps != null) {
+    input.steps = Number(round.settings.steps);
+  }
+  if (round.settings?.guidance !== '' && round.settings?.guidance != null) {
+    input.cfg = Number(round.settings.guidance);
+  }
+  // セッションで指定した UNet（空なら Modal 側の既定）
+  if (session.checkpoint) input.checkpoint = session.checkpoint;
+  return input;
+}
+
+// ラウンドのプロンプト欄。グループが 2 つ以上あれば 1 つずつ並べる
+function roundPromptInput(groupId) {
+  return els.roundPromptList.querySelector(`textarea[data-gid="${CSS.escape(groupId)}"]`);
+}
+
+function renderRoundPrompts(session, { preserve = true } = {}) {
+  const groups = activeGroups(session);
+  const gids = groups.map((g) => g.id).join('|');
+
+  // 並びが同じなら作り直さない（入力中に組み立て直すと書きかけとフォーカスを失う）
+  if (preserve && els.roundPromptList.dataset.gids === gids) {
+    groups.forEach((g, i) => {
+      const label = els.roundPromptList.children[i]?.querySelector('.label');
+      if (label) label.textContent = `${g.name}（${groupMembers(session, g.id).length} チェックポイント）`;
+    });
+    return;
+  }
+
+  // 書きかけを消さないよう、今入っている文言は引き継ぐ
+  const typed = {};
+  if (preserve) {
+    for (const ta of els.roundPromptList.querySelectorAll('textarea')) typed[ta.dataset.gid] = ta.value;
+  }
+  els.roundPromptList.innerHTML = '';
+  els.roundPromptList.dataset.gids = gids;
+  const multi = groups.length > 1;
+  for (const g of groups) {
+    const field = document.createElement('label');
+    field.className = 'field';
+    if (multi) {
+      const label = document.createElement('span');
+      label.className = 'label';
+      label.textContent = `${g.name}（${groupMembers(session, g.id).length} チェックポイント）`;
+      field.appendChild(label);
+    }
+    const ta = document.createElement('textarea');
+    ta.rows = 3;
+    ta.spellcheck = false;
+    ta.placeholder = '生成したい画像を英語で記述...';
+    ta.dataset.gid = g.id;
+    ta.value = typed[g.id] ?? g.prompt ?? '';
+    // 書いた文言はグループに覚えさせる（次にこのセッションを開いたときのため）
+    ta.addEventListener('change', () => {
+      const target = ensureGroups(session).find((x) => x.id === g.id);
+      if (!target || target.prompt === ta.value) return;
+      target.prompt = ta.value;
+      saveArena();
+    });
+    field.appendChild(ta);
+    els.roundPromptList.appendChild(field);
+  }
+}
+
 async function startRound() {
   const session = getSession(currentSessionId);
   if (!session) return;
-  const prompt = els.roundPrompt.value.trim();
-  if (!prompt) {
+
+  // グループごとのプロンプトを集める。1 グループなら今までどおり 1 つ
+  const groups = activeGroups(session);
+  const prompts = [];
+  for (const g of groups) {
+    const text = (roundPromptInput(g.id)?.value ?? '').trim();
+    if (!text) {
+      setArenaError(groups.length > 1
+        ? `「${g.name}」のプロンプトを入力してください`
+        : 'プロンプトを入力してください');
+      return;
+    }
+    g.prompt = text; // 次回のプリフィル用
+    prompts.push({ id: g.id, name: g.name, prompt: text });
+  }
+  if (prompts.length === 0) {
     setArenaError('プロンプトを入力してください');
     return;
   }
   if (generatingSessions.has(session.id)) return;
 
+  // Krea 2 Turbo は蒸留版なのでガイダンスの範囲が狭い（0〜1）。範囲外は Modal 側が
+  // 422 で弾くので、全員ぶん送ってから全部失敗するより先にここで伝える
+  const cfgMax = sessionCfgMax(session);
+  const guidance = els.roundGuidance.value;
+  if (cfgMax !== null && guidance !== '' && (Number(guidance) < 0 || Number(guidance) > cfgMax)) {
+    setArenaError(`この API のガイダンスは 0〜${cfgMax} の範囲で指定してください`);
+    return;
+  }
+
   const n = session.participants.length;
-  if (n >= 10 && !confirm(`${n} 個のチェックポイントで ${n} 枚を一斉生成します。よろしいですか？`)) {
+  // Modal は同時 1 コンテナなので、枚数がそのまま待ち時間になる
+  const note = isModalSession(session) ? '（Modal は 1 枚ずつ順に処理するので時間がかかります）' : '';
+  if (n >= 10 && !confirm(`${n} 個のチェックポイントで ${n} 枚を一斉生成します${note}。よろしいですか？`)) {
     return;
   }
   setArenaError('');
 
   const round = {
     id: makeId('r'),
-    prompt,
+    prompt: summarizePrompts(prompts),
+    prompts,
+    // グループはあとから分け直せるので、このラウンドの所属を控えておく
+    assign: Object.fromEntries(session.participants.map((p) => [p.id, groupOf(session, p).id])),
     // 公平な比較のため全チェックポイントで同じ seed を使う
     seed: Math.floor(Math.random() * 4294967296),
     ts: Date.now(),
@@ -426,39 +740,8 @@ async function runRound(session, round) {
   updateGenerateUI(session, round);
 
   try {
-    // 1. 未送信の参加者をすべてキューに投入する
-    for (const p of session.participants) {
-      if (round.results[p.id] || round.pending[p.id]) continue;
-      if (roundAborts.has(round.id)) break;
-      try {
-        const sub = await falFetch(`https://queue.fal.run/${session.modelId}`, {
-          method: 'POST',
-          body: JSON.stringify(buildRoundInput(session, round, p)),
-        });
-        round.pending[p.id] = { status_url: sub.status_url, response_url: sub.response_url };
-      } catch (err) {
-        round.results[p.id] = { error: `送信失敗: ${err.message}` };
-      }
-      saveArena();
-      updateGenerateUI(session, round);
-    }
-
-    // 2. 全参加者の完了を並行して待つ
-    await Promise.all(session.participants.map(async (p) => {
-      const pend = round.pending[p.id];
-      if (!pend || round.results[p.id]) return;
-      try {
-        const r = await awaitRequest(pend, round.id);
-        const img = r.images?.[0];
-        if (!img) throw new Error('画像が返されませんでした');
-        round.results[p.id] = { url: img.url, width: img.width, height: img.height };
-      } catch (err) {
-        round.results[p.id] = { error: err.message };
-      }
-      delete round.pending[p.id];
-      saveArena();
-      updateGenerateUI(session, round);
-    }));
+    if (isModalSession(session)) await runRoundModal(session, round);
+    else await runRoundFal(session, round);
 
     await finalizeRound(session, round);
   } finally {
@@ -466,6 +749,91 @@ async function runRound(session, round) {
     roundAborts.delete(round.id);
     updateGenerateUI(session, null);
     renderSessionBody(session);
+  }
+}
+
+// fal: 全員ぶんをキューに投入してから、完了を並行して待つ
+async function runRoundFal(session, round) {
+  // 1. 未送信の参加者をすべてキューに投入する
+  for (const p of session.participants) {
+    if (round.results[p.id] || round.pending[p.id]) continue;
+    if (roundAborts.has(round.id)) break;
+    try {
+      const sub = await falFetch(`https://queue.fal.run/${session.modelId}`, {
+        method: 'POST',
+        body: JSON.stringify(buildRoundInput(session, round, p)),
+      });
+      round.pending[p.id] = { status_url: sub.status_url, response_url: sub.response_url };
+    } catch (err) {
+      round.results[p.id] = { error: `送信失敗: ${err.message}` };
+    }
+    saveArena();
+    updateGenerateUI(session, round);
+  }
+
+  // 2. 全参加者の完了を並行して待つ
+  await Promise.all(session.participants.map(async (p) => {
+    const pend = round.pending[p.id];
+    if (!pend || round.results[p.id]) return;
+    try {
+      const r = await awaitRequest(pend, round.id);
+      const img = r.images?.[0];
+      if (!img) throw new Error('画像が返されませんでした');
+      round.results[p.id] = { url: img.url, width: img.width, height: img.height };
+    } catch (err) {
+      round.results[p.id] = { error: err.message };
+    }
+    delete round.pending[p.id];
+    saveArena();
+    updateGenerateUI(session, round);
+  }));
+}
+
+// Modal: 同時 1 コンテナで順に処理されるので、少しずつ投げて待つ。
+// 送信済みのジョブ ID は pending に控えてあり、同じ ID で送り直しても
+// サーバー側が無視するので、ページを閉じたあとの再開でも二重生成にならない
+async function runRoundModal(session, round) {
+  const size = roundSize(round);
+  const queue = session.participants.filter((p) => !round.results[p.id]);
+  let next = 0;
+
+  const worker = async () => {
+    while (next < queue.length) {
+      const p = queue[next++];
+      if (roundAborts.has(round.id)) return;
+      try {
+        const jobId = round.pending[p.id]?.jobId ?? makeModalJobId();
+        if (round.pending[p.id]?.jobId !== jobId) {
+          round.pending[p.id] = { jobId };
+          saveArena();
+        }
+        await modalSubmit({ ...buildModalRoundInput(session, round, p), jobId });
+        const r = await modalAwaitJob(jobId, round.id);
+        if (!r.url) throw new Error('画像が返されませんでした');
+        round.results[p.id] = {
+          url: r.url,
+          width: r.width ?? size.width,
+          height: r.height ?? size.height,
+        };
+      } catch (err) {
+        round.results[p.id] = { error: err.message };
+      }
+      delete round.pending[p.id];
+      saveArena();
+      updateGenerateUI(session, round);
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(MODAL_ROUND_CONCURRENCY, queue.length) }, worker));
+
+  // 中断したときは、まだ順番が来ていなかったぶんも結果を埋めておく
+  // （「画像 N 枚」とだけ出て、残りがどうなったのか分からないのを避ける）
+  if (roundAborts.has(round.id)) {
+    for (const p of queue) {
+      if (!round.results[p.id]) round.results[p.id] = { error: '中断されました' };
+    }
+    saveArena();
   }
 }
 
@@ -506,6 +874,8 @@ async function finalizeRound(session, round) {
       seed: round.seed,
       elapsed: null,
       error: res.error ?? null,
+      // グループごとにプロンプトが違うので、実際に送った文言を記録に残す
+      prompt: roundPromptFor(session, round, p),
     };
   });
 
@@ -749,6 +1119,7 @@ function openSession(id) {
   }
   els.roundSteps.value = session.settings?.steps ?? '';
   els.roundGuidance.value = session.settings?.guidance ?? '';
+  renderRoundPrompts(session, { preserve: false });
 
   renderAll();
   const round = session.rounds.find((r) => r.status === 'generating');
@@ -757,12 +1128,17 @@ function openSession(id) {
 
 function renderSessionHead(session) {
   els.sessionTitle.textContent = session.name;
+  const groups = activeGroups(session);
+  const groupText = groups.length > 1 ? ` ・ ${groups.length} グループ` : '';
+  const ckptText = session.checkpoint ? ` ・ UNet ${ckptLabel(session.checkpoint)}` : '';
   els.sessionMeta.textContent =
-    `${session.modelId} ・ ${session.participants.length} チェックポイント ・ scale ${session.scale}`;
+    `${session.modelId} ・ ${session.participants.length} チェックポイント${groupText}`
+    + ` ・ scale ${session.scale}${ckptText}`;
 }
 
 function renderSessionBody(session) {
   if (session.id !== currentSessionId) return;
+  renderRoundPrompts(session);
   renderLeaderboard(session);
   // showNextPair が投票対象ラウンド（votingRoundId）を確定させてから
   // ラウンド一覧を描画する（「比較中」表示を正しくするため）
@@ -795,6 +1171,7 @@ function renderLeaderboard(session) {
   const { ratings, stats } = computeStandings(session, matches);
   const order = [...session.participants].sort((x, y) => ratings[y.id] - ratings[x.id]);
   const shortNames = participantShortNames(session);
+  const multiGroup = activeGroups(session).length > 1;
 
   els.lbBody.innerHTML = '';
   els.lbEmpty.hidden = matches.length > 0;
@@ -811,6 +1188,15 @@ function renderLeaderboard(session) {
     name.className = 'lb-name';
     name.textContent = shortNames[p.id];
     name.title = `${loraLabel(p.path)}\n${p.path}`;
+    // グループ分けしているときは、どの系統の成績なのかが分からないと読めない
+    if (multiGroup) {
+      const group = groupOf(session, p);
+      const chip = document.createElement('span');
+      chip.className = 'lb-group';
+      chip.textContent = group.name;
+      name.appendChild(chip);
+      name.title += `\nグループ: ${group.name}`;
+    }
     tr.appendChild(name);
 
     const elo = document.createElement('td');
@@ -948,12 +1334,33 @@ function renderRounds(session) {
     const head = document.createElement('div');
     head.className = 'round-item-head';
 
+    const groupPrompts = Array.isArray(round.prompts) ? round.prompts : [];
+    const multiGroup = groupPrompts.length > 1;
+
     const title = document.createElement('div');
     title.className = 'round-item-title';
-    title.textContent = `R${index}　${round.prompt}`;
+    title.textContent = multiGroup
+      ? `R${index}　${groupPrompts.length} グループ`
+      : `R${index}　${round.prompt}`;
     title.title = round.prompt;
     head.appendChild(title);
     item.appendChild(head);
+
+    // グループごとに文言が違うので、まとめた 1 行では読めない。1 行ずつ出す
+    if (multiGroup) {
+      for (const g of groupPrompts) {
+        const line = document.createElement('div');
+        line.className = 'round-group-prompt';
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = g.name;
+        const text = document.createElement('span');
+        text.textContent = g.prompt;
+        line.append(name, text);
+        line.title = g.prompt;
+        item.appendChild(line);
+      }
+    }
 
     const ok = Object.values(round.results).filter((r) => r.url).length;
     const failed = Object.values(round.results).filter((r) => r.error).length;
@@ -1006,28 +1413,47 @@ function renderRounds(session) {
       summary.textContent = '画像一覧（チェックポイント名が見えます）';
       details.appendChild(summary);
 
-      const grid = document.createElement('div');
-      grid.className = 'round-thumbs';
       const shortNames = participantShortNames(session);
-      for (const p of session.participants) {
-        const res = round.results[p.id];
-        if (!res?.url) continue;
-        const cell = document.createElement('div');
-        cell.className = 'round-thumb';
-        const img = document.createElement('img');
-        img.loading = 'lazy';
-        img.src = res.url;
-        img.alt = loraLabel(p.path);
-        img.addEventListener('click', () => openLightbox(res.url));
-        cell.appendChild(img);
-        const label = document.createElement('div');
-        label.className = 'name';
-        label.textContent = shortNames[p.id];
-        label.title = `${loraLabel(p.path)}\n${p.path}`;
-        cell.appendChild(label);
-        grid.appendChild(cell);
+      const addThumbs = (members) => {
+        const grid = document.createElement('div');
+        grid.className = 'round-thumbs';
+        for (const p of members) {
+          const res = round.results[p.id];
+          if (!res?.url) continue;
+          const cell = document.createElement('div');
+          cell.className = 'round-thumb';
+          const img = document.createElement('img');
+          img.loading = 'lazy';
+          img.src = res.url;
+          img.alt = loraLabel(p.path);
+          img.addEventListener('click', () => openLightbox(res.url));
+          cell.appendChild(img);
+          const label = document.createElement('div');
+          label.className = 'name';
+          label.textContent = shortNames[p.id];
+          label.title = `${loraLabel(p.path)}\n${p.path}`;
+          cell.appendChild(label);
+          grid.appendChild(cell);
+        }
+        details.appendChild(grid);
+      };
+
+      if (multiGroup) {
+        // 生成時の所属で束ねる（あとで分け直しても、この一覧は当時のまま）
+        for (const g of groupPrompts) {
+          const members = session.participants.filter((p) =>
+            (round.assign?.[p.id] ?? groupOf(session, p).id) === g.id && round.results[p.id]?.url);
+          if (members.length === 0) continue;
+          const heading = document.createElement('div');
+          heading.className = 'round-thumb-group';
+          heading.textContent = `${g.name}（${members.length}）`;
+          heading.title = g.prompt;
+          details.appendChild(heading);
+          addThumbs(members);
+        }
+      } else {
+        addThumbs(session.participants);
       }
-      details.appendChild(grid);
       item.appendChild(details);
     }
 
@@ -1047,6 +1473,177 @@ function closeLightbox() {
   els.lightbox.querySelector('img').src = '';
 }
 
+/* ---------- グループ分けダイアログ ---------- */
+// 下書きを編集して「保存」で反映する（途中でやめても元のままにするため）
+
+let groupDraft = null; // [{ id, name, prompt }]
+let assignDraft = null; // { pid: gid }
+
+function groupDialogSetError(text) {
+  els.groupDialogError.hidden = !text;
+  els.groupDialogError.textContent = text || '';
+}
+
+function openGroupDialog() {
+  const session = getSession(currentSessionId);
+  if (!session) return;
+  groupDialogSetError('');
+  groupDraft = ensureGroups(session).map((g) => ({ ...g }));
+  assignDraft = Object.fromEntries(
+    session.participants.map((p) => [p.id, groupOf(session, p).id]));
+  renderGroupDialog(session);
+  els.groupDialog.showModal();
+}
+
+function draftMemberCount(gid) {
+  return Object.values(assignDraft).filter((x) => x === gid).length;
+}
+
+function renderGroupDialog(session) {
+  // グループ一覧（名前の編集と削除）
+  els.groupList.innerHTML = '';
+  for (const g of groupDraft) {
+    const row = document.createElement('div');
+    row.className = 'group-row';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = g.name;
+    input.spellcheck = false;
+    input.addEventListener('input', () => { g.name = input.value; });
+    // 所属の選択肢にも名前を反映する（入力中は動かさない）
+    input.addEventListener('change', () => renderGroupDialog(session));
+    row.appendChild(input);
+
+    const count = document.createElement('span');
+    count.className = 'meta';
+    count.textContent = `${draftMemberCount(g.id)} 個`;
+    row.appendChild(count);
+
+    const del = document.createElement('button');
+    del.className = 'ghost-btn small';
+    del.type = 'button';
+    del.textContent = '削除';
+    del.disabled = groupDraft.length < 2;
+    del.title = groupDraft.length < 2 ? 'グループは 1 つ以上必要です' : '';
+    del.addEventListener('click', () => {
+      groupDraft = groupDraft.filter((x) => x.id !== g.id);
+      // 行き場を失った参加者は先頭のグループへ
+      for (const pid of Object.keys(assignDraft)) {
+        if (assignDraft[pid] === g.id) assignDraft[pid] = groupDraft[0].id;
+      }
+      renderGroupDialog(session);
+    });
+    row.appendChild(del);
+
+    els.groupList.appendChild(row);
+  }
+
+  // 範囲での一括割り当て（連番のチェックポイントをまとめて動かす用）
+  const fillRange = (select, value) => {
+    select.innerHTML = '';
+    session.participants.forEach((p, i) => {
+      const opt = document.createElement('option');
+      opt.value = String(i);
+      opt.textContent = loraLabel(p.path);
+      select.appendChild(opt);
+    });
+    select.value = value;
+  };
+  const prevStart = els.groupRangeStart.value || '0';
+  const prevEnd = els.groupRangeEnd.value || String(session.participants.length - 1);
+  fillRange(els.groupRangeStart, prevStart);
+  fillRange(els.groupRangeEnd, prevEnd);
+
+  const prevTarget = els.groupRangeTarget.value;
+  els.groupRangeTarget.innerHTML = '';
+  for (const g of groupDraft) {
+    const opt = document.createElement('option');
+    opt.value = g.id;
+    opt.textContent = `→ ${g.name}`;
+    els.groupRangeTarget.appendChild(opt);
+  }
+  els.groupRangeTarget.value = prevTarget;
+  if (els.groupRangeTarget.value !== prevTarget) els.groupRangeTarget.value = groupDraft[0].id;
+
+  // 参加者ごとの所属
+  els.groupAssign.innerHTML = '';
+  session.participants.forEach((p) => {
+    const row = document.createElement('label');
+    const name = document.createElement('span');
+    name.className = 'plist-name';
+    name.textContent = loraLabel(p.path);
+    name.title = p.path;
+    row.appendChild(name);
+
+    const select = document.createElement('select');
+    for (const g of groupDraft) {
+      const opt = document.createElement('option');
+      opt.value = g.id;
+      opt.textContent = g.name;
+      select.appendChild(opt);
+    }
+    select.value = assignDraft[p.id];
+    if (select.value !== assignDraft[p.id]) select.value = groupDraft[0].id;
+    select.addEventListener('change', () => {
+      assignDraft[p.id] = select.value;
+      renderGroupDialog(session);
+    });
+    row.appendChild(select);
+
+    els.groupAssign.appendChild(row);
+  });
+}
+
+function applyGroupRange() {
+  const session = getSession(currentSessionId);
+  if (!session || !groupDraft) return;
+  const a = Number(els.groupRangeStart.value);
+  const b = Number(els.groupRangeEnd.value);
+  const gid = els.groupRangeTarget.value;
+  if (!Number.isInteger(a) || !Number.isInteger(b)) return;
+  const [lo, hi] = a <= b ? [a, b] : [b, a];
+  session.participants.forEach((p, i) => {
+    if (i >= lo && i <= hi) assignDraft[p.id] = gid;
+  });
+  renderGroupDialog(session);
+}
+
+function saveGroupDialog() {
+  const session = getSession(currentSessionId);
+  if (!session || !groupDraft) return false;
+  const names = groupDraft.map((g) => g.name.trim());
+  if (names.some((n) => !n)) {
+    groupDialogSetError('グループ名を入力してください');
+    return false;
+  }
+  session.groups = groupDraft.map((g, i) => ({ id: g.id, name: names[i], prompt: g.prompt ?? '' }));
+  for (const p of session.participants) {
+    const gid = assignDraft[p.id];
+    p.group = session.groups.some((g) => g.id === gid) ? gid : session.groups[0].id;
+  }
+  saveArena();
+  renderRoundPrompts(session);
+  renderSessionHead(session);
+  renderSessionBody(session);
+  return true;
+}
+
+function initGroupDialog() {
+  els.groupEditBtn.addEventListener('click', openGroupDialog);
+  els.groupAddBtn.addEventListener('click', () => {
+    const session = getSession(currentSessionId);
+    if (!session || !groupDraft) return;
+    groupDraft.push({ id: makeId('g'), name: `グループ ${groupDraft.length + 1}`, prompt: '' });
+    renderGroupDialog(session);
+  });
+  els.groupRangeBtn.addEventListener('click', applyGroupRange);
+  els.groupSaveBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (saveGroupDialog()) els.groupDialog.close('save');
+  });
+}
+
 /* ---------- セッション作成ダイアログ ---------- */
 
 function dialogSetError(text) {
@@ -1059,15 +1656,14 @@ function updatePlistCount() {
   els.plistCount.textContent = `${n} 個を選択中`;
 }
 
-function openSessionDialog() {
-  dialogSetError('');
-  els.sessionName.value = `セッション ${new Date().toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}`;
-  els.sessionScale.value = '1';
-  els.sessionModel.value = ARENA_MODELS[0].id;
-  els.sessionCustomModel.value = '';
-  els.sessionCustomModelField.hidden = true;
+// いま選ばれているモデル（カスタムは fal 扱い）
+function dialogModel() {
+  return arenaModel(els.sessionModel.value);
+}
 
-  const lib = sortedLoraLibrary();
+// 参加候補の一覧。モデルの系統に合う LoRA だけを出す
+function renderPlist(base) {
+  const lib = sortedLoraLibrary(base);
   els.plist.innerHTML = '';
   els.rangeStart.innerHTML = '';
   els.rangeEnd.innerHTML = '';
@@ -1094,10 +1690,54 @@ function openSessionDialog() {
   });
   if (lib.length > 0) els.rangeEnd.value = String(lib.length - 1);
   updatePlistCount();
+  return lib;
+}
 
-  if (lib.length === 0) {
-    dialogSetError('LoRA ライブラリが空です。生成画面の「Hugging Face から一括登録」などでチェックポイントを登録してください。');
+// チェックポイント指定版で使う UNet の候補（登録は生成画面で行う）
+function populateSessionCkpt(base) {
+  const prev = els.sessionCkpt.value;
+  els.sessionCkpt.innerHTML = '';
+  const defOpt = document.createElement('option');
+  defOpt.value = '';
+  defOpt.textContent = `既定（${DEFAULT_CKPTS[base] ?? DEFAULT_CKPTS[DEFAULT_CKPT_BASE]}）`;
+  els.sessionCkpt.appendChild(defOpt);
+  for (const item of ckptsForBase(base)) {
+    const opt = document.createElement('option');
+    opt.value = item.path;
+    opt.textContent = item.name;
+    opt.title = item.path;
+    els.sessionCkpt.appendChild(opt);
   }
+  els.sessionCkpt.value = prev;
+  if (els.sessionCkpt.value !== prev) els.sessionCkpt.value = '';
+}
+
+// モデルを変えると、使える LoRA もチェックポイントも変わる
+function syncSessionModelFields() {
+  const model = dialogModel();
+  els.sessionCustomModelField.hidden = els.sessionModel.value !== '__custom__';
+  els.sessionCkptField.hidden = !model?.ckpt;
+  if (model?.ckpt) populateSessionCkpt(model.ckptBase ?? DEFAULT_CKPT_BASE);
+
+  const base = model?.loraBase ?? DEFAULT_LORA_BASE;
+  if (els.plist.dataset.base !== base) {
+    els.plist.dataset.base = base;
+    const lib = renderPlist(base);
+    dialogSetError(lib.length === 0
+      ? 'このモデルの系統に合う LoRA がライブラリにありません。生成画面の「Hugging Face から一括登録」などで登録してください。'
+      : '');
+  }
+}
+
+function openSessionDialog() {
+  dialogSetError('');
+  els.sessionName.value = `セッション ${new Date().toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}`;
+  els.sessionScale.value = '1';
+  els.sessionModel.value = ARENA_MODELS[0].id;
+  els.sessionCustomModel.value = '';
+  els.sessionCkpt.value = '';
+  delete els.plist.dataset.base; // モデルが同じでも一覧は作り直す（登録が増えている）
+  syncSessionModelFields();
   els.sessionDialog.showModal();
 }
 
@@ -1129,10 +1769,16 @@ function createSessionFromDialog() {
   }
   const scale = Number(els.sessionScale.value);
 
+  const model = dialogModel();
   const session = {
     id: makeId('s'),
     name: els.sessionName.value.trim() || 'セッション',
     modelId,
+    // 自前ホスト（Modal）は送り先も送る形も別物。あとでモデル一覧から消えても
+    // 動くように、セッションに控えておく
+    ...(model?.provider === 'modal' ? { provider: 'modal', modalEndpoint: model.endpoint } : {}),
+    ...(model?.cfgMax != null ? { cfgMax: model.cfgMax } : {}),
+    ...(model?.ckpt && els.sessionCkpt.value ? { checkpoint: els.sessionCkpt.value } : {}),
     scale: Number.isFinite(scale) && scale > 0 ? scale : 1,
     createdAt: Date.now(),
     participants: paths.map((path, i) => ({ id: `p${i + 1}`, path })),
@@ -1155,9 +1801,7 @@ function initSessionDialog() {
     opt.textContent = m.name;
     els.sessionModel.appendChild(opt);
   }
-  els.sessionModel.addEventListener('change', () => {
-    els.sessionCustomModelField.hidden = els.sessionModel.value !== '__custom__';
-  });
+  els.sessionModel.addEventListener('change', syncSessionModelFields);
 
   els.rangeAddBtn.addEventListener('click', applyRangeSelection);
   els.plistAllBtn.addEventListener('click', () => {
@@ -1204,6 +1848,7 @@ loraLib.onChange = () => deviceSync.markDirty('loras');
 loraLib.migrate();
 
 initSessionDialog();
+initGroupDialog();
 
 for (const s of SIZES) {
   const opt = document.createElement('option');
@@ -1256,7 +1901,7 @@ document.addEventListener('keydown', (e) => {
   }
   // 投票ショートカット。入力中・ダイアログ表示中は無効
   if (els.sessionView.hidden || els.votePanel.hidden || !currentPair) return;
-  if (els.sessionDialog.open) return;
+  if (els.sessionDialog.open || els.groupDialog.open) return;
   const tag = document.activeElement?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   if (e.key === 'ArrowLeft') { e.preventDefault(); vote('a'); }

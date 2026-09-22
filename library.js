@@ -45,6 +45,8 @@ const els = {
   bulkCount: $('#bulkCount'),
   bulkBaseSelect: $('#bulkBaseSelect'),
   bulkApplyBtn: $('#bulkApplyBtn'),
+  bulkHideBtn: $('#bulkHideBtn'),
+  bulkShowBtn: $('#bulkShowBtn'),
   bulkAllBtn: $('#bulkAllBtn'),
   bulkClearBtn: $('#bulkClearBtn'),
 };
@@ -95,7 +97,7 @@ function formatDate(ts) {
 /* ---------- 一覧の状態 ---------- */
 
 let library = loadLibrary();
-let filter = 'all'; // 'all' | 'fav' | 'todo' | `base:<名前>`
+let filter = 'all'; // 'all' | 'fav' | 'todo' | 'hidden' | `base:<名前>`
 let expanded = null; // 展開中の path
 const selected = new Set(); // 一括操作で選んでいる path
 const saveTimers = new Map();
@@ -136,6 +138,9 @@ function renderBulkBar() {
   if (selected.size === 0) return;
   els.bulkCount.textContent = `${selected.size} 件を選択中`;
   els.bulkApplyBtn.textContent = `選択した ${selected.size} 件に反映`;
+  // いま見ている一覧で意味のあるほうだけ出す（非表示の一覧に「非表示にする」は要らない）
+  els.bulkHideBtn.hidden = filter === 'hidden';
+  els.bulkShowBtn.hidden = filter !== 'hidden';
   // 開き直すたびに選び直させない。今の選択を保ったまま候補だけ作り直す
   fillBaseSelect(els.bulkBaseSelect, els.bulkBaseSelect.value);
 }
@@ -154,8 +159,26 @@ function applyBulkBase() {
   render();
 }
 
+// 一括で非表示にする / 戻す。保存は loraLib 側で 1 回にまとまる
+function applyBulkHidden(on) {
+  const paths = [...selected];
+  if (paths.length === 0) return;
+  flushSaves(); // 書きかけの編集を先に確定させる（読み直しで消さないため）
+  const changed = loraLib.setHiddenMany(paths, on);
+  library = loadLibrary();
+  // 隠したものは今の一覧から消えるので、選択も外して操作バーを残さない
+  if (on && filter !== 'hidden') selected.clear();
+  if (!on && filter === 'hidden') selected.clear();
+  setStatus(changed === 0
+    ? (on ? '選択した LoRA はすべて非表示です' : '選択した LoRA はすべて表示中です')
+    : `${changed} 件を${on ? '非表示にしました' : '候補に戻しました'}`, true);
+  render();
+}
+
 function initBulkBar() {
   els.bulkApplyBtn.addEventListener('click', applyBulkBase);
+  els.bulkHideBtn.addEventListener('click', () => applyBulkHidden(true));
+  els.bulkShowBtn.addEventListener('click', () => applyBulkHidden(false));
   els.bulkAllBtn.addEventListener('click', () => {
     for (const item of visibleItems()) selected.add(item.path);
     render();
@@ -192,9 +215,12 @@ function matchesSearch(item, q) {
   return hay.includes(q);
 }
 
+// 非表示にしたものは、ほかの画面の候補からも、この一覧の既定の表示からも外す。
+// 「非表示」フィルタがそれらを見る（＝戻す）ための場所
 function visibleItems() {
   const q = els.searchInput.value.trim().toLowerCase();
   let items = library.filter((item) => matchesSearch(item, q));
+  items = items.filter((i) => (filter === 'hidden' ? i.hidden : !i.hidden));
   if (filter === 'fav') items = items.filter((i) => i.fav);
   else if (filter === 'todo') items = items.filter(needsAttention);
   else if (filter.startsWith('base:')) {
@@ -215,12 +241,16 @@ function visibleItems() {
 /* ---------- 描画 ---------- */
 
 function renderFilters() {
-  const bases = [...new Set(library.map((i) => i.base).filter(Boolean))].sort();
+  // 件数は「非表示を除いたもの」で数える（一覧に出る数と合わせる）。
+  // 「非表示」チップだけが非表示のものを数え、押すとそれだけを見せる
+  const shown = library.filter((i) => !i.hidden);
+  const bases = [...new Set(shown.map((i) => i.base).filter(Boolean))].sort();
   const chips = [
-    { key: 'all', label: 'すべて', count: library.length },
-    { key: 'fav', label: '★', count: library.filter((i) => i.fav).length },
-    { key: 'todo', label: '要整理', count: library.filter(needsAttention).length },
-    ...bases.map((b) => ({ key: `base:${b}`, label: b, count: library.filter((i) => i.base === b).length })),
+    { key: 'all', label: 'すべて', count: shown.length },
+    { key: 'fav', label: '★', count: shown.filter((i) => i.fav).length },
+    { key: 'todo', label: '要整理', count: shown.filter(needsAttention).length },
+    { key: 'hidden', label: '非表示', count: library.filter((i) => i.hidden).length },
+    ...bases.map((b) => ({ key: `base:${b}`, label: b, count: shown.filter((i) => i.base === b).length })),
   ];
   els.filterChips.innerHTML = '';
   for (const chip of chips) {
@@ -258,6 +288,7 @@ function renderCard(item) {
   const card = document.createElement('div');
   card.className = 'lib-card';
   if (expanded === item.path) card.classList.add('open');
+  if (item.hidden) card.classList.add('is-hidden');
 
   /* --- 見出し行 --- */
   const head = document.createElement('div');
@@ -291,10 +322,36 @@ function renderCard(item) {
   });
   head.appendChild(star);
 
+  // 非表示の付け外し。削除と違ってレコードは残るので、情報を失わずに畳める
+  const eye = document.createElement('button');
+  eye.type = 'button';
+  eye.className = 'lib-eye';
+  eye.classList.toggle('on', !!item.hidden);
+  eye.textContent = item.hidden ? '🚫' : '👁';
+  eye.title = item.hidden
+    ? '候補に戻す'
+    : '候補から隠す（登録は残ります。ほかの画面のプルダウンから消えます）';
+  eye.addEventListener('click', (e) => {
+    e.stopPropagation();
+    scheduleSave(item.path, (i) => {
+      if (i.hidden) delete i.hidden;
+      else i.hidden = true;
+    });
+    render();
+  });
+  head.appendChild(eye);
+
   const name = document.createElement('span');
   name.className = 'lib-name';
   name.textContent = entryLabel(item);
   head.appendChild(name);
+
+  if (item.hidden) {
+    const badge = document.createElement('span');
+    badge.className = 'lib-badge';
+    badge.textContent = '非表示';
+    head.appendChild(badge);
+  }
 
   // ベースモデルと「まだ情報を取っていない」ことは別の情報なので両方出す
   if (item.base) {
@@ -394,7 +451,47 @@ function renderEditor(item) {
     scheduleSave(item.path, (i) => { i.trigger = trigInput.value; });
   });
   box.appendChild(field('トリガーワード', trigInput,
-    'カンマ区切り。生成画面の「挿入」でプロンプト末尾に足せます。'));
+    'カンマ区切り。生成画面と画像編集の「挿入」でプロンプトに足せます。'));
+
+  /* トリガーワードの入れ方 */
+  // 位置と自動挿入は 1 組で考えるものなので、同じ欄にまとめる
+  const trigOpts = document.createElement('div');
+  trigOpts.className = 'lib-trigger-opts';
+
+  const placeSelect = document.createElement('select');
+  for (const [value, text] of [['end', '末尾に足す（既定）'], ['head', '冒頭に足す']]) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = text;
+    placeSelect.appendChild(opt);
+  }
+  placeSelect.value = item.triggerPlace === 'head' ? 'head' : 'end';
+  placeSelect.addEventListener('change', () => {
+    scheduleSave(item.path, (i) => {
+      if (placeSelect.value === 'head') i.triggerPlace = 'head';
+      else delete i.triggerPlace;
+    });
+  });
+  trigOpts.appendChild(placeSelect);
+
+  const autoLabel = document.createElement('label');
+  autoLabel.className = 'check-row';
+  const autoCheck = document.createElement('input');
+  autoCheck.type = 'checkbox';
+  autoCheck.checked = !!item.triggerAuto;
+  autoCheck.addEventListener('change', () => {
+    scheduleSave(item.path, (i) => {
+      if (autoCheck.checked) i.triggerAuto = true;
+      else delete i.triggerAuto;
+    });
+  });
+  const autoText = document.createElement('span');
+  autoText.textContent = 'この LoRA を選んだら自動で入れる';
+  autoLabel.append(autoCheck, autoText);
+  trigOpts.appendChild(autoLabel);
+
+  box.appendChild(field('トリガーワードの入れ方', trigOpts,
+    '自動挿入は、LoRA 行に追加したときとプルダウンで選び直したときに走ります（すでに書かれている語は足しません）。下書きの復元や履歴からの再利用では走りません。'));
 
   /* 既定 scale */
   const scaleWrap = document.createElement('div');

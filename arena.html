@@ -19,6 +19,7 @@
 <script src="store.js" defer></script>
 <script src="lora-library.js" defer></script>
 <script src="device-sync.js" defer></script>
+<script src="modal-errors.js" defer></script>
 <script src="arena-chart.js" defer></script>
 <script src="arena.js" defer></script>
 </head>
@@ -60,10 +61,11 @@
 
         <div class="panel arena-panel">
           <h3>新しいラウンド（全チェックポイントで一斉生成）</h3>
-          <label class="field">
+          <div class="round-prompt-head">
             <span class="label">プロンプト</span>
-            <textarea id="roundPrompt" rows="3" placeholder="生成したい画像を英語で記述..." spellcheck="false"></textarea>
-          </label>
+            <button id="groupEditBtn" class="ghost-btn small" type="button">グループ分け…</button>
+          </div>
+          <div id="roundPromptList" class="round-prompts"></div>
           <div class="row">
             <label class="field">
               <span class="label">サイズ</span>
@@ -175,6 +177,11 @@
       <input id="sessionCustomModel" type="text" placeholder="fal-ai/..." spellcheck="false">
     </label>
 
+    <label class="field" id="sessionCkptField" hidden>
+      <span class="label">チェックポイント（UNet）</span>
+      <select id="sessionCkpt" title="このセッションの全ラウンドで使う UNet。登録は生成画面の「チェックポイント」欄から行います"></select>
+    </label>
+
     <div class="field">
       <span class="label">参加チェックポイント（LoRA ライブラリから選択）</span>
       <div class="range-row">
@@ -196,6 +203,43 @@
     <div class="key-actions">
       <button value="cancel" class="ghost-btn" formnovalidate type="submit">キャンセル</button>
       <button value="create" id="createSessionBtn" class="primary-btn" type="submit">セッションを作成</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- グループ分けダイアログ -->
+<dialog id="groupDialog" class="key-dialog session-dialog">
+  <form method="dialog" class="key-form">
+    <h2>チェックポイントのグループ分け</h2>
+    <p class="hint">
+      グループごとに別のプロンプトで一斉生成します。トリガーワードが違う同じ人物の LoRA をまとめて
+      比べるときに使います。投票とランキングはグループをまたいで行うので、総合順位はそのまま出ます。
+    </p>
+
+    <div class="field">
+      <span class="label">グループ</span>
+      <div id="groupList" class="group-list"></div>
+      <div class="plist-actions">
+        <button id="groupAddBtn" class="ghost-btn small" type="button">＋ グループを追加</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <span class="label">所属するグループ</span>
+      <div class="range-row">
+        <select id="groupRangeStart"></select>
+        <span class="range-tilde">〜</span>
+        <select id="groupRangeEnd"></select>
+        <select id="groupRangeTarget"></select>
+        <button id="groupRangeBtn" class="ghost-btn small" type="button">範囲を割り当て</button>
+      </div>
+      <div id="groupAssign" class="plist group-assign"></div>
+    </div>
+
+    <div id="groupDialogError" class="error" hidden></div>
+    <div class="key-actions">
+      <button value="cancel" class="ghost-btn" formnovalidate type="submit">キャンセル</button>
+      <button value="save" id="groupSaveBtn" class="primary-btn" type="submit">保存</button>
     </div>
   </form>
 </dialog>
