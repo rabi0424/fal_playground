@@ -13,7 +13,10 @@ function loadSync({ library = '[]', remote = null, status = 200 } = {}) {
   const store = new Map([['fal_lora_library', library]]);
   const puts = [];
   const warnings = [];
+  const gets = [];
+  const listeners = {};
   const sandbox = {
+    addEventListener: (type, fn) => { (listeners[type] ??= []).push(fn); },
     console: { ...console, warn: (...a) => warnings.push(a.join(' ')) },
     TextEncoder,
     Response,
@@ -34,13 +37,14 @@ function loadSync({ library = '[]', remote = null, status = 200 } = {}) {
         puts.push({ keepalive: !!init.keepalive, bytes: init.body.length });
         return new Response('{}', { status });
       }
+      gets.push(url);
       return Response.json(remote);
     },
   };
   sandbox.window = sandbox;
   createContext(sandbox);
   runInContext(readFileSync(new URL('../device-sync.js', import.meta.url), 'utf8'), sandbox);
-  return { deviceSync: sandbox.deviceSync, store, puts, warnings };
+  return { deviceSync: sandbox.deviceSync, store, puts, warnings, gets, listeners };
 }
 
 const big = JSON.stringify(Array.from({ length: 600 }, (_, i) => ({
@@ -93,6 +97,18 @@ let passed = 0;
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(s.warnings.length, 1);
   assert.match(s.warnings[0], /413/);
+  passed++;
+}
+
+// 5. bfcache から復元されたとき（戻るボタンなど）にも取り寄せる。通常の表示では
+//    各画面が自分で pull するので、ここでは二重に取らない
+{
+  const s = loadSync();
+  for (const fn of s.listeners.pageshow ?? []) fn({ persisted: false });
+  assert.equal(s.gets.length, 0);
+  for (const fn of s.listeners.pageshow ?? []) fn({ persisted: true });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(s.gets.length, 1);
   passed++;
 }
 

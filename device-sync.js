@@ -129,6 +129,14 @@ async function push({ keepalive = false } = {}) {
   }
 }
 
+// 各画面は「開いたとき」と「タブが前面に戻ったとき」に pull する。ただし戻る
+// ボタンなどで bfcache から復元されたときは、読み込みも visibilitychange も
+// 起きない（iOS Safari）。そのままだと前に開いたときの内容が出続けるので、
+// 復元されたときにも取り寄せる
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) pull();
+});
+
 /* ---------- 公開 API ---------- */
 
 window.deviceSync = {
