@@ -568,6 +568,11 @@ test('統計は、これまでのクライアント側の計算と一致する',
     assert.ok(Math.abs(stat.mean - mean) < 1e-9, `${model}: 平均 ${stat.mean} !== ${mean}`);
     // ヒストグラムは、標本の総数と刻み数が合っていること
     assert.equal(stat.counts.reduce((s, c) => s + c, 0), sorted.length, `${model}: ヒストグラムの総数`);
+    // ビン境界はきりのいい秒数（幅は 1-2-5 系列、左端は幅の倍数）で、全標本を覆う
+    const mant = stat.width / 10 ** Math.floor(Math.log10(stat.width));
+    assert.ok([1, 2, 5].some((m) => Math.abs(mant - m) < 1e-9), `${model}: 幅 ${stat.width} が 1-2-5 系列でない`);
+    assert.ok(Math.abs(stat.lo / stat.width - Math.round(stat.lo / stat.width)) < 1e-9, `${model}: 左端 ${stat.lo} が幅の倍数でない`);
+    assert.ok(stat.lo <= stat.min && stat.lo + stat.counts.length * stat.width >= stat.max, `${model}: ビンが標本を覆っていない`);
   }
   assert.equal('fal-ai/flux/dev' in got, true);
   assert.equal(got['fal-ai/flux/dev'].n, 3, '比較や上限超えを数えています');

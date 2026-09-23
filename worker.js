@@ -1441,8 +1441,20 @@ function statsQuantile(sorted, q) {
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
 }
 
+// 1-2-5 系列に切り上げた、目盛に使えるきりのいい刻み幅
+function niceStep(raw) {
+  const pow = 10 ** Math.floor(Math.log10(raw));
+  const m = raw / pow;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * pow;
+}
+
 // 標本そのものではなく、描くのに要るものだけ返す（件数に依らない大きさにする）。
-// ヒストグラムの刻み方は、これまでクライアントが描いていたものと同じ
+//
+// ヒストグラムのビン境界はきりのいい秒数に揃える（目盛をそのまま境界に使えるように）。
+// ビン数の目安（標本数の平方根、5〜12）から 1-2-5 系列の幅に丸め、両端をその倍数まで
+// 広げる。全標本が同じ値のときは値の大きさから幅を決める。
+//   lo    … 最初のビンの左端（min 以下のきりのいい値）
+//   width … ビンの幅
 function summarizeStats(samples) {
   const out = {};
   for (const [model, values] of samples) {
@@ -1450,14 +1462,19 @@ function summarizeStats(samples) {
     const n = values.length;
     const min = values[0];
     const max = values[n - 1];
-    const bins = Math.min(16, Math.max(5, Math.ceil(Math.sqrt(n))));
-    const width = Math.max((max - min) / bins, 0.05);
+    const targetBins = Math.min(12, Math.max(5, Math.ceil(Math.sqrt(n))));
+    const rawStep = (max - min) / targetBins;
+    const width = niceStep(rawStep > 0 ? rawStep : Math.max(max / 20, 0.1));
+    const lo = Math.floor(min / width) * width;
+    const hi = Math.max(Math.ceil(max / width) * width, lo + width);
+    const bins = Math.max(1, Math.round((hi - lo) / width));
     const counts = new Array(bins).fill(0);
-    for (const v of values) counts[Math.min(bins - 1, Math.floor((v - min) / width))] += 1;
+    for (const v of values) counts[Math.min(bins - 1, Math.floor((v - lo) / width))] += 1;
     out[model] = {
       n,
       min,
       max,
+      lo,
       width,
       counts,
       mean: values.reduce((sum, v) => sum + v, 0) / n,
