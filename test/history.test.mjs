@@ -229,6 +229,32 @@ test('limit と cursor でページを刻める', async () => {
   assert.equal(nextCursor(third), null, '最後のページで続きを返しています');
 });
 
+test('先頭ページだけ、絞り込み後の件数と画像の枚数をヘッダで返す', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  // 通常 2 枚、比較 2+3 枚、画像編集（images に入力なども並ぶが出力は 1 枚）
+  await postRecord(mod, env, { id: 'g', prompt: 'a cat', images: [{ url: '/a' }, { url: '/b' }] });
+  await postRecord(mod, env, {
+    id: 'cmp', prompt: 'a dog', type: 'compare',
+    variants: [{ images: [{ url: '/c' }, { url: '/d' }] }, { images: [{ url: '/e' }, { url: '/f' }, { url: '/g' }] }],
+  });
+  await postRecord(mod, env, {
+    id: 'ie', prompt: 'a cat cup', type: 'imgedit', outputCount: 1,
+    images: [{ url: '/h' }, { url: '/i' }, { url: '/j' }],
+  });
+
+  const all = await call(mod, env, '/api/history?limit=2');
+  assert.equal(all.headers.get('X-Total-Count'), '3');
+  assert.equal(all.headers.get('X-Total-Images'), String(2 + 5 + 1));
+
+  const cats = await call(mod, env, `/api/history?q=${encodeURIComponent('cat')}`);
+  assert.equal(cats.headers.get('X-Total-Count'), '2', '検索中は一致したぶんだけ数える');
+  assert.equal(cats.headers.get('X-Total-Images'), String(2 + 1));
+
+  const next = await call(mod, env, `/api/history?limit=2&cursor=${nextCursor(all)}`);
+  assert.equal(next.headers.get('X-Total-Count'), null, '続きのページでは数え直さない');
+});
+
 test('件数の上限は無く、1 ページの取得は件数に依らず数クエリで済む', async () => {
   const mod = await loadWorker();
   const env = makeEnv(mod);
@@ -243,7 +269,8 @@ test('件数の上限は無く、1 ページの取得は件数に依らず数ク
   // 無料プランの D1 は 1 リクエスト 50 クエリまで。一覧はここに収まり続ける必要がある
   const before = env.d1.counters.queries;
   assert.deepEqual(await listIds(mod, env), Array.from({ length: 40 }, (_, i) => `r${40 - i}`));
-  assert.ok(env.d1.counters.queries - before <= 3, `一覧で ${env.d1.counters.queries - before} クエリ使っています`);
+  // 先頭ページは件数と画像の枚数を数える 1 クエリぶん多い（件数に依らず 1 回）
+  assert.ok(env.d1.counters.queries - before <= 4, `一覧で ${env.d1.counters.queries - before} クエリ使っています`);
 });
 
 /* ---- 削除 ---- */

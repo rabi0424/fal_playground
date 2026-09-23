@@ -160,6 +160,7 @@ const els = {
   jumpResult: $('#jumpResult'),
   gallery: $('#gallery'),
   gallerySearch: $('#gallerySearch'),
+  galleryCount: $('#galleryCount'),
 };
 
 function sleep(ms) {
@@ -279,12 +280,43 @@ async function reloadHistory() {
     );
     historyCache = [...keep, ...page.records];
     historyCursor = page.cursor;
+    renderGalleryCount(page.totals);
     historyIsServerBacked = true; // ここから先は、消してもサーバーから戻せる
     if (!q) persistHistoryCache(); // 表示キャッシュは絞り込んでいないときのぶんだけ
     renderGallery();
   } finally {
     historyLoading = false;
   }
+}
+
+// ギャラリー見出しの「N 件・M 枚」。数えるのはサーバー（全件を手元に持たないため）。
+// 取れなかったとき（古い Worker など）は出さない
+let galleryTotals = null;
+
+function renderGalleryCount(totals) {
+  galleryTotals = totals ? { ...totals } : null;
+  if (!els.galleryCount) return;
+  els.galleryCount.textContent = galleryTotals && galleryTotals.count > 0
+    ? `${galleryTotals.count.toLocaleString()} 件・${galleryTotals.images.toLocaleString()} 枚`
+    : '';
+}
+
+// 記録 1 件ぶんの画像の枚数（サーバーの historyTotals と同じ数え方）
+function recordImageCount(record) {
+  if (Array.isArray(record?.variants)) {
+    return record.variants.reduce((n, v) => n + (v.images?.length ?? 0), 0);
+  }
+  return record?.outputCount ?? record?.images?.length ?? 0;
+}
+
+// 手元で足した・消したぶんを、次に取り直すまでの間だけ数に反映する
+// （検索中は一致するかどうか分からないので触らない）
+function adjustGalleryCount(record, sign) {
+  if (!galleryTotals || historyQuery || !record) return;
+  renderGalleryCount({
+    count: Math.max(0, galleryTotals.count + sign),
+    images: Math.max(0, galleryTotals.images + sign * recordImageCount(record)),
+  });
 }
 
 // ギャラリーの末尾まで並べ切ったときに、続きを足す
@@ -337,6 +369,7 @@ async function postHistoryRecord(record) {
 // fal の CDN 画像はサーバー側で失効しない URL に取り込まれるため、応答で差し替える
 function addHistoryRecord(record) {
   historyCache.unshift(record);
+  adjustGalleryCount(record, +1);
   persistHistoryCache();
   pendingHistorySaves.add(record.id);
   (async () => {
@@ -363,6 +396,7 @@ function addHistoryRecord(record) {
 
 function deleteHistoryRecord(id) {
   deletedHistoryIds.add(id);
+  adjustGalleryCount(historyCache.find((r) => r.id === id), -1);
   historyCache = historyCache.filter((r) => r.id !== id);
   persistHistoryCache();
   fetch(`/api/history/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});

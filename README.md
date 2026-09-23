@@ -115,7 +115,7 @@ npx wrangler d1 execute fal-playground --remote --file=schema.sql
 - 画像編集（Qwen Image Edit 2511 + LoRA / FLUX.1 Fill [dev] OneReward / Wan2.2 + VACE / LanPaint。画像 1 枚と指示文で編集・下記参照）
 - LoRA 比較アリーナ（別画面 `arena.html`・下記参照）
 - 部分AI編集（別画面 `edit.html`・下記参照）
-- 生成履歴とプロンプトの再利用（サーバー保存・全端末で共通）
+- 生成履歴とプロンプトの再利用（サーバー保存・全端末で共通）。ギャラリーの見出しに**件数と画像の枚数**を出します（検索中は一致したぶん。数えるのはサーバー）
 - 生成時間の統計（サイドバー「統計」。アクセスポイント別の平均・中央値・分布。Modal 版は待ち時間を除いた**純生成時間**（サーバーが返す `X-Exec-Seconds`）で集計し、過去の記録も完了時刻から逆算して補正）
 - 開閉式の左サイドバー（全画面共通のナビゲーション。畳むとアイコンだけのレールになる・Cmd/Ctrl + B で開閉・スマホでは引き出し）
 - ダークモード（自動 / ライト / ダーク切替。サイドバー下部の 3 択）
@@ -428,6 +428,8 @@ node test/history-feed.test.mjs # 履歴の取得（ページ送り・絞り込�
 node test/image-upload.test.mjs # 画像アップロード（内容アドレスによる省略）
 node test/image-meta.test.mjs   # 画像メタデータの正規化と読み書き（ComfyUI / A1111 を含む）
 node test/lightbox-zoom.test.mjs # 拡大表示のズーム（ダブルタップ・ドラッグ・タップの見分け）
+node test/device-sync.test.mjs   # 端末間同期（項目ごとのマージ・削除・移行・送信の方式）
+node test/state.test.mjs         # 同期の保存先（/api/state がマージして返す）
 node test/swipe-nav.test.mjs    # 横スワイプでの画像送り（向き・スクロールとの見分け・click の始末）
 node test/arena-chart.test.mjs  # 比較アリーナの Elo グラフ（ブートストラップの帯・並び順・目盛り）
 node test/poe-edit.test.mjs     # 部分AI編集の Poe ジョブ（ヘッドスワップの 2 枚送信を含む）

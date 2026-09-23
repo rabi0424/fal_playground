@@ -24,8 +24,10 @@ const isHtml = (res) => (res.headers.get('Content-Type') ?? '').includes('text/h
 /**
  * 履歴を新しい順に 1 ページ取る。
  * @param {{ limit?: number, cursor?: string|null, q?: string, type?: string }} opts
- * @returns {Promise<{ ok: boolean, records: any[], cursor: string|null }>}
- *   ok=false は取れなかったとき（オフライン・セッション切れなど）
+ * @returns {Promise<{ ok: boolean, records: any[], cursor: string|null,
+ *   totals: { count: number, images: number }|null }>}
+ *   ok=false は取れなかったとき（オフライン・セッション切れなど）。
+ *   totals は先頭ページのときだけ（絞り込み後の件数と画像の枚数）
  */
 async function page({ limit = PAGE, cursor = null, q = '', type = '' } = {}) {
   const params = new URLSearchParams({ limit: String(limit) });
@@ -33,7 +35,7 @@ async function page({ limit = PAGE, cursor = null, q = '', type = '' } = {}) {
   if (q) params.set('q', q);
   if (type) params.set('type', type);
 
-  const fail = { ok: false, records: [], cursor: null };
+  const fail = { ok: false, records: [], cursor: null, totals: null };
   let res;
   try {
     res = await fetch(`/api/history?${params}`);
@@ -44,7 +46,12 @@ async function page({ limit = PAGE, cursor = null, q = '', type = '' } = {}) {
 
   const records = await res.json().catch(() => null);
   if (!Array.isArray(records)) return fail;
-  return { ok: true, records, cursor: res.headers.get('X-Next-Cursor') };
+  const count = Number(res.headers.get('X-Total-Count'));
+  const images = Number(res.headers.get('X-Total-Images'));
+  const totals = res.headers.has('X-Total-Count') && Number.isFinite(count) && Number.isFinite(images)
+    ? { count, images }
+    : null;
+  return { ok: true, records, cursor: res.headers.get('X-Next-Cursor'), totals };
 }
 
 window.falHistory = { page, PAGE };

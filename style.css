@@ -1339,6 +1339,15 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
 
 .gallery-search::placeholder { color: var(--muted); }
 
+.gallery-count {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.gallery-count:empty { display: none; }
+
 .gallery {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));

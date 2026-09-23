@@ -1312,11 +1312,6 @@ async function historyPage(env, { limit, cursor, q, type } = {}) {
   const where = ['source = ?'];
   const bind = [HISTORY_SOURCE];
 
-  const after = Number(cursor);
-  if (Number.isFinite(after) && after > 0) {
-    where.push('seq < ?');
-    bind.push(after);
-  }
   if (type) {
     where.push('type = ?');
     bind.push(type);
@@ -1326,15 +1321,47 @@ async function historyPage(env, { limit, cursor, q, type } = {}) {
     where.push("search LIKE ? ESCAPE '\\'");
     bind.push(`%${token}%`);
   }
-  bind.push(want);
+
+  // 先頭ページのときだけ、絞り込み後の件数と画像の枚数も返す（ギャラリーの見出し用）。
+  // 続きのページでは数え直さない
+  const after = Number(cursor);
+  const first = !(Number.isFinite(after) && after > 0);
+  const totals = first ? await historyTotals(env, where, bind) : null;
+
+  const pageWhere = [...where];
+  const pageBind = [...bind];
+  if (!first) {
+    pageWhere.push('seq < ?');
+    pageBind.push(after);
+  }
+  pageBind.push(want);
 
   const { results } = await env.DB.prepare(
-    `SELECT seq, record FROM history WHERE ${where.join(' AND ')} ORDER BY seq DESC LIMIT ?`,
-  ).bind(...bind).all();
+    `SELECT seq, record FROM history WHERE ${pageWhere.join(' AND ')} ORDER BY seq DESC LIMIT ?`,
+  ).bind(...pageBind).all();
 
   const records = results.map((row) => ({ ...JSON.parse(row.record), seq: row.seq }));
   // want 件取れたなら、まだ続きがあるかもしれない
-  return { records, cursor: results.length < want ? null : results[results.length - 1].seq };
+  return { records, cursor: results.length < want ? null : results[results.length - 1].seq, totals };
+}
+
+// 絞り込み後の件数と画像の枚数。画像は「出力として見せているもの」を数える:
+//   比較の記録 … 全試行（variants）の画像の合計
+//   画像編集   … images に合成前の生画像や入力画像も並ぶので outputCount を優先
+//   それ以外   … images の枚数
+async function historyTotals(env, where, bind) {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS count,
+            COALESCE(SUM(CASE
+              WHEN json_type(record, '$.variants') = 'array' THEN
+                (SELECT COALESCE(SUM(json_array_length(v.value, '$.images')), 0)
+                   FROM json_each(record, '$.variants') AS v)
+              ELSE COALESCE(json_extract(record, '$.outputCount'),
+                            json_array_length(record, '$.images'), 0)
+            END), 0) AS images
+       FROM history WHERE ${where.join(' AND ')}`,
+  ).bind(...bind).first();
+  return { count: row?.count ?? 0, images: row?.images ?? 0 };
 }
 
 /* ---------- 生成時間の統計 ----------
@@ -3448,7 +3475,7 @@ export default {
     if (url.pathname === '/api/history') {
       await ensureHistoryCatalog(env, stub);
       if (request.method === 'GET') {
-        const { records, cursor } = await historyPage(env, {
+        const { records, cursor, totals } = await historyPage(env, {
           limit: Number(url.searchParams.get('limit')),
           cursor: url.searchParams.get('cursor') ?? '',
           q: url.searchParams.get('q') ?? '',
@@ -3459,9 +3486,13 @@ export default {
         // そのまま表示できる（読み込み直せば続きも追うようになる）
         // 片付けは裏で。一覧はページごとに来るので、先頭ページのときだけ乗せる
         if (!url.searchParams.get('cursor')) ctx?.waitUntil?.(runHousekeeping(env, stub));
-        return Response.json(records, {
-          headers: cursor ? { 'X-Next-Cursor': String(cursor) } : {},
-        });
+        const headers = {};
+        if (cursor) headers['X-Next-Cursor'] = String(cursor);
+        if (totals) {
+          headers['X-Total-Count'] = String(totals.count);
+          headers['X-Total-Images'] = String(totals.images);
+        }
+        return Response.json(records, { headers });
       }
       if (request.method === 'POST') {
         if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });
