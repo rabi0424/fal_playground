@@ -30,6 +30,33 @@ function load() {
   }
 }
 
+// 読むだけの問い合わせ（entry / sorted / forBase）用。**呼び出し側で書き換えないこと。**
+//
+// entry() は LoRA 行ごと・選択肢ごとに何度も呼ばれ、そのたびにライブラリ全体
+// （100 件を超える）の JSON を parse し直していた。保存文字列が変わらない限り
+// 同じ parse 結果を使い回す。書き換える側（register など）は従来どおり load() で
+// 自分用の配列を取るので、ここを汚さない
+let cachedRaw = null;
+let cachedItems = [];
+function view() {
+  const raw = falStore.get(LS_LORAS);
+  if (raw !== cachedRaw) {
+    cachedRaw = raw;
+    try {
+      cachedItems = JSON.parse(raw) || [];
+    } catch {
+      cachedItems = [];
+    }
+  }
+  return cachedItems;
+}
+
+// 表示名の並べ替え。**localeCompare(…, 'ja', {…}) は呼ぶたびに照合器を作り直す**
+// ので、100 件超の並べ替え（LoRA 行を足すたび・モデルを変えるたびに走る）が
+// 実機で目に見えて重かった。照合器は 1 つ作って使い回す
+const JA_COLLATOR = new Intl.Collator('ja', { numeric: true, sensitivity: 'base' });
+const compareLabels = (a, b) => JA_COLLATOR.compare(a, b);
+
 // 利用者が起こした登録・削除は、書けなかったことを黙って飲み込まない
 // （消えたと気づけないまま使い続けることになる）。
 // 自動移行のように諦めてよい書き込みだけ quiet で通す
@@ -68,7 +95,7 @@ function modalRef(path) {
 }
 
 function entry(path) {
-  return load().find((item) => item.path === path) ?? null;
+  return view().find((item) => item.path === path) ?? null;
 }
 
 // 画面に出す名前。未設定なら取り込み時の自動名にフォールバックする
@@ -206,10 +233,10 @@ const toggleHidden = (path) => setHidden(path, !isHidden(path));
 const setHiddenMany = (paths, on) => setFlagMany(paths, 'hidden', on);
 
 // ★ を先頭に、あとは表示名順（数字は数値として比較する）
-function sorted(items = load()) {
+function sorted(items = view()) {
   return [...items].sort((a, b) => {
     if (!!a.fav !== !!b.fav) return a.fav ? -1 : 1;
-    return labelOf(a).localeCompare(labelOf(b), 'ja', { numeric: true, sensitivity: 'base' });
+    return compareLabels(labelOf(a), labelOf(b));
   });
 }
 
@@ -279,6 +306,7 @@ function migrate() {
 
 window.loraLib = {
   load,
+  compareLabels,
   save,
   entry,
   fileName,

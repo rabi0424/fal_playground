@@ -293,7 +293,7 @@ function ckptsForBase(base = DEFAULT_CKPT_BASE) {
   return loadCkptLibrary()
     .filter((item) => (item.base ?? DEFAULT_CKPT_BASE) === base)
     .map((item) => ({ path: item.path, name: item.name || ckptDisplayName(item.path) }))
-    .sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true, sensitivity: 'base' }));
+    .sort((a, b) => loraLib.compareLabels(a.name, b.name));
 }
 
 function ckptLabel(path) {

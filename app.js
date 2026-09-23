@@ -882,7 +882,7 @@ function sortedCkptLibrary() {
   const base = currentCkptBase();
   return loadCkptLibrary()
     .filter((item) => (item.base ?? DEFAULT_CKPT_BASE) === base)
-    .sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true, sensitivity: 'base' }));
+    .sort((a, b) => loraLib.compareLabels(a.name, b.name));
 }
 
 // 「既定」+ 登録済みチェックポイント + 「URL / ファイル名を入力…」でプルダウンを構成
@@ -1351,17 +1351,35 @@ function warmView(endpoint, now = Date.now()) {
   return { level: 'warm', ratio: left / warmWindowMs, label: 'ウォーム（すぐ生成できます）' };
 }
 
+// 前回描いた状態。変わっていない値は DOM に書かない。
+// リングは backdrop-filter（ぼかし）の効いた生成バーの中にあり、中身が変わるたびに
+// iOS はバー全体のぼかしを描き直す。1 秒ごとの描き直しを「変わったときだけ」に絞る
+let warmDrawn = { hidden: null, level: null, label: null, offset: null };
+
 function renderWarmRing() {
   const endpoint = currentModalEndpoint();
   const view = warmView(endpoint);
-  els.warmRing.hidden = !view;
+  if (warmDrawn.hidden !== !view) {
+    els.warmRing.hidden = !view;
+    warmDrawn.hidden = !view;
+  }
   if (!view) return;
-  els.warmRing.classList.remove('warm', 'soon', 'last', 'cold', 'busy');
-  els.warmRing.classList.add(view.level);
-  els.warmRing.setAttribute('aria-label', view.label);
-  els.warmRing.title = view.label;
-  const arc = els.warmRing.querySelector('.warm-arc');
-  arc.style.strokeDashoffset = String(WARM_ARC_LEN * (1 - view.ratio));
+  if (warmDrawn.level !== view.level) {
+    els.warmRing.classList.remove('warm', 'soon', 'last', 'cold', 'busy');
+    els.warmRing.classList.add(view.level);
+    warmDrawn.level = view.level;
+  }
+  if (warmDrawn.label !== view.label) {
+    els.warmRing.setAttribute('aria-label', view.label);
+    els.warmRing.title = view.label;
+    warmDrawn.label = view.label;
+  }
+  // 1/10 周（約 5.7）より細かい差は目に見えないので、そのぶんは描き直さない
+  const offset = Math.round(WARM_ARC_LEN * (1 - view.ratio) * 10) / 10;
+  if (warmDrawn.offset !== offset) {
+    els.warmRing.querySelector('.warm-arc').style.strokeDashoffset = String(offset);
+    warmDrawn.offset = offset;
+  }
 }
 
 // 表示が要るあいだだけ 1 秒ごとに描き直す（タブが裏なら止める）
