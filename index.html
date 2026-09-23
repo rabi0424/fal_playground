@@ -161,6 +161,14 @@
             <input id="denoise" type="number" min="0" max="1" step="0.05" placeholder="1.0">
           </label>
         </div>
+
+        <!-- Qwen-Image 2.1 だけが受け付ける項目。空欄は送らない -->
+        <div class="row" id="q21CfgRow" hidden>
+          <label class="field num-field" title="前半のこのステップ数だけガイダンスを掛け、残りはガイダンス 1 で回します。空欄なら全ステップに掛けます。例: ステップ 40・ガイダンス 3 なら 12">
+            <span class="label">ガイダンスを掛けるステップ</span>
+            <input id="cfgSteps" type="number" min="0" max="100" step="1" placeholder="全ステップ">
+          </label>
+        </div>
       </div>
     </details>
 
