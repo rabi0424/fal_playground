@@ -81,6 +81,24 @@ const MODAL_WARM_GROUPS = {
 };
 const JOB_MAX_SUBMIT_ATTEMPTS = 2; // 送信自体の再試行上限（多重生成・多重課金の防止）
 
+// プッシュ通知（生成完了の通知）の設定
+const VAPID_JWT_TTL_SEC = 12 * 3600;
+const PUSH_TTL_SEC = 600; // 端末に届かない間、プッシュサービスが保持する秒数
+// この時間内にハートビートが届いている端末は「今アプリを見ている」とみなして送らない。
+// 画面から離れる瞬間にクライアントが即座に「見ていない」を送るので、この待ち時間が
+// 効くのはタブが強制終了された場合など例外的なときだけ
+const PUSH_DEVICE_ACTIVE_MS = 60_000;
+// 複数枚・アリーナの一斉生成などをまとめて 1 通にするための待ち合わせ
+const PUSH_DEBOUNCE_MS = 4000;
+// fal ジョブの完了をサーバー側でも見張る（アプリを閉じている間はブラウザが
+// ポーリングできないため）。クライアントのポーリングより緩い間隔で十分
+const PUSH_WATCH_POLL_MS = 5000;
+const PUSH_WATCH_TTL_MS = 30 * 60 * 1000;
+const PUSH_WATCH_MAX_ERRORS = 20;
+const PUSH_WATCH_MAX = 60; // 監視の登録上限（暴走したときの保険）
+// 通知の種類（どの画面の完了か）。失敗は `${kind}Fail` で数える
+const PUSH_KINDS = ['gen', 'imgedit', 'edit'];
+
 // 画像に焼き込む kind。ジョブの kind から引く（既定は生成）
 const JOB_META_KINDS = { edit: 'edit', inpaint: 'inpaint' };
 
@@ -855,6 +873,175 @@ function bytesToBase64(bytes) {
   return btoa(bin);
 }
 
+/* ---------- Web Push（RFC 8291 / RFC 8292） ----------
+ * 生成完了のプッシュ通知。ライブラリを使わず WebCrypto だけで VAPID（ES256 の JWT）と
+ * aes128gcm のペイロード暗号化を行う。通知の中身は「どの画面で何件終わったか」だけで、
+ * プロンプト・モデル・画像などは一切載せない（ロック画面に内容を出さないため） */
+
+function b64urlToBytes(input) {
+  const norm = String(input).replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(norm + '='.repeat((4 - (norm.length % 4)) % 4));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function bytesToB64url(bytes) {
+  return bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function concatBytes(...parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
+
+async function hkdf(salt, ikm, info, length) {
+  const key = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, key, length * 8);
+  return new Uint8Array(bits);
+}
+
+// VAPID の鍵は Worker の Secret（web-push 形式の base64url）から読む。
+// 生の秘密鍵は raw では取り込めないため、公開鍵と合わせて JWK を組み立てる
+async function vapidSignKey(env) {
+  const pub = b64urlToBytes((env.VAPID_PUBLIC_KEY || '').trim());
+  const priv = b64urlToBytes((env.VAPID_PRIVATE_KEY || '').trim());
+  if (pub.length !== 65 || pub[0] !== 4 || priv.length !== 32) {
+    throw new Error('VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY の形式が正しくありません（base64url の 65 / 32 バイト）');
+  }
+  return crypto.subtle.importKey(
+    'jwk',
+    {
+      kty: 'EC',
+      crv: 'P-256',
+      x: bytesToB64url(pub.subarray(1, 33)),
+      y: bytesToB64url(pub.subarray(33, 65)),
+      d: bytesToB64url(priv),
+      ext: true,
+    },
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,
+    ['sign'],
+  );
+}
+
+// Authorization ヘッダ用の VAPID JWT。aud はプッシュサービスのオリジン
+async function vapidAuthorization(audience, subject, env) {
+  const key = await vapidSignKey(env);
+  const enc = new TextEncoder();
+  const head = bytesToB64url(enc.encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
+  const body = bytesToB64url(enc.encode(JSON.stringify({
+    aud: audience,
+    exp: Math.floor(Date.now() / 1000) + VAPID_JWT_TTL_SEC,
+    sub: subject,
+  })));
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, enc.encode(`${head}.${body}`));
+  return `vapid t=${head}.${body}.${bytesToB64url(new Uint8Array(sig))}, k=${(env.VAPID_PUBLIC_KEY || '').trim()}`;
+}
+
+// RFC 8291: 端末の公開鍵と auth secret で本文を aes128gcm 暗号化する
+async function encryptPushPayload(payload, p256dh, auth) {
+  const uaPublic = b64urlToBytes(p256dh);
+  const authSecret = b64urlToBytes(auth);
+  const local = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const asPublic = new Uint8Array(await crypto.subtle.exportKey('raw', local.publicKey));
+  const uaKey = await crypto.subtle.importKey('raw', uaPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const shared = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: uaKey }, local.privateKey, 256));
+
+  const enc = new TextEncoder();
+  const ikm = await hkdf(authSecret, shared, concatBytes(enc.encode('WebPush: info\u0000'), uaPublic, asPublic), 32);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const cek = await hkdf(salt, ikm, enc.encode('Content-Encoding: aes128gcm\u0000'), 16);
+  const nonce = await hkdf(salt, ikm, enc.encode('Content-Encoding: nonce\u0000'), 12);
+
+  const aesKey = await crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['encrypt']);
+  const cipher = new Uint8Array(await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: nonce },
+    aesKey,
+    concatBytes(enc.encode(payload), new Uint8Array([2])), // 末尾 0x02 はパディングの区切り
+  ));
+
+  // ヘッダ: salt(16) | レコード長(4) | 公開鍵長(1) | 公開鍵(65)
+  const header = new Uint8Array(21 + asPublic.length);
+  header.set(salt, 0);
+  new DataView(header.buffer).setUint32(16, 4096);
+  header[20] = asPublic.length;
+  header.set(asPublic, 21);
+  return concatBytes(header, cipher);
+}
+
+// 1 端末へ送信し、HTTP ステータスを返す（404 / 410 は購読切れ = 削除対象）
+async function sendWebPush(sub, payload, subject, env) {
+  const endpoint = new URL(sub.endpoint);
+  const body = await encryptPushPayload(payload, sub.keys.p256dh, sub.keys.auth);
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: await vapidAuthorization(endpoint.origin, subject, env),
+      'Content-Encoding': 'aes128gcm',
+      'Content-Type': 'application/octet-stream',
+      TTL: String(PUSH_TTL_SEC),
+      Urgency: 'high',
+    },
+    body,
+  });
+  return res.status;
+}
+
+// 通知の文面。プロンプト・モデル・画像は載せず、どの画面で何件終わったかだけにする。
+// 1 つの画面のぶんだけならその画面を開き、混ざっていれば生成画面を開く
+const PUSH_LABELS = {
+  gen: { done: '生成が完了しました', fail: '生成に失敗しました', url: '/' },
+  imgedit: { done: '画像編集が完了しました', fail: '画像編集に失敗しました', url: '/imgedit' },
+  edit: { done: '部分AI編集が完了しました', fail: '部分AI編集に失敗しました', url: '/edit' },
+};
+
+function buildPushPayload(counts) {
+  const done = PUSH_KINDS.reduce((n, k) => n + (counts[k] ?? 0), 0);
+  const failed = PUSH_KINDS.reduce((n, k) => n + (counts[`${k}Fail`] ?? 0), 0);
+  const kinds = PUSH_KINDS.filter((k) => (counts[k] ?? 0) + (counts[`${k}Fail`] ?? 0) > 0);
+  const only = kinds.length === 1 ? PUSH_LABELS[kinds[0]] : null;
+  if (done === 0) {
+    return { title: only?.fail ?? '失敗しました', count: failed, body: '', tag: 'fal-done', url: only?.url ?? '/' };
+  }
+  return {
+    title: only?.done ?? '完了しました',
+    count: done,
+    body: failed > 0 ? `${failed} 件は失敗しました` : '',
+    tag: 'fal-done',
+    url: only?.url ?? '/',
+  };
+}
+
+// 購読の識別子（エンドポイントのハッシュ）。端末ごとの状態管理に使う
+async function pushDeviceId(endpoint) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(endpoint));
+  return [...new Uint8Array(digest).subarray(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// 購読オブジェクト（PushSubscription.toJSON()）の検証
+function normalizePushSubscription(raw) {
+  const endpoint = raw?.endpoint;
+  const p256dh = raw?.keys?.p256dh;
+  const auth = raw?.keys?.auth;
+  if (typeof endpoint !== 'string' || endpoint.length > 1000) return null;
+  let url;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:') return null;
+  if (typeof p256dh !== 'string' || typeof auth !== 'string') return null;
+  if (p256dh.length > 200 || auth.length > 100) return null;
+  return { endpoint, keys: { p256dh, auth } };
+}
+
 // Poe（OpenAI 互換 API）の応答テキストから画像 URL を取り出す。
 // 画像ボットは Markdown の画像リンク（または裸の URL）として返す
 function extractImageUrl(content) {
@@ -1312,11 +1499,6 @@ async function historyPage(env, { limit, cursor, q, type } = {}) {
   const where = ['source = ?'];
   const bind = [HISTORY_SOURCE];
 
-  const after = Number(cursor);
-  if (Number.isFinite(after) && after > 0) {
-    where.push('seq < ?');
-    bind.push(after);
-  }
   if (type) {
     where.push('type = ?');
     bind.push(type);
@@ -1326,15 +1508,47 @@ async function historyPage(env, { limit, cursor, q, type } = {}) {
     where.push("search LIKE ? ESCAPE '\\'");
     bind.push(`%${token}%`);
   }
-  bind.push(want);
+
+  // 先頭ページのときだけ、絞り込み後の件数と画像の枚数も返す（ギャラリーの見出し用）。
+  // 続きのページでは数え直さない
+  const after = Number(cursor);
+  const first = !(Number.isFinite(after) && after > 0);
+  const totals = first ? await historyTotals(env, where, bind) : null;
+
+  const pageWhere = [...where];
+  const pageBind = [...bind];
+  if (!first) {
+    pageWhere.push('seq < ?');
+    pageBind.push(after);
+  }
+  pageBind.push(want);
 
   const { results } = await env.DB.prepare(
-    `SELECT seq, record FROM history WHERE ${where.join(' AND ')} ORDER BY seq DESC LIMIT ?`,
-  ).bind(...bind).all();
+    `SELECT seq, record FROM history WHERE ${pageWhere.join(' AND ')} ORDER BY seq DESC LIMIT ?`,
+  ).bind(...pageBind).all();
 
   const records = results.map((row) => ({ ...JSON.parse(row.record), seq: row.seq }));
   // want 件取れたなら、まだ続きがあるかもしれない
-  return { records, cursor: results.length < want ? null : results[results.length - 1].seq };
+  return { records, cursor: results.length < want ? null : results[results.length - 1].seq, totals };
+}
+
+// 絞り込み後の件数と画像の枚数。画像は「出力として見せているもの」を数える:
+//   比較の記録 … 全試行（variants）の画像の合計
+//   画像編集   … images に合成前の生画像や入力画像も並ぶので outputCount を優先
+//   それ以外   … images の枚数
+async function historyTotals(env, where, bind) {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS count,
+            COALESCE(SUM(CASE
+              WHEN json_type(record, '$.variants') = 'array' THEN
+                (SELECT COALESCE(SUM(json_array_length(v.value, '$.images')), 0)
+                   FROM json_each(record, '$.variants') AS v)
+              ELSE COALESCE(json_extract(record, '$.outputCount'),
+                            json_array_length(record, '$.images'), 0)
+            END), 0) AS images
+       FROM history WHERE ${where.join(' AND ')}`,
+  ).bind(...bind).first();
+  return { count: row?.count ?? 0, images: row?.images ?? 0 };
 }
 
 /* ---------- 生成時間の統計 ----------
@@ -1414,8 +1628,20 @@ function statsQuantile(sorted, q) {
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
 }
 
+// 1-2-5 系列に切り上げた、目盛に使えるきりのいい刻み幅
+function niceStep(raw) {
+  const pow = 10 ** Math.floor(Math.log10(raw));
+  const m = raw / pow;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * pow;
+}
+
 // 標本そのものではなく、描くのに要るものだけ返す（件数に依らない大きさにする）。
-// ヒストグラムの刻み方は、これまでクライアントが描いていたものと同じ
+//
+// ヒストグラムのビン境界はきりのいい秒数に揃える（目盛をそのまま境界に使えるように）。
+// ビン数の目安（標本数の平方根、5〜12）から 1-2-5 系列の幅に丸め、両端をその倍数まで
+// 広げる。全標本が同じ値のときは値の大きさから幅を決める。
+//   lo    … 最初のビンの左端（min 以下のきりのいい値）
+//   width … ビンの幅
 function summarizeStats(samples) {
   const out = {};
   for (const [model, values] of samples) {
@@ -1423,14 +1649,19 @@ function summarizeStats(samples) {
     const n = values.length;
     const min = values[0];
     const max = values[n - 1];
-    const bins = Math.min(16, Math.max(5, Math.ceil(Math.sqrt(n))));
-    const width = Math.max((max - min) / bins, 0.05);
+    const targetBins = Math.min(12, Math.max(5, Math.ceil(Math.sqrt(n))));
+    const rawStep = (max - min) / targetBins;
+    const width = niceStep(rawStep > 0 ? rawStep : Math.max(max / 20, 0.1));
+    const lo = Math.floor(min / width) * width;
+    const hi = Math.max(Math.ceil(max / width) * width, lo + width);
+    const bins = Math.max(1, Math.round((hi - lo) / width));
     const counts = new Array(bins).fill(0);
-    for (const v of values) counts[Math.min(bins - 1, Math.floor((v - min) / width))] += 1;
+    for (const v of values) counts[Math.min(bins - 1, Math.floor((v - lo) / width))] += 1;
     out[model] = {
       n,
       min,
       max,
+      lo,
       width,
       counts,
       mean: values.reduce((sum, v) => sum + v, 0) / n,
@@ -2011,9 +2242,190 @@ export class SyncState extends DurableObject {
         else await this.runKrea2Job(key, job);
         const after = await this.ctx.storage.get(key);
         if (after?.status === 'pending') pendingLeft = true;
+        else if (after && prefix !== 'lora:job:') {
+          // 生成・編集が終わった瞬間に通知を積む（LoRA の取り込みは対象外）。
+          // Modal の edit / inpaint は画像編集の画面、Poe は部分AI編集の画面のもの
+          const kind = prefix === 'poe:job:' ? 'edit' : after.kind === 'generate' ? 'gen' : 'imgedit';
+          await this.queuePushNotice(after.status === 'done' ? kind : `${kind}Fail`);
+        }
       }
     }
-    if (pendingLeft) await this.ctx.storage.setAlarm(Date.now() + JOB_POLL_DELAY_MS);
+    let nextAt = pendingLeft ? Date.now() + JOB_POLL_DELAY_MS : null;
+    const bump = (at) => {
+      if (at != null && (nextAt === null || at < nextAt)) nextAt = at;
+    };
+    // 通知まわり（fal ジョブの完了の見張りと、まとめ送信の待ち合わせ）
+    bump(await this.runPushWatches());
+    bump(await this.flushPushNotice());
+    if (nextAt !== null) await this.ctx.storage.setAlarm(Math.max(nextAt, Date.now() + 100));
+  }
+
+  // 次の alarm を「この時刻まで」に前倒しする（既に早い予定があればそのまま）。
+  // ensureAlarm と違って遅らせることはない
+  async alarmBy(at) {
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > at) await this.ctx.storage.setAlarm(at);
+  }
+
+  /* ---- プッシュ通知 ----
+   * 端末（購読）ごとに push:sub:<deviceId> を持ち、生成・編集が完了したら
+   * まとめて 1 通送る。「今アプリを見ている端末」にはハートビートの記録を見て
+   * 送らない（別アプリに切り替え中・スリープ中・アプリを閉じている端末にだけ届く） */
+
+  async addPushSubscription(raw, origin) {
+    const sub = normalizePushSubscription(raw);
+    if (!sub) return null;
+    const deviceId = await pushDeviceId(sub.endpoint);
+    const key = `push:sub:${deviceId}`;
+    const prev = await this.ctx.storage.get(key);
+    await this.ctx.storage.put(key, {
+      ...sub,
+      created: prev?.created ?? Date.now(),
+      // 購読し直した直後は、その端末を開いているのが普通なので active から始める
+      active: true,
+      lastActive: Date.now(),
+    });
+    // VAPID の sub クレームには自分のアプリの URL を使う（Apple は mailto: か
+    // https: の URL を要求する）。Secret（VAPID_SUBJECT）での上書きもできる
+    if (origin && !(await this.ctx.storage.get('push:origin'))) {
+      await this.ctx.storage.put('push:origin', origin);
+    }
+    return { deviceId };
+  }
+
+  async removePushSubscription(endpoint) {
+    if (typeof endpoint !== 'string') return;
+    await this.ctx.storage.delete(`push:sub:${await pushDeviceId(endpoint)}`);
+  }
+
+  // 端末が「今画面に見えているか」を記録する（クライアントからのハートビート）
+  async setDeviceActive(deviceId, active) {
+    if (typeof deviceId !== 'string' || !/^[0-9a-f]{32}$/.test(deviceId)) return;
+    const key = `push:sub:${deviceId}`;
+    const sub = await this.ctx.storage.get(key);
+    if (!sub) return;
+    sub.active = !!active;
+    sub.lastActive = Date.now();
+    await this.ctx.storage.put(key, sub);
+  }
+
+  async hasPushSubscribers() {
+    return (await this.ctx.storage.list({ prefix: 'push:sub:', limit: 1 })).size > 0;
+  }
+
+  // fal のジョブの完了をサーバー側でも見張る。ブラウザは同じジョブを自分でも
+  // ポーリングしているので、これは「アプリを閉じている間」のための保険
+  async addPushWatch(statusUrl, kind) {
+    if (!(await this.hasPushSubscribers())) return; // 通知先が無ければ何もしない
+    const list = await this.ctx.storage.list({ prefix: 'push:watch:' });
+    const now = Date.now();
+    for (const [k, w] of list) {
+      if (now - w.created > PUSH_WATCH_TTL_MS) await this.ctx.storage.delete(k);
+      else if (w.statusUrl === statusUrl) return; // 二重登録しない
+    }
+    if (list.size >= PUSH_WATCH_MAX) return;
+    await this.ctx.storage.put(`push:watch:${crypto.randomUUID()}`, {
+      statusUrl,
+      kind: PUSH_KINDS.includes(kind) ? kind : 'gen',
+      created: now,
+      nextPollAt: now + PUSH_WATCH_POLL_MS,
+      errors: 0,
+    });
+    await this.alarmBy(now + PUSH_WATCH_POLL_MS);
+  }
+
+  // 見張っている fal のジョブを確かめ、完了・失敗していたら通知を積む。
+  // 戻り値は次に見るべき時刻（無ければ null）
+  async runPushWatches() {
+    const list = await this.ctx.storage.list({ prefix: 'push:watch:' });
+    if (list.size === 0) return null;
+    const now = Date.now();
+    let next = null;
+    const bump = (at) => {
+      if (next === null || at < next) next = at;
+    };
+
+    const due = [];
+    for (const [key, watch] of list) {
+      if (now - watch.created > PUSH_WATCH_TTL_MS) {
+        await this.ctx.storage.delete(key);
+        continue;
+      }
+      if (watch.nextPollAt > now) bump(watch.nextPollAt);
+      else due.push([key, watch]);
+    }
+
+    // アリーナの一斉生成では見張りが数十件になるので、状態の確認はまとめて行う
+    const checked = await Promise.all(due.map(async ([key, watch]) => {
+      try {
+        const res = await fetch(watch.statusUrl, { headers: { Authorization: `Key ${this.env.FAL_KEY}` } });
+        // 追えない（キー未設定・ジョブが消えた）ときは通知を諦めて片付ける
+        if (res.status === 401 || res.status === 403 || res.status === 404) return [key, watch, 'drop'];
+        if (!res.ok) return [key, watch, 'retry'];
+        const status = (await res.json())?.status;
+        if (status === 'COMPLETED') return [key, watch, 'done'];
+        if (status === 'FAILED' || status === 'ERROR') return [key, watch, 'fail'];
+        watch.errors = 0;
+        return [key, watch, 'pending'];
+      } catch {
+        return [key, watch, 'retry']; // 一時的な失敗は次に回す
+      }
+    }));
+
+    for (const [key, watch, outcome] of checked) {
+      if (outcome === 'done' || outcome === 'fail') {
+        await this.ctx.storage.delete(key);
+        const kind = watch.kind ?? 'gen';
+        await this.queuePushNotice(outcome === 'done' ? kind : `${kind}Fail`);
+        continue;
+      }
+      if (outcome === 'retry') watch.errors = (watch.errors ?? 0) + 1;
+      if (outcome === 'drop' || watch.errors > PUSH_WATCH_MAX_ERRORS) {
+        await this.ctx.storage.delete(key);
+        continue;
+      }
+      watch.nextPollAt = Date.now() + PUSH_WATCH_POLL_MS;
+      await this.ctx.storage.put(key, watch);
+      bump(watch.nextPollAt);
+    }
+    return next;
+  }
+
+  // 完了を 1 件積む。複数枚の生成やアリーナの一斉生成を 1 通にまとめるため、
+  // 少し待ってから送る
+  async queuePushNotice(kind) {
+    if (!(await this.hasPushSubscribers())) return;
+    const pending = (await this.ctx.storage.get('push:pending')) ?? { counts: {} };
+    pending.counts[kind] = (pending.counts[kind] ?? 0) + 1;
+    pending.dueAt = Date.now() + PUSH_DEBOUNCE_MS;
+    await this.ctx.storage.put('push:pending', pending);
+    await this.alarmBy(pending.dueAt);
+  }
+
+  async flushPushNotice() {
+    const pending = await this.ctx.storage.get('push:pending');
+    if (!pending) return null;
+    if (pending.dueAt > Date.now()) return pending.dueAt;
+    await this.ctx.storage.delete('push:pending');
+    await this.sendPushToDevices(buildPushPayload(pending.counts));
+    return null;
+  }
+
+  async sendPushToDevices(payload) {
+    if (!this.env.VAPID_PUBLIC_KEY || !this.env.VAPID_PRIVATE_KEY) return;
+    const subject = (this.env.VAPID_SUBJECT || '').trim()
+      || (await this.ctx.storage.get('push:origin'))
+      || 'mailto:noreply@example.com';
+    const body = JSON.stringify(payload);
+    const now = Date.now();
+
+    for (const [key, sub] of await this.ctx.storage.list({ prefix: 'push:sub:' })) {
+      // アプリを前面で開いている端末には送らない
+      if (sub.active && now - (sub.lastActive ?? 0) < PUSH_DEVICE_ACTIVE_MS) continue;
+      const status = await sendWebPush(sub, body, subject, this.env).catch(() => 0);
+      // 購読切れ（アプリを消した・OS が失効させた）は片付ける
+      if (status === 404 || status === 410) await this.ctx.storage.delete(key);
+    }
   }
 
   /* ---- Poe 部分AI編集ジョブ ---- */
@@ -3404,6 +3816,63 @@ export default {
       });
     }
 
+    /* ---- プッシュ通知（生成完了の通知） ---- */
+
+    // 購読に使う VAPID 公開鍵。未設定なら null を返し、クライアントは通知をオンにできない
+    if (url.pathname === '/api/push/key') {
+      if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
+      return Response.json({ key: (env.VAPID_PUBLIC_KEY || '').trim() || null });
+    }
+
+    if (url.pathname.startsWith('/api/push/')) {
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+      if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return new Response('Invalid JSON', { status: 400 });
+      }
+
+      // 端末の購読登録（PushSubscription.toJSON() をそのまま受け取る）
+      if (url.pathname === '/api/push/subscribe') {
+        const result = await stub.addPushSubscription(body?.subscription, url.origin);
+        if (!result) return new Response('Invalid subscription', { status: 422 });
+        return Response.json(result);
+      }
+
+      if (url.pathname === '/api/push/unsubscribe') {
+        await stub.removePushSubscription(body?.endpoint);
+        return Response.json({ ok: true });
+      }
+
+      // 「この端末で今アプリを見ているか」のハートビート。見えている端末には
+      // 通知を送らない（ほかのアプリに切り替え中・スリープ中だけ通知する）
+      if (url.pathname === '/api/push/active') {
+        await stub.setDeviceActive(body?.deviceId, body?.active !== false);
+        return Response.json({ ok: true });
+      }
+
+      // fal ジョブの完了の見張りの登録。アプリを閉じている間はブラウザが
+      // ポーリングできないので、サーバー側でも status_url を見張って完了時に通知する
+      if (url.pathname === '/api/push/watch') {
+        let target;
+        try {
+          target = new URL(body?.statusUrl || '');
+        } catch {
+          return new Response('Invalid status url', { status: 400 });
+        }
+        // fal のプロキシと同じ制限（このオリジンから任意の URL を叩かせない）
+        if (target.protocol !== 'https:' || target.hostname !== 'queue.fal.run') {
+          return new Response('Target not allowed', { status: 403 });
+        }
+        await stub.addPushWatch(target.toString(), body?.kind);
+        return Response.json({ ok: true });
+      }
+
+      return new Response('Not found', { status: 404 });
+    }
+
     // fal API のプロキシ。API キー（Secret の FAL_KEY）はここで付与し、ブラウザには
     // 一切渡さない。転送先はフル URL で受け取るが queue.fal.run のみに制限する
     if (url.pathname === '/api/fal/proxy') {
@@ -3448,7 +3917,7 @@ export default {
     if (url.pathname === '/api/history') {
       await ensureHistoryCatalog(env, stub);
       if (request.method === 'GET') {
-        const { records, cursor } = await historyPage(env, {
+        const { records, cursor, totals } = await historyPage(env, {
           limit: Number(url.searchParams.get('limit')),
           cursor: url.searchParams.get('cursor') ?? '',
           q: url.searchParams.get('q') ?? '',
@@ -3459,9 +3928,13 @@ export default {
         // そのまま表示できる（読み込み直せば続きも追うようになる）
         // 片付けは裏で。一覧はページごとに来るので、先頭ページのときだけ乗せる
         if (!url.searchParams.get('cursor')) ctx?.waitUntil?.(runHousekeeping(env, stub));
-        return Response.json(records, {
-          headers: cursor ? { 'X-Next-Cursor': String(cursor) } : {},
-        });
+        const headers = {};
+        if (cursor) headers['X-Next-Cursor'] = String(cursor);
+        if (totals) {
+          headers['X-Total-Count'] = String(totals.count);
+          headers['X-Total-Images'] = String(totals.images);
+        }
+        return Response.json(records, { headers });
       }
       if (request.method === 'POST') {
         if (!isJson) return new Response('Content-Type must be application/json', { status: 415 });

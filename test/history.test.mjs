@@ -229,6 +229,32 @@ test('limit と cursor でページを刻める', async () => {
   assert.equal(nextCursor(third), null, '最後のページで続きを返しています');
 });
 
+test('先頭ページだけ、絞り込み後の件数と画像の枚数をヘッダで返す', async () => {
+  const mod = await loadWorker();
+  const env = makeEnv(mod);
+  // 通常 2 枚、比較 2+3 枚、画像編集（images に入力なども並ぶが出力は 1 枚）
+  await postRecord(mod, env, { id: 'g', prompt: 'a cat', images: [{ url: '/a' }, { url: '/b' }] });
+  await postRecord(mod, env, {
+    id: 'cmp', prompt: 'a dog', type: 'compare',
+    variants: [{ images: [{ url: '/c' }, { url: '/d' }] }, { images: [{ url: '/e' }, { url: '/f' }, { url: '/g' }] }],
+  });
+  await postRecord(mod, env, {
+    id: 'ie', prompt: 'a cat cup', type: 'imgedit', outputCount: 1,
+    images: [{ url: '/h' }, { url: '/i' }, { url: '/j' }],
+  });
+
+  const all = await call(mod, env, '/api/history?limit=2');
+  assert.equal(all.headers.get('X-Total-Count'), '3');
+  assert.equal(all.headers.get('X-Total-Images'), String(2 + 5 + 1));
+
+  const cats = await call(mod, env, `/api/history?q=${encodeURIComponent('cat')}`);
+  assert.equal(cats.headers.get('X-Total-Count'), '2', '検索中は一致したぶんだけ数える');
+  assert.equal(cats.headers.get('X-Total-Images'), String(2 + 1));
+
+  const next = await call(mod, env, `/api/history?limit=2&cursor=${nextCursor(all)}`);
+  assert.equal(next.headers.get('X-Total-Count'), null, '続きのページでは数え直さない');
+});
+
 test('件数の上限は無く、1 ページの取得は件数に依らず数クエリで済む', async () => {
   const mod = await loadWorker();
   const env = makeEnv(mod);
@@ -243,7 +269,8 @@ test('件数の上限は無く、1 ページの取得は件数に依らず数ク
   // 無料プランの D1 は 1 リクエスト 50 クエリまで。一覧はここに収まり続ける必要がある
   const before = env.d1.counters.queries;
   assert.deepEqual(await listIds(mod, env), Array.from({ length: 40 }, (_, i) => `r${40 - i}`));
-  assert.ok(env.d1.counters.queries - before <= 3, `一覧で ${env.d1.counters.queries - before} クエリ使っています`);
+  // 先頭ページは件数と画像の枚数を数える 1 クエリぶん多い（件数に依らず 1 回）
+  assert.ok(env.d1.counters.queries - before <= 4, `一覧で ${env.d1.counters.queries - before} クエリ使っています`);
 });
 
 /* ---- 削除 ---- */
@@ -541,6 +568,11 @@ test('統計は、これまでのクライアント側の計算と一致する',
     assert.ok(Math.abs(stat.mean - mean) < 1e-9, `${model}: 平均 ${stat.mean} !== ${mean}`);
     // ヒストグラムは、標本の総数と刻み数が合っていること
     assert.equal(stat.counts.reduce((s, c) => s + c, 0), sorted.length, `${model}: ヒストグラムの総数`);
+    // ビン境界はきりのいい秒数（幅は 1-2-5 系列、左端は幅の倍数）で、全標本を覆う
+    const mant = stat.width / 10 ** Math.floor(Math.log10(stat.width));
+    assert.ok([1, 2, 5].some((m) => Math.abs(mant - m) < 1e-9), `${model}: 幅 ${stat.width} が 1-2-5 系列でない`);
+    assert.ok(Math.abs(stat.lo / stat.width - Math.round(stat.lo / stat.width)) < 1e-9, `${model}: 左端 ${stat.lo} が幅の倍数でない`);
+    assert.ok(stat.lo <= stat.min && stat.lo + stat.counts.length * stat.width >= stat.max, `${model}: ビンが標本を覆っていない`);
   }
   assert.equal('fal-ai/flux/dev' in got, true);
   assert.equal(got['fal-ai/flux/dev'].n, 3, '比較や上限超えを数えています');

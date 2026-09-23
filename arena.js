@@ -764,6 +764,9 @@ async function runRoundFal(session, round) {
         body: JSON.stringify(buildRoundInput(session, round, p)),
       });
       round.pending[p.id] = { status_url: sub.status_url, response_url: sub.response_url };
+      // アプリを閉じている間はこのポーリングが止まるので、完了の検知（＝通知）は
+      // サーバー側にも頼んでおく。一斉生成の完了はサーバー側でまとめて 1 通になる
+      window.falPush?.watchFalJob(sub.status_url, 'gen');
     } catch (err) {
       round.results[p.id] = { error: `送信失敗: ${err.message}` };
     }

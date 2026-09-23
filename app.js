@@ -160,6 +160,7 @@ const els = {
   jumpResult: $('#jumpResult'),
   gallery: $('#gallery'),
   gallerySearch: $('#gallerySearch'),
+  galleryCount: $('#galleryCount'),
 };
 
 function sleep(ms) {
@@ -279,12 +280,43 @@ async function reloadHistory() {
     );
     historyCache = [...keep, ...page.records];
     historyCursor = page.cursor;
+    renderGalleryCount(page.totals);
     historyIsServerBacked = true; // ここから先は、消してもサーバーから戻せる
     if (!q) persistHistoryCache(); // 表示キャッシュは絞り込んでいないときのぶんだけ
     renderGallery();
   } finally {
     historyLoading = false;
   }
+}
+
+// ギャラリー見出しの「N 件・M 枚」。数えるのはサーバー（全件を手元に持たないため）。
+// 取れなかったとき（古い Worker など）は出さない
+let galleryTotals = null;
+
+function renderGalleryCount(totals) {
+  galleryTotals = totals ? { ...totals } : null;
+  if (!els.galleryCount) return;
+  els.galleryCount.textContent = galleryTotals && galleryTotals.count > 0
+    ? `${galleryTotals.count.toLocaleString()} 件・${galleryTotals.images.toLocaleString()} 枚`
+    : '';
+}
+
+// 記録 1 件ぶんの画像の枚数（サーバーの historyTotals と同じ数え方）
+function recordImageCount(record) {
+  if (Array.isArray(record?.variants)) {
+    return record.variants.reduce((n, v) => n + (v.images?.length ?? 0), 0);
+  }
+  return record?.outputCount ?? record?.images?.length ?? 0;
+}
+
+// 手元で足した・消したぶんを、次に取り直すまでの間だけ数に反映する
+// （検索中は一致するかどうか分からないので触らない）
+function adjustGalleryCount(record, sign) {
+  if (!galleryTotals || historyQuery || !record) return;
+  renderGalleryCount({
+    count: Math.max(0, galleryTotals.count + sign),
+    images: Math.max(0, galleryTotals.images + sign * recordImageCount(record)),
+  });
 }
 
 // ギャラリーの末尾まで並べ切ったときに、続きを足す
@@ -337,6 +369,7 @@ async function postHistoryRecord(record) {
 // fal の CDN 画像はサーバー側で失効しない URL に取り込まれるため、応答で差し替える
 function addHistoryRecord(record) {
   historyCache.unshift(record);
+  adjustGalleryCount(record, +1);
   persistHistoryCache();
   pendingHistorySaves.add(record.id);
   (async () => {
@@ -363,6 +396,7 @@ function addHistoryRecord(record) {
 
 function deleteHistoryRecord(id) {
   deletedHistoryIds.add(id);
+  adjustGalleryCount(historyCache.find((r) => r.id === id), -1);
   historyCache = historyCache.filter((r) => r.id !== id);
   persistHistoryCache();
   fetch(`/api/history/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
@@ -1015,32 +1049,97 @@ function formatSec(s) {
 }
 
 // サーバーが刻んだヒストグラム（最小値・階級幅・度数）をそのまま描く
-function renderStatsHistogram({ min, max, width, counts }) {
-  const wrap = document.createElement('div');
-  const peak = Math.max(...counts);
+// 1-2-5 系列に切り上げた、目盛に使えるきりのいい刻み幅（件数の目盛に使う）
+function niceStep(raw) {
+  const pow = 10 ** Math.floor(Math.log10(raw));
+  const m = raw / pow;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * pow;
+}
 
-  const hist = document.createElement('div');
-  hist.className = 'stats-hist';
-  counts.forEach((c, i) => {
-    const bin = document.createElement('div');
-    bin.className = 'stats-bin';
-    bin.title = `${formatSec(min + i * width)}〜${formatSec(min + (i + 1) * width)}: ${c} 件`;
-    const bar = document.createElement('span');
-    bar.style.height = c === 0 ? '0' : `${Math.max(6, (c / peak) * 100)}%`;
-    bin.appendChild(bar);
-    hist.appendChild(bin);
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function svgEl(name, attrs, textContent) {
+  const el = document.createElementNS(SVG_NS, name);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (textContent !== undefined) el.textContent = textContent;
+  return el;
+}
+
+// 生成時間の分布（SVG）。ビンの刻みはサーバーがきりのいい秒数に揃えて返すので、
+// 境界をそのまま秒の目盛に使える。件数の横グリッド・中央値の線・ビンごとの
+// ツールチップ（ビンの全高が当たり判定）を付ける。
+// 幅は描いた時点の実測（ダイアログが開いてから描くので測れる）。
+// lo が無い（古い Worker の応答）ときは min を左端として描く
+function renderStatsHistogram({ min, lo = min, width: step, counts, median }, chartWidth) {
+  const PAD_L = 30;
+  const PAD_R = 8;
+  const PAD_T = 16;
+  const PAD_B = 18;
+  const PLOT_H = 96;
+  const W = Math.max(chartWidth || 480, 240);
+  const H = PAD_T + PLOT_H + PAD_B;
+  const plotW = W - PAD_L - PAD_R;
+  const baseY = PAD_T + PLOT_H;
+  const bins = counts.length;
+  const hi = lo + bins * step;
+  const peak = Math.max(1, ...counts);
+
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${W} ${H}`,
+    class: 'stats-chart',
+    role: 'img',
+    'aria-label': '生成時間の分布',
   });
-  wrap.appendChild(hist);
 
-  const axis = document.createElement('div');
-  axis.className = 'stats-axis';
-  const lo = document.createElement('span');
-  lo.textContent = formatSec(min);
-  const hi = document.createElement('span');
-  hi.textContent = formatSec(max);
-  axis.append(lo, hi);
-  wrap.appendChild(axis);
-  return wrap;
+  // 件数の横グリッド（きりのいい整数刻み）と左の目盛
+  const yStep = Math.max(1, Math.round(niceStep(peak / 4)));
+  const yMax = Math.ceil(peak / yStep) * yStep;
+  for (let t = yStep; t <= yMax; t += yStep) {
+    const y = baseY - (t / yMax) * PLOT_H;
+    svg.appendChild(svgEl('line', { x1: PAD_L, y1: y, x2: W - PAD_R, y2: y, class: 'grid' }));
+    svg.appendChild(svgEl('text', { x: PAD_L - 6, y: y + 3, 'text-anchor': 'end', class: 'tick' }, `${t}`));
+  }
+  svg.appendChild(svgEl('line', { x1: PAD_L, y1: baseY, x2: W - PAD_R, y2: baseY, class: 'baseline' }));
+
+  // 横軸の秒目盛。ビン境界のうち、ラベルが重ならない間隔で間引く
+  const secText = (v) => `${step < 1 ? v.toFixed(1) : Math.round(v)}s`;
+  const everyNth = Math.ceil(bins / Math.max(2, Math.floor(plotW / 56)));
+  for (let i = 0; i <= bins; i += everyNth) {
+    const x = PAD_L + (i / bins) * plotW;
+    svg.appendChild(svgEl('text', { x, y: baseY + 14, 'text-anchor': 'middle', class: 'tick' }, secText(lo + i * step)));
+  }
+
+  // バー。隣と 2px の地色のすき間を空け、上端だけ丸める（付け根は角のまま）
+  const bw = plotW / bins;
+  const barW = Math.max(bw - 2, 1);
+  counts.forEach((count, i) => {
+    if (count === 0) return;
+    const x = PAD_L + i * bw + (bw - barW) / 2;
+    const h = (count / yMax) * PLOT_H;
+    const y = baseY - h;
+    const r = Math.min(3, barW / 2, h);
+    svg.appendChild(svgEl('path', {
+      class: 'bar',
+      d: `M ${x} ${baseY} V ${y + r} Q ${x} ${y} ${x + r} ${y} H ${x + barW - r} Q ${x + barW} ${y} ${x + barW} ${y + r} V ${baseY} Z`,
+    }));
+  });
+
+  // 中央値の線とラベル（値そのものは上の数値欄にある）
+  if (Number.isFinite(median)) {
+    const mx = PAD_L + Math.min(Math.max((median - lo) / (hi - lo), 0), 1) * plotW;
+    svg.appendChild(svgEl('line', { x1: mx, y1: PAD_T - 2, x2: mx, y2: baseY, class: 'median-line' }));
+    const labelX = Math.min(Math.max(mx, PAD_L + 20), W - PAD_R - 20);
+    svg.appendChild(svgEl('text', { x: labelX, y: PAD_T - 6, 'text-anchor': 'middle', class: 'median-label' }, '中央値'));
+  }
+
+  // ビンの全高を当たり判定にして、範囲と件数をツールチップで出す（バーが低くても出る）
+  counts.forEach((count, i) => {
+    const hit = svgEl('rect', { x: PAD_L + i * bw, y: PAD_T, width: bw, height: PLOT_H, class: 'hit' });
+    hit.appendChild(svgEl('title', {}, `${secText(lo + i * step)}〜${secText(lo + (i + 1) * step)}: ${count} 件`));
+    svg.appendChild(hit);
+  });
+
+  return svg;
 }
 
 function statsMessage(text) {
@@ -1107,7 +1206,7 @@ async function renderStats() {
     );
     group.appendChild(nums);
 
-    group.appendChild(renderStatsHistogram(stat));
+    group.appendChild(renderStatsHistogram(stat, els.statsBody.clientWidth));
     els.statsBody.appendChild(group);
   }
 }
@@ -1677,10 +1776,14 @@ function removeActiveJob(job) {
 
 // リクエスト送信のみ（status_url / response_url を含む submitted を返す）
 async function submitJob(modelId, input) {
-  return falFetch(`https://queue.fal.run/${modelId}`, {
+  const submitted = await falFetch(`https://queue.fal.run/${modelId}`, {
     method: 'POST',
     body: JSON.stringify(input),
   });
+  // アプリを閉じている間はこのポーリングが止まるので、完了の検知（＝通知）は
+  // サーバー側にも頼んでおく（push.js。通知を使っていなければサーバーが捨てる）
+  window.falPush?.watchFalJob(submitted?.status_url, 'gen');
+  return submitted;
 }
 
 // 既に送信済みの submitted をポーリングし、完了したら画像を取得する

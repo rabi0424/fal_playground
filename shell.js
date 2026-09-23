@@ -15,6 +15,7 @@
 
   const LS_THEME = 'fal_theme';
   const LS_SIDEBAR = 'fal_sidebar';
+  const LS_ACCENT = 'fal_accent';
 
   /* 保存できなくても、その操作自体は効かせる（次に開いたとき既定に戻るだけ）。
      ストレージが無効な環境や、容量がいっぱいの端末で例外を投げないため。
@@ -44,6 +45,12 @@
       '<path d="M12 3 21 7.5 12 12 3 7.5Z"/><path d="m3 12.5 9 4.5 9-4.5"/>' +
       '<path d="m3 16.75 9 4.5 9-4.5"/>',
     chart: '<path d="M5 20v-8"/><path d="M12 20V4"/><path d="M19 20v-5"/>',
+    bell:
+      '<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15Z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/>',
+    /* 通知オフ = 斜線の入ったベル */
+    bellOff:
+      '<path d="M6 16.5V11a6 6 0 0 1 9.4-4.9"/><path d="M18 11v5.5l1.5 1.5h-12"/>' +
+      '<path d="M10 20.5a2.2 2.2 0 0 0 4 0"/><path d="m4 4 16 16"/>',
     panel: '<rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M9.5 4.5v15"/>',
     menu: '<path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/>',
     close: '<path d="m6 6 12 12"/><path d="M18 6 6 18"/>',
@@ -105,6 +112,19 @@
     },
   ];
 
+  /* アクセントカラー。見本の色はライトの値（実際の値は style.css が配色ごとに持つ） */
+  const ACCENTS = [
+    { id: 'blue', label: 'ブルー', swatch: '#2563eb' },
+    { id: 'cyan', label: 'シアン', swatch: '#0e7490' },
+    { id: 'purple', label: 'パープル', swatch: '#7c3aed' },
+    { id: 'pink', label: 'ピンク', swatch: '#be185d' },
+    { id: 'red', label: 'レッド', swatch: '#e11d48' },
+    { id: 'orange', label: 'オレンジ', swatch: '#c2410c' },
+    { id: 'yellow', label: 'イエロー', swatch: '#b45309' },
+    { id: 'green', label: 'グリーン', swatch: '#15803d' },
+    { id: 'graphite', label: 'グラファイト', swatch: '#52525b' },
+  ];
+
   const THEMES = [
     { value: 'auto', label: '自動', icon: 'auto' },
     { value: 'light', label: 'ライト', icon: 'sun' },
@@ -163,12 +183,25 @@
     'title="アクセスポイント別の生成所要時間の統計" data-label="統計">' +
     icon('chart') +
     `<span class="nav-label">統計</span></${isIndex ? 'button' : 'a'}>` +
+    /* 生成完了のプッシュ通知のオン / オフ。状態と押したときの動きは push.js が持つ */
+    '<button type="button" class="nav-item" id="pushNav" aria-pressed="false" ' +
+    'title="生成完了をプッシュ通知します" data-label="通知">' +
+    `<span class="push-icon push-icon-off">${icon('bellOff')}</span>` +
+    `<span class="push-icon push-icon-on">${icon('bell')}</span>` +
+    '<span class="nav-label">通知</span></button>' +
     '<div class="theme-seg" role="group" aria-label="テーマ">' +
     THEMES.map(
       (t) =>
         `<button type="button" class="theme-btn" data-theme-value="${t.value}" ` +
         `title="${t.label}" aria-label="${t.label}">${icon(t.icon)}` +
         `<span class="theme-label">${t.label}</span></button>`,
+    ).join('') +
+    '</div>' +
+    '<div class="accent-row" role="group" aria-label="アクセントカラー">' +
+    ACCENTS.map(
+      (a) =>
+        `<button type="button" class="accent-swatch" data-accent-value="${a.id}" ` +
+        `style="--swatch: ${a.swatch}" title="${a.label}" aria-label="${a.label}"></button>`,
     ).join('') +
     '</div>' +
     '</div>';
@@ -205,6 +238,26 @@
         rememberSetting(LS_THEME, btn.dataset.themeValue);
       } catch { /* プライベートブラウズなどで書けなくても切替自体は効かせる */ }
       applyTheme(btn.dataset.themeValue);
+    });
+  }
+
+  /* ---------- アクセントカラー ---------- */
+
+  function applyAccent(id) {
+    const known = ACCENTS.some((a) => a.id === id) ? id : 'blue';
+    /* 既定のブルーは属性なし（style.css の :root の値）で描く */
+    if (known === 'blue') delete root.dataset.accent;
+    else root.dataset.accent = known;
+    for (const btn of sidebar.querySelectorAll('.accent-swatch')) {
+      btn.setAttribute('aria-pressed', String(btn.dataset.accentValue === known));
+    }
+  }
+
+  applyAccent(root.dataset.accent || 'blue');
+  for (const btn of sidebar.querySelectorAll('.accent-swatch')) {
+    btn.addEventListener('click', () => {
+      rememberSetting(LS_ACCENT, btn.dataset.accentValue);
+      applyAccent(btn.dataset.accentValue);
     });
   }
 

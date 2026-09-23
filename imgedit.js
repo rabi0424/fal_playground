@@ -2971,6 +2971,9 @@ const PROVIDERS = {
         method: 'POST',
         body: JSON.stringify(input),
       });
+      // アプリを閉じている間はこのポーリングが止まるので、完了の検知（＝通知）は
+      // サーバー側にも頼んでおく（push.js）
+      window.falPush?.watchFalJob(res.status_url, 'imgedit');
       return { statusUrl: res.status_url, responseUrl: res.response_url, requestId: res.request_id };
     },
 
