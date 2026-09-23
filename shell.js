@@ -15,6 +15,7 @@
 
   const LS_THEME = 'fal_theme';
   const LS_SIDEBAR = 'fal_sidebar';
+  const LS_ACCENT = 'fal_accent';
 
   /* 保存できなくても、その操作自体は効かせる（次に開いたとき既定に戻るだけ）。
      ストレージが無効な環境や、容量がいっぱいの端末で例外を投げないため。
@@ -111,6 +112,19 @@
     },
   ];
 
+  /* アクセントカラー。見本の色はライトの値（実際の値は style.css が配色ごとに持つ） */
+  const ACCENTS = [
+    { id: 'blue', label: 'ブルー', swatch: '#2563eb' },
+    { id: 'cyan', label: 'シアン', swatch: '#0e7490' },
+    { id: 'purple', label: 'パープル', swatch: '#7c3aed' },
+    { id: 'pink', label: 'ピンク', swatch: '#be185d' },
+    { id: 'red', label: 'レッド', swatch: '#e11d48' },
+    { id: 'orange', label: 'オレンジ', swatch: '#c2410c' },
+    { id: 'yellow', label: 'イエロー', swatch: '#b45309' },
+    { id: 'green', label: 'グリーン', swatch: '#15803d' },
+    { id: 'graphite', label: 'グラファイト', swatch: '#52525b' },
+  ];
+
   const THEMES = [
     { value: 'auto', label: '自動', icon: 'auto' },
     { value: 'light', label: 'ライト', icon: 'sun' },
@@ -183,6 +197,13 @@
         `<span class="theme-label">${t.label}</span></button>`,
     ).join('') +
     '</div>' +
+    '<div class="accent-row" role="group" aria-label="アクセントカラー">' +
+    ACCENTS.map(
+      (a) =>
+        `<button type="button" class="accent-swatch" data-accent-value="${a.id}" ` +
+        `style="--swatch: ${a.swatch}" title="${a.label}" aria-label="${a.label}"></button>`,
+    ).join('') +
+    '</div>' +
     '</div>';
 
   /* ページバー: モバイルではハンバーガー付きの固定バー、PC では見出しだけ */
@@ -217,6 +238,26 @@
         rememberSetting(LS_THEME, btn.dataset.themeValue);
       } catch { /* プライベートブラウズなどで書けなくても切替自体は効かせる */ }
       applyTheme(btn.dataset.themeValue);
+    });
+  }
+
+  /* ---------- アクセントカラー ---------- */
+
+  function applyAccent(id) {
+    const known = ACCENTS.some((a) => a.id === id) ? id : 'blue';
+    /* 既定のブルーは属性なし（style.css の :root の値）で描く */
+    if (known === 'blue') delete root.dataset.accent;
+    else root.dataset.accent = known;
+    for (const btn of sidebar.querySelectorAll('.accent-swatch')) {
+      btn.setAttribute('aria-pressed', String(btn.dataset.accentValue === known));
+    }
+  }
+
+  applyAccent(root.dataset.accent || 'blue');
+  for (const btn of sidebar.querySelectorAll('.accent-swatch')) {
+    btn.addEventListener('click', () => {
+      rememberSetting(LS_ACCENT, btn.dataset.accentValue);
+      applyAccent(btn.dataset.accentValue);
     });
   }
 

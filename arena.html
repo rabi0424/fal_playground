@@ -17,12 +17,14 @@
 <meta name="theme-color" content="#101012" media="(prefers-color-scheme: dark)">
 <link rel="stylesheet" href="style.css">
 <script>
-/* 保存済みのテーマとサイドバーの開閉は、描画前に反映する。
+/* 保存済みのテーマ・アクセントカラー・サイドバーの開閉は、描画前に反映する。
    後から JS で当てると、明→暗の切り替わりや幅の跳ねが一瞬見えてしまう */
 (function () {
   try {
     var d = document.documentElement, s = localStorage;
     d.dataset.theme = s.getItem('fal_theme') || 'auto';
+    var accent = s.getItem('fal_accent');
+    if (accent && accent !== 'blue') d.dataset.accent = accent;
     d.dataset.sidebar = s.getItem('fal_sidebar') || 'open';
   } catch (e) { /* ストレージが使えない環境では既定のまま */ }
 })();
