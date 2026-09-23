@@ -1776,10 +1776,14 @@ function removeActiveJob(job) {
 
 // リクエスト送信のみ（status_url / response_url を含む submitted を返す）
 async function submitJob(modelId, input) {
-  return falFetch(`https://queue.fal.run/${modelId}`, {
+  const submitted = await falFetch(`https://queue.fal.run/${modelId}`, {
     method: 'POST',
     body: JSON.stringify(input),
   });
+  // アプリを閉じている間はこのポーリングが止まるので、完了の検知（＝通知）は
+  // サーバー側にも頼んでおく（push.js。通知を使っていなければサーバーが捨てる）
+  window.falPush?.watchFalJob(submitted?.status_url, 'gen');
+  return submitted;
 }
 
 // 既に送信済みの submitted をポーリングし、完了したら画像を取得する

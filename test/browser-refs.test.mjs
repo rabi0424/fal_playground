@@ -16,7 +16,7 @@ const at = (name) => new URL(`../${name}`, import.meta.url);
 
 const FILES = ['app.js','edit.js','imgedit.js','arena.js','library.js','store.js','gallery-pager.js',
   'history-feed.js','image-upload.js','sync-merge.js','device-sync.js','hf-import.js','civitai-import.js',
-  'lora-library.js','runware-lora.js','lightbox-zoom.js','swipe-nav.js','shell.js'];
+  'lora-library.js','runware-lora.js','lightbox-zoom.js','swipe-nav.js','shell.js','push.js'];
 
 // ほかのスクリプトが window に置くもの
 const shared = new Set();
@@ -28,7 +28,8 @@ const KEYWORDS = new Set(['if','for','while','switch','catch','return','typeof',
 // Node には無いがブラウザにはあるもの
 const BROWSER = new Set(['Image','FileReader','IntersectionObserver','ResizeObserver','DOMParser',
   'getSelection','getComputedStyle','confirm','alert','matchMedia','requestAnimationFrame',
-  'FormData','FileList','DataTransfer','OffscreenCanvas','createImageBitmap','indexedDB']);
+  'FormData','FileList','DataTransfer','OffscreenCanvas','createImageBitmap','indexedDB',
+  'MutationObserver']);
 
 // コメントと引用符つきの文字列を落とす（説明文の中の name( を拾わないため）。
 // テンプレートリテラルは ${...} に本物の呼び出しが入るので残す
