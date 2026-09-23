@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 const at = (name) => new URL(`../${name}`, import.meta.url);
 
 const FILES = ['app.js','edit.js','imgedit.js','arena.js','library.js','store.js','gallery-pager.js',
-  'history-feed.js','image-upload.js','device-sync.js','hf-import.js','civitai-import.js',
+  'history-feed.js','image-upload.js','sync-merge.js','device-sync.js','hf-import.js','civitai-import.js',
   'lora-library.js','runware-lora.js','lightbox-zoom.js','swipe-nav.js','shell.js'];
 
 // ほかのスクリプトが window に置くもの

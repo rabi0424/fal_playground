@@ -6,6 +6,8 @@
 // アプリ内の認証は持たない。Access を有効にせずデプロイすると fal プロキシ等の
 // API が誰でも使える状態になるので注意（README 参照）。
 import { DurableObject } from 'cloudflare:workers';
+// 端末間同期のマージ（ブラウザの device-sync.js と同じものを使う）。globalThis.falSyncMerge を置く
+import './sync-merge.js';
 
 // 生成画像・履歴の保存設定
 // 画像本体は R2（env.IMAGES）に置く。履歴レコードは Durable Object の SQLite に
@@ -1779,8 +1781,17 @@ export class SyncState extends DurableObject {
     return (await this.ctx.storage.get('state')) ?? null;
   }
 
+  // 届いた同期ドキュメントを保存済みのものとマージして保存し、結果を返す。
+  // 以前は丸ごと置き換えていたので、古い一覧を持った端末が送るとほかの端末の
+  // 変更が消えていた。LoRA / チェックポイントは項目ごと、比較アリーナは
+  // セクションごとに新しい方を採る（sync-merge.js）。
+  // get → put の間に await を挟まないので、同時に届いた PUT とは混ざらない
+  // （Durable Object の入力ゲートが 1 つずつ処理する）
   async save(value) {
-    await this.ctx.storage.put('state', value);
+    const stored = (await this.ctx.storage.get('state')) ?? null;
+    const merged = globalThis.falSyncMerge.mergeDocs(stored, value);
+    await this.ctx.storage.put('state', merged);
+    return merged;
   }
 
   /* ---- 生成画像（R2 移行前の旧 DO ストレージ用。新規保存は R2 に直接行う） ---- */
@@ -3882,8 +3893,10 @@ export default {
       } catch {
         return new Response('Invalid JSON', { status: 400 });
       }
-      await stub.save(parsed);
-      return Response.json({ ok: true });
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return new Response('Invalid state', { status: 400 });
+      }
+      return Response.json(await stub.save(parsed));
     }
 
     return new Response('Method not allowed', { status: 405 });
