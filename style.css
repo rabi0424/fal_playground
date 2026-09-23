@@ -538,7 +538,15 @@ input:focus, select:focus, textarea:focus {
 textarea { resize: vertical; min-height: 80px; }
 
 .row { display: flex; gap: 10px; }
-.row .field { flex: 1; }
+/* min-width: 0 が無いと、flex item の下限が「中身の固有幅」になる。
+   **iOS Safari は width: 100% の <input> を縮められる箱として扱わず、
+   固有幅（size=20 ぶん、16px で 170px 前後）をそのまま下限に効かせる**。
+   そのため 3 欄の行（サンプラー / スケジューラ / denoise。Modal のモデルを
+   選んだときだけ出る）が 550px 前後まで広がり、ページ全体が横にパンできて
+   いた。Chromium は % 幅の input の min-content を 0 とみなすので再現しない
+   （input 自体の min-width: 0 は 518df1e で入れてあるが、それは input の
+   下限であって、この label の下限には効かない） */
+.row .field { flex: 1; min-width: 0; }
 .num-field { max-width: 90px; }
 
 .advanced {
@@ -1016,8 +1024,12 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
 .warm-ring.last .warm-arc { stroke: var(--danger); }
 .warm-ring.cold .warm-arc { stroke: transparent; }
 
-/* 生成中はコンテナが動いているので、満ちたまま静かに脈打たせる */
-.warm-ring.busy .warm-arc { animation: warm-pulse 1.6s ease-in-out infinite; }
+/* 生成中はコンテナが動いているので、満ちたまま静かに脈打たせる。
+   **SVG の circle ではなく外側の span を動かす。** circle の opacity を動かすと
+   毎フレーム描き直しになり、しかもリングは backdrop-filter の効いた生成バーの
+   中なので、iOS はそのたびにバー全体のぼかしを描き直す（生成中ずっと重い）。
+   HTML 要素の opacity アニメーションは合成だけで済む */
+.warm-ring.busy { animation: warm-pulse 1.6s ease-in-out infinite; will-change: opacity; }
 
 @keyframes warm-pulse {
   0%, 100% { opacity: 1; }
@@ -1025,7 +1037,7 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .warm-ring.busy .warm-arc { animation: none; }
+  .warm-ring.busy { animation: none; }
   .warm-arc { transition: none; }
 }
 

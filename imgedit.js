@@ -225,6 +225,7 @@ const els = {
   steps: $('#steps'),
   q21Steps: $('#q21Steps'),
   q21Cfg: $('#q21Cfg'),
+  q21CfgSteps: $('#q21CfgSteps'),
   guidance: $('#guidance'),
   acceleration: $('#acceleration'),
   outputFormat: $('#outputFormat'),
@@ -3399,13 +3400,16 @@ const PROVIDERS = {
         resolution: 0,
       };
       if (els.seedLock.checked && els.seed.value !== '') input.seed = Number(els.seed.value);
-      // 空欄はキーごと落として API の既定（25）に任せる。
+      // 空欄はキーごと落として API の既定（40）に任せる。
       // 共用の #steps は data-only="fal" で隠れていて値も動かないので使わない
       if (els.q21Steps.value !== '') input.steps = Number(els.q21Steps.value);
       // ガイダンス。**1 より上げると所要時間がほぼ倍になる**（ComfyUI は cfg=1 の
       // ときだけ negative 側の評価を省くため）。そのかわり指示への追従が上がり、
       // negative prompt も効くようになる
       if (els.q21Cfg.value !== '') input.cfg = Number(els.q21Cfg.value);
+      // 前半 cfg_steps ステップだけ cfg を掛け、残りは cfg=1 で回す（後半は
+      // negative 側を評価しないぶん速い）。空欄なら全ステップに掛ける
+      if (els.q21CfgSteps.value !== '') input.cfg_steps = Number(els.q21CfgSteps.value);
       // negative prompt は cfg > 1 のときだけ意味を持つ（cfg=1 では評価されない）
       const negative = els.negativePrompt.value.trim();
       if (negative) input.negative_prompt = negative;
@@ -3450,23 +3454,29 @@ const PROVIDERS = {
 const QWEN21_REF_PX = 1024 * 1536;
 const QWEN21_REF_SECONDS = 18;
 const QWEN21_REF_STEPS = 25;
+// API（modal_comfy）の既定ステップ数。実測の基準（上の 25）とは別物
+const QWEN21_DEFAULT_STEPS = 40;
 
 function qwen21Steps() {
   const n = Number(els.q21Steps.value);
-  return els.q21Steps.value !== '' && Number.isFinite(n) && n > 0 ? n : QWEN21_REF_STEPS;
+  return els.q21Steps.value !== '' && Number.isFinite(n) && n > 0 ? n : QWEN21_DEFAULT_STEPS;
 }
 
-// cfg > 1 では ComfyUI が negative 側も評価するので、UNet の呼び出しが倍になる
-// （cfg=1 のときだけ uncond の計算を丸ごと省く最適化が入る）
-function qwen21CfgFactor() {
+// cfg > 1 では ComfyUI が negative 側も評価するので、そのステップの UNet の
+// 呼び出しが倍になる（cfg=1 のときだけ uncond の計算を丸ごと省く最適化が入る）。
+// cfg_steps を指定すると倍になるのは前半のそのステップ数だけ
+function qwen21CfgSteps(steps) {
   const n = Number(els.q21Cfg.value);
-  return els.q21Cfg.value !== '' && Number.isFinite(n) && n > 1 ? 2 : 1;
+  if (!(els.q21Cfg.value !== '' && Number.isFinite(n) && n > 1)) return 0;
+  const k = Number(els.q21CfgSteps.value);
+  return els.q21CfgSteps.value !== '' && Number.isFinite(k) && k > 0 && k < steps ? k : steps;
 }
 
 function qwen21Seconds(size) {
   const px = size.width * size.height;
-  const secs = QWEN21_REF_SECONDS * (px / QWEN21_REF_PX)
-    * (qwen21Steps() / QWEN21_REF_STEPS) * qwen21CfgFactor();
+  const steps = qwen21Steps();
+  const evals = steps + qwen21CfgSteps(steps);
+  const secs = QWEN21_REF_SECONDS * (px / QWEN21_REF_PX) * (evals / QWEN21_REF_STEPS);
   return Math.max(1, Math.round(secs));
 }
 
@@ -4561,6 +4571,10 @@ for (const el of [els.sizeSelect, els.fitSelect, els.numImages, els.steps, els.g
   els.wanSteps, els.wanCfg, els.wanShift, els.wanMaskGrow,
   els.lpNumSteps, els.lpSteps, els.lpBlend, els.lpMaskGrow]) {
   el.addEventListener('change', saveForm);
+}
+// Qwen-Image 2.1 のステップ・ガイダンスは所要時間の目安（実行バーの費用欄）に効く
+for (const el of [els.q21Steps, els.q21Cfg, els.q21CfgSteps]) {
+  el.addEventListener('input', renderCostHint);
 }
 // 思考回数は生成時間の目安（実行バーの費用欄）にも効く
 for (const el of [els.lpNumSteps, els.lpBlend]) {

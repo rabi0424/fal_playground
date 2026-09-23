@@ -47,7 +47,7 @@ const MODELS = [
   // ガイダンスは 1 に固定されず、negative_prompt を効かせるなら上げられる
   // unified: Qwen 2.1 と同居する統合版。Krea 2 側の API は wan / lanpaint と同じ
   { id: MODAL_KREA2_UNIFIED_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'unified', ckpt: true, sampler: true },
-  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版・Krea 2 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', sampler: true, cfgMax: 10, stepsHint: '25（蒸留版が無いので必要）' },
+  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版・Krea 2 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', sampler: true, cfgMax: 10, stepsHint: '40（本家の既定。蒸留版が無いので必要）', cfgSteps: true },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -150,6 +150,8 @@ const els = {
   samplerName: $('#samplerName'),
   scheduler: $('#scheduler'),
   denoise: $('#denoise'),
+  q21CfgRow: $('#q21CfgRow'),
+  cfgSteps: $('#cfgSteps'),
   generateBtn: $('#generateBtn'),
   jobList: $('#jobList'),
   jobHint: $('#jobHint'),
@@ -441,6 +443,8 @@ function updateModelFields() {
 
   // サンプラー系は統合版だけが受け付ける
   els.wanSamplerRow.hidden = !model.sampler;
+  // 前半だけ cfg を掛ける 2 段サンプリング（Qwen-Image 2.1 の cfg_steps）
+  els.q21CfgRow.hidden = !model.cfgSteps;
 
   // aspect_ratio 系モデルはピクセル指定に非対応なのでカスタムを出さない
   const supportsCustom = model.sizeParam !== 'aspect_ratio';
@@ -878,7 +882,7 @@ function sortedCkptLibrary() {
   const base = currentCkptBase();
   return loadCkptLibrary()
     .filter((item) => (item.base ?? DEFAULT_CKPT_BASE) === base)
-    .sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true, sensitivity: 'base' }));
+    .sort((a, b) => loraLib.compareLabels(a.name, b.name));
 }
 
 // 「既定」+ 登録済みチェックポイント + 「URL / ファイル名を入力…」でプルダウンを構成
@@ -1347,17 +1351,35 @@ function warmView(endpoint, now = Date.now()) {
   return { level: 'warm', ratio: left / warmWindowMs, label: 'ウォーム（すぐ生成できます）' };
 }
 
+// 前回描いた状態。変わっていない値は DOM に書かない。
+// リングは backdrop-filter（ぼかし）の効いた生成バーの中にあり、中身が変わるたびに
+// iOS はバー全体のぼかしを描き直す。1 秒ごとの描き直しを「変わったときだけ」に絞る
+let warmDrawn = { hidden: null, level: null, label: null, offset: null };
+
 function renderWarmRing() {
   const endpoint = currentModalEndpoint();
   const view = warmView(endpoint);
-  els.warmRing.hidden = !view;
+  if (warmDrawn.hidden !== !view) {
+    els.warmRing.hidden = !view;
+    warmDrawn.hidden = !view;
+  }
   if (!view) return;
-  els.warmRing.classList.remove('warm', 'soon', 'last', 'cold', 'busy');
-  els.warmRing.classList.add(view.level);
-  els.warmRing.setAttribute('aria-label', view.label);
-  els.warmRing.title = view.label;
-  const arc = els.warmRing.querySelector('.warm-arc');
-  arc.style.strokeDashoffset = String(WARM_ARC_LEN * (1 - view.ratio));
+  if (warmDrawn.level !== view.level) {
+    els.warmRing.classList.remove('warm', 'soon', 'last', 'cold', 'busy');
+    els.warmRing.classList.add(view.level);
+    warmDrawn.level = view.level;
+  }
+  if (warmDrawn.label !== view.label) {
+    els.warmRing.setAttribute('aria-label', view.label);
+    els.warmRing.title = view.label;
+    warmDrawn.label = view.label;
+  }
+  // 1/10 周（約 5.7）より細かい差は目に見えないので、そのぶんは描き直さない
+  const offset = Math.round(WARM_ARC_LEN * (1 - view.ratio) * 10) / 10;
+  if (warmDrawn.offset !== offset) {
+    els.warmRing.querySelector('.warm-arc').style.strokeDashoffset = String(offset);
+    warmDrawn.offset = offset;
+  }
 }
 
 // 表示が要るあいだだけ 1 秒ごとに描き直す（タブが裏なら止める）
@@ -1780,6 +1802,11 @@ function buildModalInput(prompt) {
     if (els.samplerName.value.trim() !== '') input.sampler_name = els.samplerName.value.trim();
     if (els.scheduler.value.trim() !== '') input.scheduler = els.scheduler.value.trim();
     if (els.denoise.value !== '') input.denoise = Number(els.denoise.value);
+  }
+  // 前半 cfg_steps ステップだけ cfg を掛け、残りは cfg=1 で回す。後半は
+  // negative 側を評価しないので、全ステップに cfg を掛けるより速い
+  if (!els.q21CfgRow.hidden && els.cfgSteps.value !== '') {
+    input.cfg_steps = Number(els.cfgSteps.value);
   }
   return input;
 }
@@ -2711,6 +2738,7 @@ function perModelSnapshot() {
     samplerName: els.samplerName.value,
     scheduler: els.scheduler.value,
     denoise: els.denoise.value,
+    cfgSteps: els.cfgSteps.value,
     compare: compareMode,
     common: serializeLoraList(els.loraList),
     variants: [...els.variantList.querySelectorAll('.variant')]
@@ -2733,6 +2761,7 @@ function perModelBlank() {
     samplerName: '',
     scheduler: '',
     denoise: '',
+    cfgSteps: '',
     compare: false,
     common: [],
     variants: [],
@@ -2756,6 +2785,7 @@ function perModelApply(s) {
   els.samplerName.value = s.samplerName || '';
   els.scheduler.value = s.scheduler || '';
   els.denoise.value = s.denoise || '';
+  els.cfgSteps.value = s.cfgSteps || '';
   updateCustomSize();
 
   els.loraList.innerHTML = '';

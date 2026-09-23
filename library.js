@@ -234,7 +234,7 @@ function visibleItems() {
     if (sort === 'scale') return (b.scale ?? 1) - (a.scale ?? 1);
     // 名前順。お気に入りは先頭に集める（生成画面のプルダウンと同じ並び）
     if (!!a.fav !== !!b.fav) return a.fav ? -1 : 1;
-    return entryLabel(a).localeCompare(entryLabel(b), 'ja', { numeric: true, sensitivity: 'base' });
+    return loraLib.compareLabels(entryLabel(a), entryLabel(b));
   });
 }
 

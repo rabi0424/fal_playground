@@ -223,7 +223,7 @@ function triggerWords(air) {
 }
 
 function sorted(items = load()) {
-  return [...items].sort((a, b) => labelOf(a).localeCompare(labelOf(b), 'ja', { numeric: true, sensitivity: 'base' }));
+  return [...items].sort((a, b) => loraLib.compareLabels(labelOf(a), labelOf(b)));
 }
 
 // 同じ AIR は上書きする（検索し直したときに名前やトリガーワードが新しくなる）

@@ -15,6 +15,7 @@
  *
  *   const zoom = falLightboxZoom.attach(lightboxEl, { onTap: closeLightbox });
  *   zoom.reset();   // 画像を切り替えた / 閉じたときに等倍へ戻す
+ *                   //（指が触れている最中でもよい。その指はタップとして扱わない）
  *   zoom.zoomed     // ズーム中か（スワイプでの画像送りを止めるのに使う）
  * ========================================================================== */
 
@@ -43,6 +44,9 @@ function attach(lightbox, opts = {}) {
   let base = { w: 0, h: 0 }; // 等倍のときの表示サイズ（はみ出し量の計算に使う）
   let drag = null; // ドラッグ開始時の指の位置と、そのときの平行移動量
   let moved = false;
+  // いま触れている指を見送るか。reset() が指の触れている最中に呼ばれたとき（横スワイプで
+  // 画像を送ったとき）に立てる。そのまま離すとタップと見なされ、閉じてしまうため
+  let ignore = false;
   let lastTapAt = 0;
   let lastTapX = 0;
   let lastTapY = 0;
@@ -66,6 +70,10 @@ function attach(lightbox, opts = {}) {
     scale = 1;
     tx = 0;
     ty = 0;
+    // 指が触れたまま呼ばれることがある（スワイプで画像を送ったとき、呼び出し側が
+    // 画像を差し替えるために呼ぶ）。動かした印をここで消したまま指を離すと、
+    // 動かしたのにタップと見なされて閉じてしまうので、その指は見送る
+    if (drag) ignore = true;
     drag = null;
     moved = false;
     if (tapTimer) clearTimeout(tapTimer);
@@ -117,6 +125,7 @@ function attach(lightbox, opts = {}) {
   img.addEventListener('pointerdown', (e) => {
     drag = { x: e.clientX, y: e.clientY, tx, ty };
     moved = false;
+    ignore = false; // 新しい指。前の指の見送りはここで終わり
     if (scale !== 1) {
       lightbox.classList.add('panning');
       img.setPointerCapture?.(e.pointerId);
@@ -141,16 +150,18 @@ function attach(lightbox, opts = {}) {
   };
 
   img.addEventListener('pointerup', (e) => {
-    const wasMoved = moved;
+    const skip = moved || ignore;
     endDrag();
     moved = false;
-    if (wasMoved) return; // 動かしたぶんはタップとして扱わない
+    ignore = false;
+    if (skip) return; // 動かしたぶん・見送るぶんはタップとして扱わない
     handleTap(e.clientX, e.clientY);
   });
 
   img.addEventListener('pointercancel', () => {
     endDrag();
     moved = false;
+    ignore = false;
   });
 
   // 画像の上のタップは自分で始末する。呼び出し側の「タップで閉じる」に

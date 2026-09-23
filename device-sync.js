@@ -59,12 +59,20 @@ function saveTs(ts) {
   falStore.set(LS_SYNC_TS, JSON.stringify(ts));
 }
 
-function request(method, body) {
+// keepalive（ページを離れても送り切る）は、**本文が 64KB を超えると送信せずに
+// fetch が即座に失敗する**（ブラウザの仕様。Chromium で 63KB から失敗を確認）。
+// 以前は PUT を常に keepalive で送っていたので、LoRA ライブラリが 150 件ほどに
+// 育って本文が 64KB を超えた時点から、**同期の送信がすべて黙って失敗していた**
+// （設定した端末には残るが、ほかの端末には届かない）。
+// keepalive はページを離れる直前の送信（flush）だけに使い、それも収まるときだけにする
+const KEEPALIVE_MAX_BYTES = 60 * 1024;
+
+function request(method, body, { keepalive = false } = {}) {
   return fetch('/api/state', {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : {},
     body,
-    keepalive: method === 'PUT',
+    keepalive: keepalive && new TextEncoder().encode(body ?? '').length <= KEEPALIVE_MAX_BYTES,
   });
 }
 
@@ -104,16 +112,20 @@ async function pull() {
   if (needPush) push();
 }
 
-async function push() {
+async function push({ keepalive = false } = {}) {
   const ts = loadTs();
   const doc = {};
   for (const [section, lsKey] of Object.entries(SECTIONS)) {
     doc[section] = { value: falStore.get(lsKey) ?? '', ts: ts[section] || 0 };
   }
+  // 失敗しても次の変更・次回起動時に再送される（手元の ts がサーバーより新しい
+  // ままなので、次の pull が送り直す）。ただし黙って飲み込むと、ずっと失敗して
+  // いても気づけないので、理由はコンソールに残す
   try {
-    await request('PUT', JSON.stringify(doc));
-  } catch {
-    // 失敗しても次の変更・次回起動時に再送される
+    const res = await request('PUT', JSON.stringify(doc), { keepalive });
+    if (!res.ok) console.warn(`[deviceSync] 同期の送信に失敗しました: HTTP ${res.status}`);
+  } catch (e) {
+    console.warn('[deviceSync] 同期の送信に失敗しました:', e);
   }
 }
 
@@ -143,7 +155,7 @@ window.deviceSync = {
     if (!pushTimer) return;
     clearTimeout(pushTimer);
     pushTimer = null;
-    push();
+    push({ keepalive: true });
   },
 };
 

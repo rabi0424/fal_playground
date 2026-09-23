@@ -64,6 +64,7 @@ function setup() {
 
   const taps = [];
   const zoom = window.falLightboxZoom.attach(lightbox, { onTap: () => taps.push(Date.now()) });
+  img.zoom = zoom; // 指が触れている最中の reset() を試すため
   return { lightbox, img, zoom, taps };
 }
 
@@ -80,6 +81,11 @@ function transform(img) {
 }
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 画像の差し替え（呼び出し側の showLightboxImage 相当）。指が触れている最中に呼ばれる
+function zoomResetDuringDrag(img) {
+  img.zoom.reset();
+}
 const TAP_WINDOW_MS = 260;
 
 const tests = [];
@@ -167,6 +173,21 @@ test('画像のタップは呼び出し側の「タップで閉じる」へ素�
   let stopped = 0;
   img.fire('click', { stopPropagation: () => { stopped += 1; } });
   assert.equal(stopped, 1, 'click を止めていないと、ダブルタップの 1 回目で閉じてしまう');
+});
+
+test('送りの途中で reset() が挟まっても、動かした指はタップにならない', async () => {
+  // 横スワイプで画像を送ると、呼び出し側は指が触れているうちに reset() を呼ぶ
+  //（次の画像を等倍で出すため）。そこで「動かした」印まで消してしまうと、
+  // 指を離したときにタップと見なされ、送った直後に拡大表示が閉じてしまう
+  const { img, taps } = setup();
+  img.fire('pointerdown', { clientX: 400, clientY: 300 });
+  img.fire('pointermove', { clientX: 330, clientY: 300 }); // 横へ払い始める
+  zoomResetDuringDrag(img);
+  img.fire('pointermove', { clientX: 260, clientY: 300 }); // 送ったあとも指は動く
+  img.fire('pointerup', { clientX: 260, clientY: 300 });
+
+  await wait(TAP_WINDOW_MS + 60);
+  assert.deepEqual(taps, [], '払った指がタップになり、送った直後に閉じてしまう');
 });
 
 test('reset() で等倍に戻る（画像を切り替えた / 閉じたとき）', async () => {
