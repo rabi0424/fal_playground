@@ -91,8 +91,8 @@
         </label>
         <p class="hint" id="maskModeHint"></p>
 
-        <label class="mask-toggle" data-only="fal wavespeed modal" title="このモデルは画像全体を作り直すので、返ってくる絵が数 px ずれることがあります。マスクの外側（変わらないはずの部分）を手がかりに、重ねる前に位置を合わせます">
-          <input type="checkbox" id="alignToggle" checked> ずれを補正してから重ねる
+        <label class="mask-toggle" data-only="fal wavespeed modal" title="このモデルは画像全体を作り直すので、返ってくる絵が数 px ずれたり、わずかに拡大・縮小されたりします。元画像の輪郭が返ってきた画像のどこに重なるかを（帯・余白の側も含めて）探し、位置と倍率を合わせてから、はみ出した部分を切り取ります。手がかりにするのはマスクの外側（マスクを使わないときは画像全体）です">
+          <input type="checkbox" id="alignToggle" checked> ずれを補正してから重ねる・切り取る
         </label>
 
         <label class="mask-toggle" title="画像全体を作り直すモデルは、露出やホワイトバランスが全体にわずかに動きます。マスクの外側（変わらないはずの部分）だけを見て色味を元画像に寄せてから重ねるので、継ぎ目が出にくくなります">
@@ -176,7 +176,7 @@
         <option value="pad">帯を付けて送り、結果から切り取る</option>
         <option value="stretch">引き伸ばして送る</option>
       </select>
-      <span class="hint">帯は元画像の外周の平均色で塗ります。「引き伸ばして送る」は歪んだ絵をモデルに見せる代わりに、送信サイズいっぱいの画素を使います。<strong>どちらを選んでも、結果は入力と同じ縦横比に戻してから表示・保存します</strong>（帯なら切り取り、引き伸ばしなら詰まった軸を伸ばし返します）。</span>
+      <span class="hint">帯は元画像の外周の平均色で塗ります。「引き伸ばして送る」は歪んだ絵をモデルに見せる代わりに、送信サイズいっぱいの画素を使います。<strong>どちらを選んでも、結果は入力と同じ縦横比に戻してから表示・保存します</strong>（帯なら切り取り、引き伸ばしなら詰まった軸を伸ばし返します）。「ずれを補正」がオンなら、切り取る前に返ってきた中身の位置と倍率を元画像に合わせます（モデルが中身を帯の側へずらしたり縮めたりしても、端が欠けたり帯が残ったりしません）。</span>
     </label>
 
     <details class="field lora-accordion" data-only="runware" open>
