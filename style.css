@@ -1331,9 +1331,13 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
   word-break: break-word;
 }
 
+/* モデル名・LoRA のファイル名や URL は空白を含まず折り返せないことがある。
+   はみ出すとページ全体の幅が広がり、スマホで横にパンできてしまうため、
+   どこでも折り返せるようにする */
 .detail-meta .meta-line {
   font-size: 12px;
   color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .detail-actions {
