@@ -3359,19 +3359,20 @@ const PROVIDERS = {
     },
   },
 
-  // Qwen-Image 2.1（Modal 自前ホスト / modal_comfy の qwen21_app の /edit）。
+  // Qwen-Image 2.1（Modal 自前ホスト / modal_comfy の krea2_qwen_app の qwen_edit）。
   //
   // **マスクを使わない参照画像編集**。画像を丸ごと渡して、指示文で「何をどう
   // 変えるか」を書く。ほかの Modal 版と違い Krea 2 ではなく Qwen-Image 2.1 なので、
   // **Krea 2 用の LoRA も、ノーマルの Qwen-Image 用の LoRA も効かない**。
   // loraBase: 'qwen21' で候補を分けてある。
   //
-  // 生成側の「Qwen-Image 2.1 自前ホスト」と同じコンテナなので、両方使うなら
-  // 生成もそちらに寄せるとコンテナが 1 つで済む。
+  // 統合版（krea2_qwen_app）で、生成側の「Qwen-Image 2.1 自前ホスト（Modal 統合版）」
+  // 「Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）」と同じコンテナ。
+  // 生成をどちらかに寄せればコンテナが 1 つで済み、ウォームも共有される。
   qwen21: {
-    label: 'Modal 自前ホスト（Qwen-Image 2.1 参照画像編集）',
+    label: 'Modal 自前ホスト（Qwen-Image 2.1 参照画像編集・統合版 Krea 2 と共有）',
     model: 'modal/qwen21-edit',
-    note: 'マスク不要。画像を丸ごと渡して、指示文で変更点を書きます。蒸留版が無いモデルなのでステップ数は 25 前後が必要で、1024×1536 で 20 秒ほどかかります（Krea 2 Turbo の 8 ステップとは桁が違います）。Krea 2 の LoRA は効きません。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。生成側の「Qwen-Image 2.1 自前ホスト」と同じコンテナです。',
+    note: 'マスク不要。画像を丸ごと渡して、指示文で変更点を書きます。蒸留版が無いモデルなのでステップ数は 25 前後が必要で、1024×1536 で 20 秒ほどかかります（Krea 2 Turbo の 8 ステップとは桁が違います）。Krea 2 の LoRA は効きません。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。生成側の「Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）」「Qwen-Image 2.1 自前ホスト（Modal 統合版）」と同じコンテナなので、生成をそちらに寄せればコンテナが 1 つで済みます。',
     supports: { size: true, steps: true, guidance: true, negative: true },
     sizeKind: 'wan',
     // Krea 2 用でも、ノーマルの Qwen-Image 用でもない専用の枠
