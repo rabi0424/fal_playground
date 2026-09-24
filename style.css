@@ -175,6 +175,12 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
 .shell-body {
   flex: 1;
   min-width: 0;
+  /* 折り返せない長い文字列（LoRA の URL など）が 1 か所でもはみ出すと、
+     ページ全体の幅が広がり、スマホでは縮小表示されて横にパンできてしまう。
+     個々の要素で折り返すのが本筋だが、取りこぼしても画面幅を超えないよう
+     ここで切っておく。clip はスクロール領域を作らないので、ページバーの
+     sticky や下部固定バー（fixed）には影響しない */
+  overflow-x: clip;
 }
 
 .sidebar {
