@@ -242,6 +242,7 @@ const els = {
   seedLock: $('#seedLock'),
   negativePrompt: $('#negativePrompt'),
   runBtn: $('#runBtn'),
+  warmRing: $('#warmRing'),
   costHint: $('#costHint'),
   jobList: $('#jobList'),
   status: $('#status'),
@@ -1189,6 +1190,7 @@ function syncRunBtn() {
   els.runBtn.textContent = queuedCount() > 0 ? '続けて編集する' : '編集する';
   els.runBtn.title = full ? `同時に流せるのは ${MAX_QUEUE} 件までです` : '';
   renderCostHint();
+  warmRing.render(); // 実行中はコンテナが動いている＝リングも満ちた表示にする
 }
 
 /* ==========================================================================
@@ -2767,6 +2769,22 @@ function openRecordLightbox(record) {
   els.lightbox.hidden = false;
 }
 
+// 結果パネルの画像から開く。塗り直しで表示だけ先に合成し直していることがあるので、
+// レコードの URL ではなく今表示している画像をそのまま並べる
+function openResultLightbox(card) {
+  const cards = [...els.resultImages.querySelectorAll('.ie-result-card')];
+  lightboxItems = cards
+    .map((c) => ({
+      url: c.querySelector('img')?.src ?? '',
+      label: c.querySelector('figcaption')?.textContent ?? '',
+    }))
+    .filter((item) => item.url);
+  if (lightboxItems.length === 0) return;
+  lightboxIndex = Math.max(0, cards.indexOf(card));
+  showLightboxImage();
+  els.lightbox.hidden = false;
+}
+
 function showLightboxImage() {
   lightboxZoom.reset(); // 前の画像のズームを持ち越さない
   const item = lightboxItems[lightboxIndex];
@@ -3202,6 +3220,8 @@ const PROVIDERS = {
   // （生成画面の Modal 版と同じ仕組み）
   modal: {
     label: 'Modal 自前ホスト（Wan2.2 + VACE マスク編集）',
+    // ウォーム表示のキー（Worker の MODAL_WARM_GROUPS）。統合版（wan）の生成と同じコンテナ
+    warmKey: 'wan-edit',
     model: 'modal/wan-vace-edit',
     note: 'マスクで塗った範囲を描き直します（マスク必須）。画面全体を作り直して返すモデルなので、塗った範囲だけを元画像に重ねます。蒸留 LoRA を常時適用するため CFG は 1・20 ステップが前提です。LoRA は Wan 用のものを追加で指定できます（ライブラリから選んだものは Hugging Face の URL で渡すので、Modal Volume に無ければ初回リクエスト時に取り込まれます）。出力は 1 枚で、送信サイズは 32 の倍数に丸めます。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。初回はモデルの読み込みで数分かかります。',
     supports: { size: true, steps: true, guidance: true, negative: true },
@@ -3287,6 +3307,8 @@ const PROVIDERS = {
   // 上がるので、生成側も「Modal LanPaint 版」に寄せると 1 コンテナで収まる
   lanpaint: {
     label: 'Modal 自前ホスト（LanPaint インペイント）',
+    // ウォーム表示のキー（Worker の MODAL_WARM_GROUPS）。LanPaint 版の生成と同じコンテナ
+    warmKey: 'lanpaint',
     model: 'modal/lanpaint-inpaint',
     note: '塗った範囲だけを描き直します（マスク必須）。マスクの外は元画像のまま返るモデルなので、継ぎ目が出ません。生成で使っている Krea 2 の LoRA がそのまま効くので、キャラクターを保ったまま顔や服だけ描き直す用途に向きます。実質のノブは「思考回数」だけで、生成時間もこれでほぼ決まります（標準の 5 でウォーム時 30 秒ほど）。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。Wan2.2 + VACE とは別のコンテナなので、生成も「Modal LanPaint 版」にすればコンテナが 1 つで済みます。',
     supports: { size: true, steps: true },
@@ -3359,19 +3381,22 @@ const PROVIDERS = {
     },
   },
 
-  // Qwen-Image 2.1（Modal 自前ホスト / modal_comfy の qwen21_app の /edit）。
+  // Qwen-Image 2.1（Modal 自前ホスト / modal_comfy の krea2_qwen_app の qwen_edit）。
   //
   // **マスクを使わない参照画像編集**。画像を丸ごと渡して、指示文で「何をどう
   // 変えるか」を書く。ほかの Modal 版と違い Krea 2 ではなく Qwen-Image 2.1 なので、
   // **Krea 2 用の LoRA も、ノーマルの Qwen-Image 用の LoRA も効かない**。
   // loraBase: 'qwen21' で候補を分けてある。
   //
-  // 生成側の「Qwen-Image 2.1 自前ホスト」と同じコンテナなので、両方使うなら
-  // 生成もそちらに寄せるとコンテナが 1 つで済む。
+  // 統合版（krea2_qwen_app）で、生成側の「Qwen-Image 2.1 自前ホスト（Modal 統合版）」
+  // 「Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）」と同じコンテナ。
+  // 生成をどちらかに寄せればコンテナが 1 つで済み、ウォームも共有される。
   qwen21: {
-    label: 'Modal 自前ホスト（Qwen-Image 2.1 参照画像編集）',
+    label: 'Modal 自前ホスト（Qwen-Image 2.1 参照画像編集・統合版 Krea 2 と共有）',
+    // ウォーム表示のキー（Worker の MODAL_WARM_GROUPS）。統合版 Krea 2・Qwen 2.1 の生成と同じコンテナ
+    warmKey: 'qwen21-edit',
     model: 'modal/qwen21-edit',
-    note: 'マスク不要。画像を丸ごと渡して、指示文で変更点を書きます。蒸留版が無いモデルなのでステップ数は 25 前後が必要で、1024×1536 で 20 秒ほどかかります（Krea 2 Turbo の 8 ステップとは桁が違います）。Krea 2 の LoRA は効きません。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。生成側の「Qwen-Image 2.1 自前ホスト」と同じコンテナです。',
+    note: 'マスク不要。画像を丸ごと渡して、指示文で変更点を書きます。蒸留版が無いモデルなのでステップ数は 25 前後が必要で、1024×1536 で 20 秒ほどかかります（Krea 2 Turbo の 8 ステップとは桁が違います）。Krea 2 の LoRA は効きません。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。生成側の「Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）」「Qwen-Image 2.1 自前ホスト（Modal 統合版）」と同じコンテナなので、生成をそちらに寄せればコンテナが 1 つで済みます。',
     supports: { size: true, steps: true, guidance: true, negative: true },
     sizeKind: 'wan',
     // Krea 2 用でも、ノーマルの Qwen-Image 用でもない専用の枠
@@ -3555,6 +3580,9 @@ const MASK_MODE_HINTS = {
 
 // プロバイダが対応していない項目は隠す。data-only は空白区切りで複数書ける
 function syncProviderFields() {
+  // Modal 版に切り替えたときは、起点をサーバーに訊き直してからリングを出す
+  if (provider().warmKey) warmRing.refresh();
+  warmRing.sync();
   for (const el of document.querySelectorAll('[data-only]')) {
     el.hidden = !el.dataset.only.split(/\s+/).includes(providerId);
   }
@@ -3672,6 +3700,18 @@ const jobUI = new Map();
 const cancelledJobs = new Set();
 /** 投入中（まだ handle が返っていない）件数。連打で上限を超えないように数える */
 let submitting = 0;
+
+/* ---------- Modal のウォーム表示 ---------- */
+//
+// 実行ボタンの隣のリング（生成画面と同じ。中身は warm-ring.js）。起点は Worker が
+// 持つので、生成画面で温めた分もここに出る（同じコンテナを共有する組は同じ時刻）
+
+const warmRing = falWarmRing.attach(els.warmRing, {
+  endpoint: () => provider().warmKey ?? null,
+  // 今のプロバイダと同じコンテナを使っているジョブが走っているか
+  busy: () => activeJobs.some((j) => j.provider === providerId),
+  verb: '編集',
+});
 
 function queuedCount() {
   return activeJobs.length + submitting;
@@ -3938,6 +3978,8 @@ async function waitAndFinish(job) {
     poll = await api.poll(job.handle);
     if (!poll.done) setJobStatus(job, poll.text, poll.note);
   } while (!poll.done);
+
+  warmRing.note(api.warmKey); // コンテナがアイドルに戻った時刻
 
   const { images, seed, flagged, cost } = api.parse(poll.result);
   if (images.length === 0) throw new Error('画像が返されませんでした');
@@ -4229,6 +4271,8 @@ function renderResult(record) {
     const el = document.createElement('img');
     el.src = img.url;
     el.alt = isInput ? '入力画像' : record.prompt;
+    el.title = '拡大して見る';
+    el.addEventListener('click', () => openResultLightbox(card));
     card.appendChild(el);
 
     const cap = document.createElement('figcaption');

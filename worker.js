@@ -102,7 +102,7 @@ const PUSH_KINDS = ['gen', 'imgedit', 'edit'];
 // 画像に焼き込む kind。ジョブの kind から引く（既定は生成）
 const JOB_META_KINDS = { edit: 'edit', inpaint: 'inpaint' };
 
-// 参照画像編集（Qwen-Image 2.1 / qwen21_app の /edit）で受け取れる参照画像の枚数。
+// 参照画像編集（Qwen-Image 2.1 / krea2_qwen_app の qwen_edit）で受け取れる参照画像の枚数。
 // Modal 側の MAX_REFS と同じ値にしてある。**16 は TextEncodeQwenImage21 の
 // Autogrow 入力 image_1..image_16 の限界**で、ノード側の上限そのもの。
 // ここで弾くのは、通らない本文を Durable Object に積まないため
@@ -4252,7 +4252,7 @@ export default {
           key: 'lanpaint',
           needs: 'mask',
         },
-        // Qwen-Image 2.1（qwen21_app の /edit）。**マスクを使わない**。
+        // Qwen-Image 2.1（統合版 krea2_qwen_app の qwen_edit）。**マスクを使わない**。
         // 参照画像を base64 の配列で渡し、指示文の中で <image1> … と参照する。
         // images[0] が編集対象で、残りは参照用（API 側の上限は 4 枚）
         qwen21: {

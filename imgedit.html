@@ -39,6 +39,7 @@
 <script src="history-feed.js" defer></script>
 <script src="civitai-import.js" defer></script>
 <script src="lightbox-zoom.js" defer></script>
+<script src="warm-ring.js" defer></script>
 <script src="modal-errors.js" defer></script>
 <script src="imgedit.js" defer></script>
 <script src="push.js" defer></script>
@@ -392,7 +393,16 @@
       <p id="costHint" class="hint" hidden></p>
       <div id="status" class="status" hidden></div>
       <div id="error" class="error" role="alert" hidden></div>
-      <button id="runBtn" class="primary-btn" type="button" disabled>編集する</button>
+      <div class="generate-row">
+        <button id="runBtn" class="primary-btn" type="button" disabled>編集する</button>
+        <!-- Modal 版のウォーム残り時間（生成画面と同じ）。減っていくリングだけで、秒数は出さない -->
+        <span id="warmRing" class="warm-ring" role="img" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle class="warm-track" cx="12" cy="12" r="9"></circle>
+            <circle class="warm-arc" cx="12" cy="12" r="9"></circle>
+          </svg>
+        </span>
+      </div>
     </div>
   </div>
 

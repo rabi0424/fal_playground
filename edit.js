@@ -1410,6 +1410,10 @@ let lightboxTouchY = 0;
 let lightboxSwiped = false;
 
 function initLightbox() {
+  for (const img of [els.resultImg, els.aiImg, els.cropImg, els.overlayImg]) {
+    img.title = '拡大して見る';
+    img.addEventListener('click', () => openResultLightbox(img));
+  }
   els.lightbox.addEventListener('click', () => {
     if (lightboxSwiped) { lightboxSwiped = false; return; }
     closeLightbox();
@@ -1451,6 +1455,15 @@ function showResult(r) {
   els.dlOverlay.href = r.overlayUri;
   els.resultPanel.hidden = false;
   els.resultPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// 合成結果をタップしたら拡大表示。中間画像（AI の出力そのまま・切り抜き・
+// 重ね合わせ）もスワイプで続けて見られるように並べる
+function openResultLightbox(first) {
+  const urls = [els.resultImg, els.aiImg, els.cropImg, els.overlayImg]
+    .map((img) => img.getAttribute('src'))
+    .filter(Boolean);
+  openLightbox(urls, Math.max(0, urls.indexOf(first.getAttribute('src'))));
 }
 
 function hideResult() {
