@@ -2767,6 +2767,22 @@ function openRecordLightbox(record) {
   els.lightbox.hidden = false;
 }
 
+// 結果パネルの画像から開く。塗り直しで表示だけ先に合成し直していることがあるので、
+// レコードの URL ではなく今表示している画像をそのまま並べる
+function openResultLightbox(card) {
+  const cards = [...els.resultImages.querySelectorAll('.ie-result-card')];
+  lightboxItems = cards
+    .map((c) => ({
+      url: c.querySelector('img')?.src ?? '',
+      label: c.querySelector('figcaption')?.textContent ?? '',
+    }))
+    .filter((item) => item.url);
+  if (lightboxItems.length === 0) return;
+  lightboxIndex = Math.max(0, cards.indexOf(card));
+  showLightboxImage();
+  els.lightbox.hidden = false;
+}
+
 function showLightboxImage() {
   lightboxZoom.reset(); // 前の画像のズームを持ち越さない
   const item = lightboxItems[lightboxIndex];
@@ -4230,6 +4246,8 @@ function renderResult(record) {
     const el = document.createElement('img');
     el.src = img.url;
     el.alt = isInput ? '入力画像' : record.prompt;
+    el.title = '拡大して見る';
+    el.addEventListener('click', () => openResultLightbox(card));
     card.appendChild(el);
 
     const cap = document.createElement('figcaption');
