@@ -631,8 +631,15 @@ input, select, textarea {
   transition: border-color var(--dur-quick) ease, box-shadow var(--dur-quick) ease;
 }
 
-/* 縮めた select の文字は「…」で切る（ぶつ切りだと壊れて見える） */
-select { text-overflow: ellipsis; }
+/* 縮めた select の文字は「…」で切る（ぶつ切りだと壊れて見える）。
+   iOS Safari は箱を縮めても、選ばれている選択肢の文字を箱の外へはみ出した
+   ものとして扱い、ページの幅を広げてしまう（モデル欄で最も長い
+   「Krea 2 [turbo] 自前ホスト（Modal LanPaint 版・インペイントと共有）」を
+   選ぶと、縮小表示されて横にパンできた）。はみ出しは箱の中で切る */
+select {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 input:focus, select:focus, textarea:focus {
   outline: none;
