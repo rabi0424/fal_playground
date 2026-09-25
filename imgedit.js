@@ -2210,19 +2210,30 @@ function maskAll() {
   commitMaskChange();
 }
 
-/* ---------- ずれの補正 ---------- */
+/* ---------- ずれの補正（重ね合わせ） ---------- */
 //
-// Qwen Image Edit は画像全体を作り直すので、返ってくる絵が数 px ずれることが
-// ある。そのままマスクで抜くと、差し替えた部分だけ位置がずれて見える。
+// Qwen Image Edit などは画像全体を作り直すので、返ってくる絵が数 px ずれたり、
+// わずかに拡大・縮小されたりする。帯や余白を付けて送った場合は、中身が帯の側へ
+// はみ出したり、帯ごと縮められたりもする。送った枠の座標で決め打ちに切り抜くと、
+// そのずれがそのまま残る（マスクで重ねれば差し替えた部分だけずれて見え、
+// 帯を切り取るだけなら端が欠けたり帯の色が残ったりする）。
 //
-// マスクの外側は「変わらないはず」の領域なので、そこの特徴が一番よく重なる
-// 平行移動を探して、重ねる前にずらす。明るさの違いに引きずられないよう、
-// 輝度そのものではなく勾配（＝輪郭の出方）で比べる
+// そこで、元画像の特徴（勾配＝輪郭の出方）が返ってきた画像のどこに一番よく
+// 重なるかを、拡縮と平行移動で探す。探す先は送った枠の内側に限らず、帯や余白も
+// 含めた返ってきた画像の全体。重なった位置の矩形を切り出せば、帯の側へ
+// はみ出した中身も拾え、はみ出した帯・余白のほうは落ちる。
+//
+// 比べるのは「変わらないはずの領域」。マスクを使うならその外側、使わないなら
+// 画像全体（大きく描き変えたときは相関が低くなるので、決め打ちの枠に戻す）。
+// 明るさの違いに引きずられないよう、正規化相互相関で比べる
 
-const ALIGN_COARSE_PX = 192; // 粗く探すときの作業解像度（長辺）
-const ALIGN_FINE_PX = 512; // 詰めるときの作業解像度
-const ALIGN_RANGE_RATIO = 0.03; // 探す範囲（長辺に対する比）
-const ALIGN_MIN_SAMPLES = 512; // これ未満しか比べられないならあきらめる
+// 作業解像度（長辺）。最初の段で広く探し、あとの段で詰める。最後の段は
+// 返ってきた中身の大きさより上げても意味がないので、alignEdit で頭打ちにする
+const ALIGN_LEVELS_PX = [160, 400, 1024];
+const ALIGN_RANGE_RATIO = 0.04; // 平行移動を探す範囲（長辺に対する比）
+const ALIGN_SCALE_RANGE = 0.04; // 拡縮を探す範囲（1 ± これ）
+const ALIGN_SCALE_STEP = 0.01; // 粗く探すときの拡縮の刻み
+const ALIGN_MIN_SAMPLES = 256; // これ未満しか比べられないならあきらめる（間引いたあとの数）
 const ALIGN_MIN_SCORE = 0.3; // 相関がこれ以下なら、ずらさない
 
 // 画像を w×h に描き直して勾配（|dx| + |dy|）を返す
@@ -2265,61 +2276,172 @@ function alignWeights(maskData, w, h) {
   return { weights, count: n };
 }
 
-// b を (dx, dy) ずらしたときに a と一番よく重なる位置を探す。
-// 正規化相互相関なので、明るさやコントラストの違いには反応しない
-function bestShift(a, b, weights, w, h, range, from = { dx: 0, dy: 0 }) {
-  let best = { dx: from.dx, dy: from.dy, score: -Infinity };
-  const scores = new Map(); // 副画素まで詰めるのに、ピークの周りの値が要る
-  for (let dy = from.dy - range; dy <= from.dy + range; dy++) {
-    for (let dx = from.dx - range; dx <= from.dx + range; dx++) {
-      const y0 = Math.max(1, 1 - dy);
-      const y1 = Math.min(h - 1, h - 1 - dy);
-      const x0 = Math.max(1, 1 - dx);
-      const x1 = Math.min(w - 1, w - 1 - dx);
-      let n = 0; let sa = 0; let sb = 0; let saa = 0; let sbb = 0; let sab = 0;
-      for (let y = y0; y < y1; y++) {
-        for (let x = x0; x < x1; x++) {
-          const i = y * w + x;
-          if (!weights[i]) continue;
-          const va = a[i];
-          const vb = b[i + dy * w + dx];
-          n++;
-          sa += va;
-          sb += vb;
-          saa += va * va;
-          sbb += vb * vb;
-          sab += va * vb;
-        }
-      }
-      if (n < ALIGN_MIN_SAMPLES) continue;
-      const ma = sa / n;
-      const mb = sb / n;
-      const cov = sab / n - ma * mb;
-      const varA = saa / n - ma * ma;
-      const varB = sbb / n - mb * mb;
-      const score = cov / Math.sqrt(Math.max(1e-6, varA * varB));
-      scores.set(`${dx},${dy}`, score);
-      if (score > best.score) best = { dx, dy, score };
-    }
-  }
-  return { ...best, scores };
+// ここから先の探索は canvas を使わない純粋な計算にしてある（テストから確かめられるように）。
+//
+// 1 段ぶんの材料（level）:
+//   ref, w, h   元画像の勾配（作業解像度）と、比べてよい画素の weights
+//   field, fw, fh  返ってきた画像ぜんぶの勾配（帯・余白を含む）
+//   origin      決め打ちの枠の左上（field の座標）
+//   rx, ry      ref の 1 画素が field の何画素ぶんか（決め打ちの枠のとき）
+// 変換 t = { s, tx, ty } は「枠の中心まわりに s 倍して (tx, ty) 動かす」。
+// ref の画素 (x, y) は field の
+//   u = origin.x + rx * (w/2 + s * (x + 0.5 - w/2)) + tx - 0.5
+// に写る（画素の中心どうしで合わせる）
+
+// 勾配の場を双一次補間で読む。外側（と、勾配を出していない最外周）は NaN
+function sampleField(f, fw, fh, u, v) {
+  if (!(u >= 1 && v >= 1 && u <= fw - 2 && v <= fh - 2)) return NaN;
+  const x0 = Math.floor(u);
+  const y0 = Math.floor(v);
+  const ax = u - x0;
+  const ay = v - y0;
+  const i = y0 * fw + x0;
+  const top = f[i] + (f[i + 1] - f[i]) * ax;
+  const bottom = f[i + fw] + (f[i + fw + 1] - f[i + fw]) * ax;
+  return top + (bottom - top) * ay;
 }
 
-// 相関のピークを放物線で近似して、画素の間まで読む。
-// ずれは 1px 未満のことも多いので、整数のままだと詰めきれない
-function subpixelPeak(best, scores) {
-  const at = (dx, dy) => scores.get(`${dx},${dy}`);
-  const axis = (minus, plus) => {
-    if (minus === undefined || plus === undefined) return 0;
-    const denom = minus - 2 * best.score + plus;
-    if (!(Math.abs(denom) > 1e-9)) return 0;
-    // 中心からの外れが半画素を超えるなら、そもそも当てはまりが悪い
-    const d = (0.5 * (minus - plus)) / denom;
-    return Math.abs(d) <= 0.5 ? d : 0;
-  };
+// 比べる画素（番号と座標）。stride ごとに間引いて手間を抑える
+//（勾配はなめらかなので、間引いても相関の山の位置はほとんど動かない）。
+// 外周は探す範囲ぶん除く。端の画素は候補によって画像の外へ出たり入ったりするので、
+// 残しておくと「端を外へ追い出す候補（縮める・ずらす）」ほど比べる画素が
+// 都合よく減り、答えがそちらへ偏る
+const ALIGN_EDGE = ALIGN_RANGE_RATIO + ALIGN_SCALE_RANGE / 2;
+function alignSamples(weights, w, h, stride = 1) {
+  const idx = [];
+  const x0 = Math.max(1, Math.ceil(w * ALIGN_EDGE));
+  const y0 = Math.max(1, Math.ceil(h * ALIGN_EDGE));
+  for (let y = y0; y < h - y0; y += stride) {
+    for (let x = x0; x < w - x0; x += stride) {
+      if (weights[y * w + x]) idx.push(y * w + x);
+    }
+  }
+  const xs = new Float32Array(idx.length);
+  const ys = new Float32Array(idx.length);
+  idx.forEach((i, k) => {
+    xs[k] = i % w;
+    ys[k] = (i - xs[k]) / w;
+  });
+  return { idx: Int32Array.from(idx), xs, ys, length: idx.length };
+}
+
+// ref を変換 t で field に重ねたときの正規化相互相関。比べられる画素が少なければ -Infinity
+function transformScore(level, samples, t) {
+  const { ref, w, h, field, fw, fh, origin, rx, ry } = level;
+  const bx = origin.x + rx * (w / 2 + t.s * (0.5 - w / 2)) + t.tx - 0.5;
+  const by = origin.y + ry * (h / 2 + t.s * (0.5 - h / 2)) + t.ty - 0.5;
+  const kx = rx * t.s;
+  const ky = ry * t.s;
+  let n = 0; let sa = 0; let sb = 0; let saa = 0; let sbb = 0; let sab = 0;
+  const { idx, xs, ys } = samples;
+  for (let k = 0; k < idx.length; k++) {
+    const vb = sampleField(field, fw, fh, bx + kx * xs[k], by + ky * ys[k]);
+    if (Number.isNaN(vb)) continue;
+    const va = ref[idx[k]];
+    n++;
+    sa += va;
+    sb += vb;
+    saa += va * va;
+    sbb += vb * vb;
+    sab += va * vb;
+  }
+  if (n < ALIGN_MIN_SAMPLES) return -Infinity;
+  const ma = sa / n;
+  const mb = sb / n;
+  const cov = sab / n - ma * mb;
+  const varA = saa / n - ma * ma;
+  const varB = sbb / n - mb * mb;
+  return cov / Math.sqrt(Math.max(1e-6, varA * varB));
+}
+
+// scales の各倍率について、(from.tx, from.ty) のまわり ±range の整数の移動を総当たりする
+function gridSearch(level, samples, scales, from, range) {
+  let best = { s: 1, tx: from.tx, ty: from.ty, score: -Infinity };
+  for (const s of scales) {
+    for (let ty = from.ty - range; ty <= from.ty + range; ty++) {
+      for (let tx = from.tx - range; tx <= from.tx + range; tx++) {
+        const score = transformScore(level, samples, { s, tx, ty });
+        if (score > best.score) best = { s, tx, ty, score };
+      }
+    }
+  }
+  return best;
+}
+
+// 相関のピークを放物線で近似して、刻みの間まで読む（中心からの外れを刻みの比で返す）。
+// 外れが半刻みを超えるなら当てはまりが悪いので動かさない
+function parabolaPeak(minus, center, plus) {
+  if (!Number.isFinite(minus) || !Number.isFinite(plus)) return 0;
+  const denom = minus - 2 * center + plus;
+  if (!(Math.abs(denom) > 1e-9)) return 0;
+  const d = (0.5 * (minus - plus)) / denom;
+  return Math.abs(d) <= 0.5 ? d : 0;
+}
+
+// 粗い段で広く探し、作業解像度を上げながら当たりのまわりだけを詰めていく。
+// makeLevel(長辺の px) が 1 段ぶんの材料を作る。上の段は当たったときだけ作る
+//（作業解像度を上げた勾配は重いので）。返す変換は最後に使った段の座標。
+// 当たりが無ければ null
+function findTransform(makeLevel, targets = ALIGN_LEVELS_PX) {
+  let level = makeLevel(targets[0]);
+  let samples = alignSamples(level.weights, level.w, level.h, 2);
+  if (samples.length < ALIGN_MIN_SAMPLES) return null; // 比べられる場所がほとんど無い
+  const range = Math.max(2, Math.round(Math.max(level.w, level.h) * ALIGN_RANGE_RATIO));
+  const scales = [];
+  const steps = Math.round(ALIGN_SCALE_RANGE / ALIGN_SCALE_STEP);
+  for (let i = -steps; i <= steps; i++) scales.push(1 + i * ALIGN_SCALE_STEP);
+  let best = gridSearch(level, samples, scales, { tx: 0, ty: 0 }, range);
+  if (!(best.score >= ALIGN_MIN_SCORE)) return null;
+
+  let sStep = ALIGN_SCALE_STEP;
+  for (const target of targets.slice(1)) {
+    const next = makeLevel(target);
+    const k = next.w / level.w;
+    // 大きな段は間引きを強めて、比べる画素の数をおおよそ揃える
+    const nextSamples = alignSamples(next.weights, next.w, next.h, target > 512 ? 3 : 2);
+    if (nextSamples.length < ALIGN_MIN_SAMPLES) break;
+    // 前の段の当たりは ±半刻み・±1 画素（この段で ±k 画素）の中にある
+    sStep /= 2;
+    const found = gridSearch(next, nextSamples, [-1, 0, 1].map((i) => best.s + i * sStep),
+      { tx: Math.round(best.tx * k), ty: Math.round(best.ty * k) }, Math.ceil(k));
+    if (!(found.score >= ALIGN_MIN_SCORE)) break; // 細部では合わない。前の段の答えで止める
+    best = found;
+    level = next;
+    samples = nextSamples;
+  }
+
+  // 1 画素・1 刻みに満たないずれも多いので、放物線で間を読む
+  const at = (t) => transformScore(level, samples, { ...best, ...t });
+  const tx = best.tx + parabolaPeak(at({ tx: best.tx - 1 }), best.score, at({ tx: best.tx + 1 }));
+  const ty = best.ty + parabolaPeak(at({ ty: best.ty - 1 }), best.score, at({ ty: best.ty + 1 }));
+  const s = best.s + sStep * parabolaPeak(at({ s: best.s - sStep }), best.score, at({ s: best.s + sStep }));
+  return { s, tx, ty, score: best.score, level };
+}
+
+// 変換 t が指す「中身の矩形」（field の元になった画像の px）。gx, gy は
+// field の 1 画素が元の画像の何 px か
+function transformedRect(nominal, t, gx, gy) {
   return {
-    dx: best.dx + axis(at(best.dx - 1, best.dy), at(best.dx + 1, best.dy)),
-    dy: best.dy + axis(at(best.dx, best.dy - 1), at(best.dx, best.dy + 1)),
+    x: nominal.x + (nominal.width * (1 - t.s)) / 2 + t.tx * gx,
+    y: nominal.y + (nominal.height * (1 - t.s)) / 2 + t.ty * gy,
+    width: nominal.width * t.s,
+    height: nominal.height * t.s,
+  };
+}
+
+// 矩形を画像（W×H）の内側へ収める。はみ出すぶんは切り出せないので、
+// 大きすぎれば中心を保って縮め（比は保つ）、それから内側へ寄せる
+function clampRect(rect, W, H) {
+  const k = Math.min(1, W / rect.width, H / rect.height);
+  const width = rect.width * k;
+  const height = rect.height * k;
+  const cx = rect.x + rect.width / 2;
+  const cy = rect.y + rect.height / 2;
+  return {
+    x: Math.min(W - width, Math.max(0, cx - width / 2)),
+    y: Math.min(H - height, Math.max(0, cy - height / 2)),
+    width,
+    height,
   };
 }
 
@@ -2339,55 +2461,80 @@ function localMask(maskData, region, w, h) {
   return region ? remapMask(maskData, region, { width: w, height: h }) : maskData;
 }
 
-// 元画像に対する編集結果のずれ。合成時に引く量（元画像の解像度）を返す。
-// 判断できなければ null（ずらさない）。
-// region があるときは、比べる土俵を「元画像の切り抜いた範囲」に揃える
-function alignOffset(baseImg, editedImg, maskData, crop = null, region = null) {
+// 決め打ちで切り出す矩形（返ってきた画像の px）。crop は送った枠の中で元画像が
+// 入っていた範囲（送った大きさの px）。返りが送った大きさと違っても比で合わせる
+function nominalRect(editedImg, crop = null, sent = null) {
+  const W = editedImg.naturalWidth || editedImg.width;
+  const H = editedImg.naturalHeight || editedImg.height;
+  if (!crop) return { x: 0, y: 0, width: W, height: H };
+  const kx = W / (sent?.width || W);
+  const ky = H / (sent?.height || H);
+  return { x: crop.x * kx, y: crop.y * ky, width: crop.width * kx, height: crop.height * ky };
+}
+
+// 元画像（切り抜いて送ったならその範囲）が、返ってきた画像のどこに写っているか。
+// 見つかれば { rect（返ってきた画像の px）, scale, dx, dy（元画像の px）, score }。
+// 判断できない・ずれていないなら null（決め打ちの枠のまま）。
+// maskData が無ければ画像全体で比べる
+function alignEdit(baseImg, editedImg, maskData, { crop = null, sent = null, region = null } = {}) {
   const baseW = baseImg.naturalWidth || baseImg.width;
   const baseH = baseImg.naturalHeight || baseImg.height;
+  const editW = editedImg.naturalWidth || editedImg.width;
+  const editH = editedImg.naturalHeight || editedImg.height;
   const view = regionRect(region, baseW, baseH);
-  const local = localMask(maskData, region, baseW, baseH);
+  const nominal = nominalRect(editedImg, crop, sent);
   const aspect = view ? view.width / view.height : baseW / baseH;
+  const local = maskData ? localMask(maskData, region, baseW, baseH) : null;
 
-  const fit = (target) => (aspect >= 1
-    ? { w: target, h: Math.max(16, Math.round(target / aspect)) }
-    : { w: Math.max(16, Math.round(target * aspect)), h: target });
+  const level = (target) => {
+    const w = aspect >= 1 ? target : Math.max(16, Math.round(target * aspect));
+    const h = aspect >= 1 ? Math.max(16, Math.round(target / aspect)) : target;
+    // 返ってきた画像は、枠の中身が w×h になる縮尺で丸ごと描く（帯・余白も含めて探す）
+    const fw = Math.max(16, Math.round((editW * w) / nominal.width));
+    const fh = Math.max(16, Math.round((editH * h) / nominal.height));
+    const gx = editW / fw;
+    const gy = editH / fh;
+    return {
+      ref: gradientField(baseImg, w, h, view),
+      weights: local ? alignWeights(local, w, h).weights : new Uint8Array(w * h).fill(1),
+      w,
+      h,
+      field: gradientField(editedImg, fw, fh),
+      fw,
+      fh,
+      origin: { x: nominal.x / gx, y: nominal.y / gy },
+      rx: nominal.width / w / gx,
+      ry: nominal.height / h / gy,
+      gx,
+      gy,
+    };
+  };
 
-  // 粗く探す
-  const c = fit(ALIGN_COARSE_PX);
-  const cw = alignWeights(local, c.w, c.h);
-  if (cw.count < ALIGN_MIN_SAMPLES) return null; // 比べられる場所がほとんど無い
-  const range = Math.max(2, Math.round(Math.max(c.w, c.h) * ALIGN_RANGE_RATIO));
-  const coarse = bestShift(
-    gradientField(baseImg, c.w, c.h, view),
-    gradientField(editedImg, c.w, c.h, crop),
-    cw.weights, c.w, c.h, range,
-  );
-  if (!Number.isFinite(coarse.score) || coarse.score < ALIGN_MIN_SCORE) return null;
-
-  // 作業解像度を上げて詰める
-  const f = fit(ALIGN_FINE_PX);
-  const scale = f.w / c.w;
-  const fw = alignWeights(local, f.w, f.h);
-  const start = { dx: Math.round(coarse.dx * scale), dy: Math.round(coarse.dy * scale) };
-  const fine = fw.count >= ALIGN_MIN_SAMPLES
-    ? bestShift(
-      gradientField(baseImg, f.w, f.h, view),
-      gradientField(editedImg, f.w, f.h, crop),
-      fw.weights, f.w, f.h, Math.ceil(scale) + 1, start,
-    )
-    : { ...start, score: coarse.score };
-
-  // 編集結果が (dx, dy) ずれているので、重ねるときは逆へ動かす。
-  // drawImage は小数の座標を受け取れるので、副画素のぶんも活かせる
-  const peak = fine.scores ? subpixelPeak(fine, fine.scores) : fine;
-  // 作業解像度から元画像の px へ戻す倍率。切り抜いて比べたときは、
-  // 作業 canvas が受け持っているのは切り抜いた範囲のぶんだけ
-  const k = (view ? view.width : baseW) / f.w;
-  const round2 = (v) => Math.round(v * 100) / 100;
-  const offset = { dx: round2(-peak.dx * k), dy: round2(-peak.dy * k), score: fine.score };
+  // 返ってきた中身より細かく見ても補間した画素を比べるだけなので、そこで頭打ち
+  const most = Math.max(ALIGN_LEVELS_PX[1], Math.max(nominal.width, nominal.height));
+  const targets = ALIGN_LEVELS_PX.filter((px, i) => i < 2 || px <= most);
+  if (targets.length < ALIGN_LEVELS_PX.length) targets.push(Math.round(most));
+  const found = findTransform(level, [...new Set(targets)]);
+  if (!found) return null;
+  const { gx, gy } = found.level;
+  const rect = clampRect(transformedRect(nominal, found, gx, gy), editW, editH);
+  // 表示用のずれ（元画像の px）。返ってきた中身が枠からどれだけ動いていたか
+  const perEdit = (view ? view.width : baseW) / nominal.width;
+  const dx = (rect.x + rect.width / 2 - (nominal.x + nominal.width / 2)) * perEdit;
+  const dy = (rect.y + rect.height / 2 - (nominal.y + nominal.height / 2)) * perEdit;
+  const scale = rect.width / nominal.width;
   // 4 分の 1 画素に満たないずれは、動かすほうが害になる
-  return Math.abs(offset.dx) < 0.25 && Math.abs(offset.dy) < 0.25 ? null : offset;
+  if (Math.abs(dx) < 0.25 && Math.abs(dy) < 0.25 && Math.abs(scale - 1) < 0.001) return null;
+  const round2 = (v) => Math.round(v * 100) / 100;
+  return {
+    rect: {
+      x: round2(rect.x), y: round2(rect.y), width: round2(rect.width), height: round2(rect.height),
+    },
+    scale: Math.round(scale * 10000) / 10000,
+    dx: round2(dx),
+    dy: round2(dy),
+    score: Math.round(found.score * 1000) / 1000,
+  };
 }
 
 /* ---------- 色合わせ ---------- */
@@ -2513,7 +2660,10 @@ function applyColorLuts(ctx, w, h, luts) {
 //
 // 合成は「元画像の解像度・縦横比」で行い、出力をそこへ引き伸ばす。モデルへは
 // Qwen の解像度に合わせて縮めた（必要なら比を変えた）画像を送っているので、
-// ここで戻すことで、マスクの外側は元の画素のまま・内側だけが差し替わる
+// ここで戻すことで、マスクの外側は元の画素のまま・内側だけが差し替わる。
+//
+// offset は位置合わせの結果。今の形は { rect }（返ってきた画像のどこを切り出すか）で、
+// 古い記録には平行移動だけの { dx, dy }（元画像の px で、重ねるときにずらす量）が残っている
 function compositeWithMask(baseImg, editedImg, maskData,
   { crop = null, region = null, offset = null, colorMatch = false } = {}) {
   const w = baseImg.naturalWidth || baseImg.width;
@@ -2529,11 +2679,16 @@ function compositeWithMask(baseImg, editedImg, maskData,
   // 切り抜いて送った場合、返ってきた画像はその範囲ぶんなので、元の位置へ戻す。
   // 枠の外は透明のまま残り、マスクで抜くときにそのまま元画像が残る
   const dest = regionRect(region, w, h) ?? { x: 0, y: 0, width: w, height: h };
+  // 位置を合わせた矩形があれば、そこを切り出す（帯・余白の側へはみ出した中身も拾える）
+  const aligned = offset?.rect ?? null;
   // 縁の余白を付けて送った場合は、元画像が入っていた範囲だけを取り出す。
   // 半画素ぶん内側から取るのは、拡大の補間が余白側の画素を拾わないようにするため
   // （そのままだと切り出した縁に余白の色が 1px にじむ）
   const put = (dx, dy) => {
-    if (crop) {
+    if (aligned) {
+      lctx.drawImage(editedImg, aligned.x, aligned.y, aligned.width, aligned.height,
+        dest.x, dest.y, dest.width, dest.height);
+    } else if (crop) {
       const i = 0.5;
       lctx.drawImage(editedImg, crop.x + i, crop.y + i, crop.width - i * 2, crop.height - i * 2,
         dest.x + dx, dest.y + dy, dest.width, dest.height);
@@ -2541,14 +2696,14 @@ function compositeWithMask(baseImg, editedImg, maskData,
       lctx.drawImage(editedImg, dest.x + dx, dest.y + dy, dest.width, dest.height);
     }
   };
-  // ずらすと端が空くので、先に素のまま敷いてから重ねる
+  // 古い記録の平行移動は、ずらすと端が空くので、先に素のまま敷いてから重ねる
   put(0, 0);
-  if (offset && (offset.dx || offset.dy)) put(offset.dx, offset.dy);
+  if (!aligned && offset && (offset.dx || offset.dy)) put(offset.dx, offset.dy);
 
   // 抜く前に、画面全体を元画像の色味へ寄せる（参照はマスクの外側だけ）。
   // 抜いたあとだと、比べたい外側が消えていて合わせられない
   if (colorMatch) {
-    const luts = colorMatchLuts(baseImg, editedImg, maskData, crop, region);
+    const luts = colorMatchLuts(baseImg, editedImg, maskData, aligned ?? crop, region);
     if (luts) applyColorLuts(lctx, w, h, luts);
   }
 
@@ -2592,7 +2747,7 @@ async function compositeFromUrls(baseUrl, editedUrl, maskData,
     loadImageForCanvas(baseUrl), loadImageForCanvas(editedUrl),
   ]);
   const shift = offset === 'auto'
-    ? alignOffset(baseImg, editedImg, maskData, crop, region) : offset;
+    ? alignEdit(baseImg, editedImg, maskData, { crop, region }) : offset;
   const canvas = compositeWithMask(baseImg, editedImg, maskData,
     { crop, region, offset: shift, colorMatch });
   try {
@@ -3919,6 +4074,9 @@ async function run() {
     maskNative: !!maskUri,
     // 出力がずれて返るモデルでは、重ねる前に位置を合わせる
     alignEnabled: useMask && !!api.alignOutput && els.alignToggle.checked,
+    // マスクを使わずに帯・余白を付けて（または引き伸ばして）送った場合も、
+    // 返ってきた画像の中で中身がずれていれば、合わせてから切り取る
+    alignFit: !useMask && !!api.alignOutput && els.alignToggle.checked,
     // 全体の色味が動いて返るので、重ねる前に元画像へ寄せる
     colorEnabled: useMask && els.colorToggle.checked,
   };
@@ -4003,6 +4161,7 @@ async function waitAndFinish(job) {
     ...(job.crop ? { crop: job.crop } : {}),
     ...(job.region ? { region: job.region } : {}),
     ...(job.alignEnabled ? { alignEnabled: true } : {}),
+    ...(job.alignFit ? { alignFit: true } : {}),
     ...(job.colorEnabled ? { colorEnabled: true } : {}),
     sourceSize: job.sourceSize ?? null,
     sentSize: job.sentSize ?? null,
@@ -4030,7 +4189,7 @@ async function waitAndFinish(job) {
     setJobStatus(job, '縦横比を戻しています…', job.crop
       ? '付けた帯を落としています' : '引き伸ばして送ったぶんを戻しています');
     try {
-      saved = await buildFittedRecord(saved);
+      saved = await buildFittedRecord(saved, (text) => setJobStatus(job, text));
       saved = await saveHistoryRecord(saved);
     } catch (err) {
       // 戻せなくても生成そのものは成功している。返ってきたままの結果を出す
@@ -4078,26 +4237,27 @@ function restoredSize(content, want) {
 }
 
 // 入力の比（want）に戻した 1 枚。sent は送った大きさで、返りが違う大きさでも
-// 比で合わせられるようにしてある
-function fitToSource(img, { sent, crop, want }) {
+// 比で合わせられるようにしてある。rect は位置合わせで見つけた「中身が写っている
+// 範囲」（返ってきた画像の px）。あれば決め打ちの枠の代わりにそこを切り出す
+function fitToSource(img, { sent, crop, want, rect = null }) {
   const w = img.naturalWidth || img.width;
   const h = img.naturalHeight || img.height;
   const kx = w / (sent?.width || w);
   const ky = h / (sent?.height || h);
   // 帯の内側（crop）だけを切り出す。半画素ぶん内側から取るのは、補間が帯の画素を
   // 拾って切り出した縁に帯の色が 1px にじむのを避けるため（合成の切り出しと同じ）
-  const src = crop
+  const src = rect ?? (crop
     ? {
       x: crop.x * kx + 0.5,
       y: crop.y * ky + 0.5,
       width: Math.max(1, crop.width * kx - 1),
       height: Math.max(1, crop.height * ky - 1),
     }
-    : { x: 0, y: 0, width: w, height: h };
+    : { x: 0, y: 0, width: w, height: h });
   // 切り出した中身を、入力の比へ戻した大きさで書き出す
   const size = restoredSize({
-    width: Math.max(1, Math.round(crop ? crop.width * kx : w)),
-    height: Math.max(1, Math.round(crop ? crop.height * ky : h)),
+    width: Math.max(1, Math.round(rect ? rect.width : crop ? crop.width * kx : w)),
+    height: Math.max(1, Math.round(rect ? rect.height : crop ? crop.height * ky : h)),
   }, want);
   const out = makeCanvas(size.width, size.height);
   const ctx = out.getContext('2d');
@@ -4111,19 +4271,36 @@ function fitToSource(img, { sent, crop, want }) {
 // どちらも保存領域を倍使う）。
 // 切り出し済みなので crop は落とす。残したままだと、後から「マスクを調整」した
 // ときに同じ範囲をもう一度切り出してしまう
-async function buildFittedRecord(record) {
+async function buildFittedRecord(record, onStatus = () => {}) {
   const n = record.outputCount ?? record.images.length - 1;
   const rest = record.images.slice(n); // [入力画像]
   const how = fitBack(record);
+  // 位置を合わせるなら、比べる相手の元画像も要る（これも同一オリジンで読む）
+  let baseImg = null;
+  if (record.alignFit) {
+    const input = rest.at(-1);
+    if (!isSameOrigin(input.url)) input.url = await captureImage(input.url);
+    baseImg = await loadImageForCanvas(input.url);
+  }
   const fitted = [];
+  const aligns = [];
   for (const out of record.images.slice(0, n)) {
     // 合成と同じく、画素を読むには同一オリジン（R2）である必要がある
     const url = isSameOrigin(out.url) ? out.url : await captureImage(out.url);
     const img = await loadImageForCanvas(url);
+    // 帯・余白ごと返ってきた画像の中で、元画像が写っている範囲を探す。
+    // 見つからなければ（大きく描き変えた・特徴が乏しい）決め打ちの枠で切る
+    let found = null;
+    if (baseImg) {
+      onStatus('ずれを測っています…');
+      found = alignEdit(baseImg, img, null, { crop: record.crop, sent: record.sentSize });
+    }
+    aligns.push(found);
     const { dataUri, width, height } = fitToSource(img, {
       sent: record.sentSize,
       crop: record.crop,
       want: record.sourceSize,
+      rect: found?.rect ?? null,
     });
     const stored = await uploadDataUri(dataUri, {
       // 焼き込みの種類は「編集の出力」。比を戻しただけで、中身は生成結果そのもの
@@ -4139,6 +4316,8 @@ async function buildFittedRecord(record) {
   return {
     ...record,
     fitted: how,
+    // 位置合わせの結果（表示用）。align はマスク合成が読むので別の名前にしておく
+    ...(record.alignFit ? { fitAlign: aligns } : {}),
     crop: null,
     // sentSize は「実際に送った大きさ」のままにして、出来上がりは別に持つ
     resultSize: { width: fitted[0].width, height: fitted[0].height },
@@ -4214,13 +4393,19 @@ const ROLE_LABELS = {
   input: () => '入力画像',
 };
 
-// 位置合わせの結果。ずれていなかったことも分かるようにしておく
+// 位置合わせの結果。ずれていなかったことも分かるようにしておく。
+// マスク合成の align と、帯を切り取るときの fitAlign のどちらか
 function alignMetaText(record) {
-  if (!record.alignEnabled) return '';
-  const found = (record.align ?? []).filter(Boolean);
+  const list = record.alignEnabled ? record.align : record.fitted ? record.fitAlign : null;
+  if (!list) return '';
+  const found = list.filter(Boolean);
   if (found.length === 0) return ' ・ ずれ無し';
   const shown = found[0];
-  return ` ・ ずれ補正 ${shown.dx > 0 ? '+' : ''}${shown.dx}, ${shown.dy > 0 ? '+' : ''}${shown.dy} px`
+  const sign = (v) => (v > 0 ? '+' : '');
+  // 古い記録は平行移動だけ（scale を持たない）
+  const zoom = shown.scale && Math.abs(shown.scale - 1) >= 0.001
+    ? ` ×${shown.scale.toFixed(3)}` : '';
+  return ` ・ ずれ補正 ${sign(shown.dx)}${shown.dx}, ${sign(shown.dy)}${shown.dy} px${zoom}`
     + (found.length > 1 ? ' ほか' : '');
 }
 
