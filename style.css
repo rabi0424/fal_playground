@@ -1003,7 +1003,8 @@ details.lora-accordion { display: block; }
 }
 
 /* ---------- buttons ---------- */
-button { font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+/* 連打がダブルタップ拡大に取られないようにする（ピンチ拡大は残る） */
+button { font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 
 button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
   outline: 2px solid var(--accent);

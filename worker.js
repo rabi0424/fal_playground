@@ -2199,6 +2199,9 @@ export class SyncState extends DurableObject {
     if (job.status === 'pending') await this.ensureAlarm();
     return {
       status: job.status,
+      // Modal へ送り出したか（DO のキューで先行ジョブを待っている間は false）。
+      // クライアントは true になってから経過秒を数え始める
+      started: job.submittedAt != null,
       url: job.url ?? null,
       seed: job.seed ?? null,
       // 編集では入力サイズが 32 の倍数へ丸められる。合成側が元画像に戻すために要る
@@ -2685,9 +2688,10 @@ export class SyncState extends DurableObject {
       job.execMs = Number.isFinite(execSeconds) && execSeconds > 0
         ? Math.round(execSeconds * 1000)
         : null;
-      await this.ctx.storage.put(key, job);
-      // コンテナがアイドルに戻った時刻。生成画面のウォーム表示の起点になる
+      // コンテナがアイドルに戻った時刻。生成画面のウォーム表示の起点になる。
+      // 完了を見たクライアントがすぐ起点を訊き直すので、done より先に控える
       await this.markWarm(job.endpointKey);
+      await this.ctx.storage.put(key, job);
     } catch (err) {
       // ネットワーク断など。pending のまま次の alarm で再試行する
       //（送信済みで pollUrl 未取得の場合は attempts 上限で打ち切られる）。
