@@ -62,7 +62,6 @@ const SIZES = [
 ];
 
 const LS_LORAS = 'fal_lora_library';
-const LS_CKPTS = 'fal_ckpt_library'; // 本体のチェックポイントライブラリ（同期のためここでも扱う）
 const LS_ARENA = 'fal_arena';
 const LS_CHART_ORDER = 'fal_arena_chart_order'; // グラフの並び順（'step' | 'elo'）
 
@@ -272,34 +271,13 @@ function sessionCfgMax(session) {
 /* ---------- チェックポイント（UNet）ライブラリ（読み取りのみ） ---------- */
 // 登録は生成画面の「チェックポイント」欄で行う。ここでは選ぶだけ
 
-function loadCkptLibrary() {
-  try {
-    return JSON.parse(falStore.get(LS_CKPTS)) || [];
-  } catch {
-    return [];
-  }
-}
-
-function ckptDisplayName(path) {
-  const seg = String(path).split('?')[0].split('/').filter(Boolean).pop() || path;
-  try {
-    return decodeURIComponent(seg);
-  } catch {
-    return seg;
-  }
-}
-
-function ckptsForBase(base = DEFAULT_CKPT_BASE) {
-  return loadCkptLibrary()
-    .filter((item) => (item.base ?? DEFAULT_CKPT_BASE) === base)
-    .map((item) => ({ path: item.path, name: item.name || ckptDisplayName(item.path) }))
-    .sort((a, b) => loraLib.compareLabels(a.name, b.name));
+// 並び（★ が先頭）と非表示の扱いは共有モジュール（ckpt-library.js）に揃える
+function ckptsForBase(base = DEFAULT_CKPT_BASE, keep = null) {
+  return ckptLib.forBase(base, { keep });
 }
 
 function ckptLabel(path) {
-  if (!path) return '';
-  const item = loadCkptLibrary().find((x) => x.path === path);
-  return item?.name || ckptDisplayName(path);
+  return path ? ckptLib.label(path) : '';
 }
 
 /* ---------- arena state ---------- */
@@ -1704,10 +1682,10 @@ function populateSessionCkpt(base) {
   defOpt.value = '';
   defOpt.textContent = `既定（${DEFAULT_CKPTS[base] ?? DEFAULT_CKPTS[DEFAULT_CKPT_BASE]}）`;
   els.sessionCkpt.appendChild(defOpt);
-  for (const item of ckptsForBase(base)) {
+  for (const item of ckptsForBase(base, prev)) {
     const opt = document.createElement('option');
     opt.value = item.path;
-    opt.textContent = item.name;
+    opt.textContent = ckptLib.optionLabel(item);
     opt.title = item.path;
     els.sessionCkpt.appendChild(opt);
   }
@@ -1736,7 +1714,8 @@ function openSessionDialog() {
   dialogSetError('');
   els.sessionName.value = `セッション ${new Date().toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}`;
   els.sessionScale.value = '1';
-  els.sessionModel.value = ARENA_MODELS[0].id;
+  populateSessionModels('');
+  els.sessionModel.selectedIndex = 0; // ★ を付けたものが先頭に来る
   els.sessionCustomModel.value = '';
   els.sessionCkpt.value = '';
   delete els.plist.dataset.base; // モデルが同じでも一覧は作り直す（登録が増えている）
@@ -1795,15 +1774,25 @@ function createSessionFromDialog() {
   return true;
 }
 
+// モデルの候補。★ を付けたエンドポイントが先頭、非表示にしたものは外す
+// （endpoint-library.js。生成画面と同じ印を使う）
+function populateSessionModels(keep = els.sessionModel.value) {
+  const keyOf = (m) => (m.id === '__custom__' ? null : m.id);
+  els.sessionModel.innerHTML = '';
+  for (const m of endpointLib.arrange(ARENA_MODELS, keyOf, { keep })) {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = endpointLib.optionLabel(keyOf(m), m.name);
+    els.sessionModel.appendChild(opt);
+  }
+  if (keep) els.sessionModel.value = keep;
+  if (els.sessionModel.selectedIndex < 0) els.sessionModel.selectedIndex = 0;
+}
+
 function initSessionDialog() {
   els.newSessionBtn.addEventListener('click', openSessionDialog);
 
-  for (const m of ARENA_MODELS) {
-    const opt = document.createElement('option');
-    opt.value = m.id;
-    opt.textContent = m.name;
-    els.sessionModel.appendChild(opt);
-  }
+  populateSessionModels('');
   els.sessionModel.addEventListener('change', syncSessionModelFields);
 
   els.rangeAddBtn.addEventListener('click', applyRangeSelection);
@@ -1848,8 +1837,12 @@ deviceSync.init({
 
 // LoRA ライブラリ（共有モジュール）。保存のたびに端末間同期へ知らせる
 loraLib.onChange = () => deviceSync.markDirty('loras');
+ckptLib.onChange = () => deviceSync.markDirty('ckpts');
+endpointLib.onChange = () => deviceSync.markDirty('endpoints');
 loraLib.migrate();
 
+// 古い HTML を掴んでいると、あとから足した共有スクリプトが読まれない。無ければ一度だけ読み直す
+falBoot.requireShared(['ckptLib', 'endpointLib']);
 initSessionDialog();
 initGroupDialog();
 

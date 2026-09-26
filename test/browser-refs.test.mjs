@@ -16,7 +16,7 @@ const at = (name) => new URL(`../${name}`, import.meta.url);
 
 const FILES = ['app.js','edit.js','imgedit.js','arena.js','library.js','store.js','gallery-pager.js',
   'history-feed.js','image-upload.js','sync-merge.js','device-sync.js','hf-import.js','civitai-import.js',
-  'lora-library.js','runware-lora.js','lightbox-zoom.js','warm-ring.js','swipe-nav.js','shell.js','push.js'];
+  'lora-library.js','ckpt-library.js','endpoint-library.js','runware-lora.js','lightbox-zoom.js','warm-ring.js','swipe-nav.js','shell.js','push.js'];
 
 // ほかのスクリプトが window に置くもの
 const shared = new Set();

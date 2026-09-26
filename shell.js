@@ -106,9 +106,9 @@
     {
       file: 'library.html',
       href: 'library.html',
-      label: 'LoRA ライブラリ',
+      label: 'ライブラリ',
       icon: 'layers',
-      hint: '表示名・トリガーワード・既定 scale をまとめて編集する',
+      hint: 'LoRA・モデル・エンドポイントの★と非表示、LoRA の表示名・トリガーワードなどをまとめて編集する',
     },
   ];
 

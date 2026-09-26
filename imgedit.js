@@ -4637,7 +4637,7 @@ async function restoreForm() {
   els.prompt.value = s.prompt || '';
   if (s.provider && PROVIDERS[s.provider]) {
     providerId = s.provider;
-    els.provider.value = providerId;
+    renderProviderOptions(); // 非表示にしたプロバイダでも、下書きのものは残す
   }
   // サイズの選択肢はプロバイダで変わるので、先に並べ直してから値を戻す
   renderSizeOptions();
@@ -4723,7 +4723,13 @@ hfImport.init({
 
 // 端末間同期（共有モジュール）。この画面からも LoRA を登録できるので、
 // 生成画面などと同じようにサーバーへ送って全端末へ渡す
-deviceSync.init({ onRemote: refreshLoraRows });
+deviceSync.init({
+  onRemote() {
+    refreshLoraRows();
+    renderProviderOptions();
+  },
+});
+endpointLib.onChange = () => deviceSync.markDirty('endpoints');
 
 // 登録・登録解除のたびに、既にある行の候補を入れ替えたうえで同期へ知らせる
 // （loraLib は保存のたびにこれを呼ぶので、取り込み経路が増えても取りこぼさない）
@@ -4757,13 +4763,28 @@ runwareLora.onChange = () => {
 };
 
 
-for (const [id, api] of Object.entries(PROVIDERS)) {
-  const opt = document.createElement('option');
-  opt.value = id;
-  opt.textContent = api.label;
-  els.provider.appendChild(opt);
+// 古い HTML を掴んでいると、あとから足した共有スクリプトが読まれない。無ければ一度だけ読み直す
+falBoot.requireShared(['endpointLib']);
+// プロバイダの候補。★ を付けたものが先頭、非表示にしたものは外す
+// （endpoint-library.js）。いま選んでいるものは非表示でも残す
+function renderProviderOptions() {
+  const keyOf = (id) => `imgedit:${id}`;
+  els.provider.innerHTML = '';
+  for (const id of endpointLib.arrange(Object.keys(PROVIDERS), keyOf, { keep: keyOf(providerId) })) {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = endpointLib.optionLabel(keyOf(id), PROVIDERS[id].label);
+    els.provider.appendChild(opt);
+  }
+  els.provider.value = providerId;
 }
-els.provider.value = providerId;
+
+// 既定（fal）を隠してあれば、候補の先頭から始める
+if (endpointLib.isHidden(`imgedit:${providerId}`)) {
+  const first = endpointLib.arrange(Object.keys(PROVIDERS), (id) => `imgedit:${id}`)[0];
+  if (first) providerId = first;
+}
+renderProviderOptions();
 els.provider.addEventListener('change', () => {
   providerId = els.provider.value;
   syncProviderFields();
