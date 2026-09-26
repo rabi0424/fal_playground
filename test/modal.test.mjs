@@ -248,9 +248,13 @@ test('編集: ポーリング中の 202 は完了扱いにしない', async () =
   await stub.startKrea2Job(id, { prompt: 'remove', image: 'A', mask: 'B' },
     'https://x--y.modal.run/edit', 'edit', 'wan-edit');
 
+  // Modal へ送る前は未開始（クライアントは経過秒を数えない）
+  assert.equal((await stub.getKrea2Job(id)).started, false);
+
   // 202 を返している間は pending のまま
   await storage.deleteAlarm();
   await stub.alarm(); // POST → 303
+  assert.equal((await stub.getKrea2Job(id)).started, true);
   await storage.deleteAlarm();
   await stub.alarm(); // 1 回目のポーリング（202）
   assert.equal((await stub.getKrea2Job(id)).status, 'pending');

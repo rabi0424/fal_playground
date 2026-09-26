@@ -1690,13 +1690,16 @@ async function submitJob(modelId, input) {
 }
 
 // 既に送信済みの submitted をポーリングし、完了したら画像を取得する
+// onProgress には、キューを抜けて生成が始まったのを最初に見た時刻も渡す（未開始なら null）
 async function awaitJob(job, submitted, onProgress) {
   let status;
+  let runningSince = null;
   do {
     await sleep(POLL_INTERVAL_MS);
     if (job.cancelled) throw new Error('キャンセルされました');
     status = await falFetch(submitted.status_url);
-    if (onProgress) onProgress(status);
+    if (status.status !== 'IN_QUEUE') runningSince ??= Date.now();
+    if (onProgress) onProgress(status, runningSince);
   } while (status.status !== 'COMPLETED');
 
   const result = await falFetch(submitted.response_url);
@@ -1706,12 +1709,15 @@ async function awaitJob(job, submitted, onProgress) {
   return { requestId: submitted.request_id, images, seed: result.seed ?? null };
 }
 
-function pollStatusText(job, status, prefix = '') {
-  const elapsed = ((Date.now() - job.startedAt) / 1000).toFixed(0);
-  const phase = status.status === 'IN_QUEUE'
-    ? (status.queue_position != null ? `待機中（${status.queue_position + 1} 番目）` : '待機中')
-    : '生成中';
-  setJobStatus(job, `${prefix}${phase}… ${elapsed}s`);
+// 経過秒は生成が始まってから数える。キュー待ちの間は順番だけを出す
+function pollStatusText(job, status, runningSince, prefix = '') {
+  if (runningSince === null) {
+    const phase = status.queue_position != null ? `待機中（${status.queue_position + 1} 番目）` : '待機中';
+    setJobStatus(job, `${prefix}${phase}…`);
+    return;
+  }
+  const elapsed = ((Date.now() - runningSince) / 1000).toFixed(0);
+  setJobStatus(job, `${prefix}生成中… ${elapsed}s`);
 }
 
 async function generate() {
@@ -1745,7 +1751,7 @@ async function generate() {
     saveActiveJob(job);
     falUnitPrice(modelId); // 生成中に単価を取っておく（完了時の見積もりを待たせない）
 
-    const r = await awaitJob(job, job.submitted, (status) => pollStatusText(job, status));
+    const r = await awaitJob(job, job.submitted, (status, since) => pollStatusText(job, status, since));
     await finishSingle(job, r);
     endJobRow(job);
   } catch (err) {
@@ -1848,7 +1854,9 @@ async function modalSubmit(body) {
 
 // ジョブ完了までポーリングする。一時的な接続エラー（オフライン・タブ休止から
 // の復帰直後など）は無視して次のポーリングで拾う
-async function modalAwaitJob(job, jobId) {
+// onStart は、サーバーが Modal へ送り出した（DO のキュー待ちを抜けた）のを最初に見たときに呼ぶ。
+// started を返さない古い Worker では、最初の応答で開始したものとみなす
+async function modalAwaitJob(job, jobId, onStart) {
   const timeoutMs = job.input?.checkpoint ? MODAL_CKPT_TIMEOUT_MS : MODAL_TIMEOUT_MS;
   const pollStart = Date.now();
   while (true) {
@@ -1862,6 +1870,7 @@ async function modalAwaitJob(job, jobId) {
       }
       if (!res.ok) throw new Error(await modalErrorMessage(res));
       const job = await res.json().catch(() => null);
+      if (job && job.started !== false && onStart) { onStart(); onStart = null; }
       if (job?.status === 'done') return job;
       if (job?.status === 'error') throw modalErrors.fromJobError(job.error, '生成に失敗しました');
     }
@@ -1950,16 +1959,19 @@ async function runModalJobFrom(job) {
     const entry = job.entries[i];
     if (entry.result) continue;
     const prefix = total > 1 ? `${i + 1}/${total} ` : '';
-    // 経過秒の表示はポーリング間隔（2 秒）とは独立に 1 秒ごとに更新する
+    // 経過秒の表示はポーリング間隔（2 秒）とは独立に 1 秒ごとに更新する。
+    // サーバー側で先行ジョブの順番待ちをしている間は数えない
+    let runningSince = null;
     const tick = () => {
-      const elapsed = ((Date.now() - job.startedAt) / 1000).toFixed(0);
+      if (runningSince === null) { setJobStatus(job, `${prefix}待機中…`); return; }
+      const elapsed = ((Date.now() - runningSince) / 1000).toFixed(0);
       setJobStatus(job, `${prefix}生成中… ${elapsed}s`);
     };
     tick();
     const ticker = setInterval(tick, 1000);
     let r;
     try {
-      r = await modalAwaitJob(job, entry.jobId);
+      r = await modalAwaitJob(job, entry.jobId, () => { runningSince = Date.now(); tick(); });
     } finally {
       clearInterval(ticker);
     }
@@ -2072,7 +2084,7 @@ async function runCompareFrom(job) {
     }
 
     try {
-      const r = await awaitJob(job, submitted, (status) => pollStatusText(job, status, `試行 ${i + 1}/${total} `));
+      const r = await awaitJob(job, submitted, (status, since) => pollStatusText(job, status, since, `試行 ${i + 1}/${total} `));
       const cost = await estimateFalCost(job.modelId, r.images, job.current?.input ?? null);
       job.results.push({ ownLoras: own, loras, images: r.images, seed: r.seed, elapsed: null, error: null, ...(cost ? { cost } : {}) });
     } catch (err) {
@@ -2126,7 +2138,7 @@ async function resumeJob(job) {
 
   try {
     if (job.kind === 'single') {
-      const r = await awaitJob(job, job.submitted, (status) => pollStatusText(job, status));
+      const r = await awaitJob(job, job.submitted, (status, since) => pollStatusText(job, status, since));
       await finishSingle(job, r);
       endJobRow(job);
     } else if (job.kind === 'compare') {

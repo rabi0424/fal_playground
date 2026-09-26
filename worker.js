@@ -2199,6 +2199,9 @@ export class SyncState extends DurableObject {
     if (job.status === 'pending') await this.ensureAlarm();
     return {
       status: job.status,
+      // Modal へ送り出したか（DO のキューで先行ジョブを待っている間は false）。
+      // クライアントは true になってから経過秒を数え始める
+      started: job.submittedAt != null,
       url: job.url ?? null,
       seed: job.seed ?? null,
       // 編集では入力サイズが 32 の倍数へ丸められる。合成側が元画像に戻すために要る
