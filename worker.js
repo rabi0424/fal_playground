@@ -2202,6 +2202,9 @@ export class SyncState extends DurableObject {
       // Modal へ送り出したか（DO のキューで先行ジョブを待っている間は false）。
       // クライアントは true になってから経過秒を数え始める
       started: job.submittedAt != null,
+      // 送り出してからの経過。時刻ではなく経過で返すので、端末の時計がずれていても
+      // 使える。再読み込みした画面も、これで経過秒を途中から数え続けられる
+      runningMs: job.submittedAt != null && job.status === 'pending' ? Date.now() - job.submittedAt : null,
       url: job.url ?? null,
       seed: job.seed ?? null,
       // 編集では入力サイズが 32 の倍数へ丸められる。合成側が元画像に戻すために要る

@@ -255,6 +255,8 @@ test('編集: ポーリング中の 202 は完了扱いにしない', async () =
   await storage.deleteAlarm();
   await stub.alarm(); // POST → 303
   assert.equal((await stub.getKrea2Job(id)).started, true);
+  // 送り出してからの経過も返す（再読み込みした画面が経過秒を途中から数え続けるため）
+  assert.ok(Number.isFinite((await stub.getKrea2Job(id)).runningMs));
   await storage.deleteAlarm();
   await stub.alarm(); // 1 回目のポーリング（202）
   assert.equal((await stub.getKrea2Job(id)).status, 'pending');

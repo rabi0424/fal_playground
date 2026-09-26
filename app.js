@@ -1674,15 +1674,24 @@ async function submitJob(modelId, input) {
 }
 
 // 既に送信済みの submitted をポーリングし、完了したら画像を取得する
-// onProgress には、キューを抜けて生成が始まったのを最初に見た時刻も渡す（未開始なら null）
+// onProgress には、キューを抜けて生成が始まったのを最初に見た時刻も渡す（未開始なら null）。
+// その時刻はジョブの控え（job.runningSince）にも残す。ローカル変数だけに持つと、
+// 画面を再読み込みして再開したときに「再開後に初めて見た時刻」から数え直し、
+// 経過秒が 0 に戻ってしまう
 async function awaitJob(job, submitted, onProgress) {
   let status;
-  let runningSince = null;
+  const key = submitted.request_id ?? submitted.status_url;
+  job.runningSince ??= {};
+  let runningSince = job.runningSince[key] ?? null;
   do {
     await sleep(POLL_INTERVAL_MS);
     if (job.cancelled) throw new Error('キャンセルされました');
     status = await falFetch(submitted.status_url);
-    if (status.status !== 'IN_QUEUE') runningSince ??= Date.now();
+    if (status.status !== 'IN_QUEUE' && runningSince === null) {
+      runningSince = Date.now();
+      job.runningSince[key] = runningSince;
+      if (activeJobs.includes(job)) persistActiveJobs();
+    }
     if (onProgress) onProgress(status, runningSince);
   } while (status.status !== 'COMPLETED');
 
@@ -1854,7 +1863,7 @@ async function modalAwaitJob(job, jobId, onStart) {
       }
       if (!res.ok) throw new Error(await modalErrorMessage(res));
       const job = await res.json().catch(() => null);
-      if (job && job.started !== false && onStart) { onStart(); onStart = null; }
+      if (job && job.started !== false && onStart) { onStart(job); onStart = null; }
       if (job?.status === 'done') return job;
       if (job?.status === 'error') throw modalErrors.fromJobError(job.error, '生成に失敗しました');
     }
@@ -1945,7 +1954,10 @@ async function runModalJobFrom(job) {
     const prefix = total > 1 ? `${i + 1}/${total} ` : '';
     // 経過秒の表示はポーリング間隔（2 秒）とは独立に 1 秒ごとに更新する。
     // サーバー側で先行ジョブの順番待ちをしている間は数えない
-    let runningSince = null;
+    // 再読み込みから再開したときも数え直さないよう、開始時刻はエントリに残す。
+    // サーバーが送り出してからの経過（runningMs）を返せばそちらを正とする
+    // （その端末で生成を見ていなかった場合や、時計のずれにも左右されない）
+    let runningSince = entry.runningSince ?? null;
     const tick = () => {
       if (runningSince === null) { setJobStatus(job, `${prefix}待機中…`); return; }
       const elapsed = ((Date.now() - runningSince) / 1000).toFixed(0);
@@ -1955,7 +1967,16 @@ async function runModalJobFrom(job) {
     const ticker = setInterval(tick, 1000);
     let r;
     try {
-      r = await modalAwaitJob(job, entry.jobId, () => { runningSince = Date.now(); tick(); });
+      r = await modalAwaitJob(job, entry.jobId, (state) => {
+        runningSince = Number.isFinite(state?.runningMs)
+          ? Date.now() - state.runningMs
+          : (runningSince ?? Date.now());
+        if (entry.runningSince !== runningSince) {
+          entry.runningSince = runningSince;
+          if (activeJobs.includes(job)) persistActiveJobs();
+        }
+        tick();
+      });
     } finally {
       clearInterval(ticker);
     }
