@@ -1,9 +1,13 @@
 'use strict';
 
 /* ==========================================================================
- * LoRA ライブラリ管理
+ * ライブラリ管理（LoRA・モデル・エンドポイント）
  *
  * 登録済み LoRA の表示名・トリガーワード・既定 scale などを一覧で編集する別画面。
+ * モデル（チェックポイント。ckpt-library.js）とエンドポイント（各画面の
+ * モデル／プロバイダの呼び出し先。endpoint-library.js）も同じ一覧に並べ、
+ * ★（候補の先頭へ）と非表示（候補から外す）を同じ操作で付けられる。
+ * 種類はタブで分けず、絞り込みのチップの 1 つとして扱う。
  *
  * - 保存先は本体（app.js）と同じ localStorage の 'fal_lora_library'。
  *   項目はすべて任意で、path と name しか持たない古いデータもそのまま扱える
@@ -15,10 +19,6 @@
 
 /* ---------- constants ---------- */
 
-const LS_LORAS = 'fal_lora_library';
-const LS_CKPTS = 'fal_ckpt_library'; // 同期のためここでも扱う（値は触らない）
-const LS_ARENA = 'fal_arena';
-
 const SAVE_DELAY_MS = 400; // 入力が落ち着いてから保存する
 const HF_DEFAULT_REPO = 'tottie2215/temp_str'; // 取り込み先の既定（app.js と同じ）
 
@@ -28,6 +28,7 @@ const $ = (sel) => document.querySelector(sel);
 
 const els = {
   searchInput: $('#searchInput'),
+  kindChips: $('#kindChips'),
   filterChips: $('#filterChips'),
   sortSelect: $('#sortSelect'),
   fetchAllBtn: $('#fetchAllBtn'),
@@ -43,6 +44,7 @@ const els = {
   metaApplyBtn: $('#metaApplyBtn'),
   bulkBar: $('#bulkBar'),
   bulkCount: $('#bulkCount'),
+  bulkBaseLabel: $('#bulkBaseLabel'),
   bulkBaseSelect: $('#bulkBaseSelect'),
   bulkApplyBtn: $('#bulkApplyBtn'),
   bulkHideBtn: $('#bulkHideBtn'),
@@ -97,10 +99,58 @@ function formatDate(ts) {
 /* ---------- 一覧の状態 ---------- */
 
 let library = loadLibrary();
+let ckpts = ckptLib.load();
+let kind = 'all'; // 'all' | 'lora' | 'ckpt' | 'endpoint'
 let filter = 'all'; // 'all' | 'fav' | 'todo' | 'hidden' | `base:<名前>`
-let expanded = null; // 展開中の path
-const selected = new Set(); // 一括操作で選んでいる path
+let expanded = null; // 展開中の項目（entry.sel）
+const selected = new Set(); // 一括操作で選んでいる項目（entry.sel）
 const saveTimers = new Map();
+const dirtyKinds = new Set(); // 遅延保存を待っている種類（'lora' | 'ckpt'）
+
+/* ---------- 種類をまたいだ一覧 ---------- */
+
+const KIND_LABELS = { lora: 'LoRA', ckpt: 'モデル', endpoint: 'エンドポイント' };
+// 名前順で種類をまたいで並べるときの順（件数の少ないものを上に）
+const KIND_ORDER = { endpoint: 0, ckpt: 1, lora: 2 };
+
+// 一覧の 1 行。sel は種類をまたいで一意な識別子（選択・展開に使う）
+function makeEntry(kindName, id, item) {
+  return { kind: kindName, id, item, sel: `${kindName}\t${id}` };
+}
+
+// エンドポイントは印だけを持つので、一覧（カタログ）と印を合わせて行にする
+function endpointItems() {
+  return endpointLib.catalog().map((e) => ({
+    ...e,
+    fav: endpointLib.isFav(e.key),
+    hidden: endpointLib.isHidden(e.key),
+  }));
+}
+
+function allEntries() {
+  return [
+    ...library.map((i) => makeEntry('lora', i.path, i)),
+    ...ckpts.map((i) => makeEntry('ckpt', i.path, i)),
+    ...endpointItems().map((i) => makeEntry('endpoint', i.key, i)),
+  ];
+}
+
+function entryName(entry) {
+  if (entry.kind === 'lora') return entryLabel(entry.item);
+  if (entry.kind === 'ckpt') return ckptLib.labelOf(entry.item);
+  return entry.item.name;
+}
+
+// 絞り込みのチップに使う「ベースモデル」の表記
+function entryBase(entry) {
+  if (entry.kind === 'lora') return entry.item.base || '';
+  if (entry.kind === 'ckpt') return ckptLib.baseLabel(ckptLib.baseOf(entry.item));
+  return '';
+}
+
+function saveCkpts() {
+  ckptLib.save(ckpts);
+}
 
 /* ---------- ベースモデルの選択肢 ---------- */
 
@@ -129,15 +179,30 @@ function fillBaseSelect(select, selectedValue) {
 
 /* ---------- 一括操作 ---------- */
 
+// 選択を種類ごとに分ける
+function selectedByKind() {
+  const out = { lora: [], ckpt: [], endpoint: [] };
+  for (const sel of selected) {
+    const [k, id] = sel.split('\t');
+    out[k]?.push(id);
+  }
+  return out;
+}
+
 function renderBulkBar() {
   // ライブラリから消えたものが選択に残らないようにする
-  for (const path of [...selected]) {
-    if (!library.some((i) => i.path === path)) selected.delete(path);
+  const alive = new Set(allEntries().map((e) => e.sel));
+  for (const sel of [...selected]) {
+    if (!alive.has(sel)) selected.delete(sel);
   }
   els.bulkBar.hidden = selected.size === 0;
   if (selected.size === 0) return;
   els.bulkCount.textContent = `${selected.size} 件を選択中`;
-  els.bulkApplyBtn.textContent = `選択した ${selected.size} 件に反映`;
+  // ベースモデルの一括変更は LoRA だけ（モデルの系統は取り違えると危ないので 1 件ずつ）
+  const loraCount = selectedByKind().lora.length;
+  els.bulkBaseLabel.hidden = loraCount === 0;
+  els.bulkApplyBtn.hidden = loraCount === 0;
+  els.bulkApplyBtn.textContent = `選択した LoRA ${loraCount} 件に反映`;
   // いま見ている一覧で意味のあるほうだけ出す（非表示の一覧に「非表示にする」は要らない）
   els.bulkHideBtn.hidden = filter === 'hidden';
   els.bulkShowBtn.hidden = filter !== 'hidden';
@@ -147,7 +212,7 @@ function renderBulkBar() {
 
 function applyBulkBase() {
   const base = els.bulkBaseSelect.value.trim();
-  const paths = [...selected];
+  const paths = selectedByKind().lora;
   if (paths.length === 0) return;
   for (const path of paths) {
     const item = library.find((i) => i.path === path);
@@ -161,16 +226,24 @@ function applyBulkBase() {
 
 // 一括で非表示にする / 戻す。保存は loraLib 側で 1 回にまとまる
 function applyBulkHidden(on) {
-  const paths = [...selected];
-  if (paths.length === 0) return;
+  if (selected.size === 0) return;
   flushSaves(); // 書きかけの編集を先に確定させる（読み直しで消さないため）
-  const changed = loraLib.setHiddenMany(paths, on);
+  const by = selectedByKind();
+  let changed = 0;
+  try {
+    changed += by.lora.length ? loraLib.setHiddenMany(by.lora, on) : 0;
+    changed += by.ckpt.length ? ckptLib.setHiddenMany(by.ckpt, on) : 0;
+    changed += by.endpoint.length ? endpointLib.setHiddenMany(by.endpoint, on) : 0;
+  } catch (err) {
+    setError(err.message);
+  }
   library = loadLibrary();
+  ckpts = ckptLib.load();
   // 隠したものは今の一覧から消えるので、選択も外して操作バーを残さない
   if (on && filter !== 'hidden') selected.clear();
   if (!on && filter === 'hidden') selected.clear();
   setStatus(changed === 0
-    ? (on ? '選択した LoRA はすべて非表示です' : '選択した LoRA はすべて表示中です')
+    ? (on ? '選択した項目はすべて非表示です' : '選択した項目はすべて表示中です')
     : `${changed} 件を${on ? '非表示にしました' : '候補に戻しました'}`, true);
   render();
 }
@@ -180,7 +253,7 @@ function initBulkBar() {
   els.bulkHideBtn.addEventListener('click', () => applyBulkHidden(true));
   els.bulkShowBtn.addEventListener('click', () => applyBulkHidden(false));
   els.bulkAllBtn.addEventListener('click', () => {
-    for (const item of visibleItems()) selected.add(item.path);
+    for (const entry of visibleEntries()) selected.add(entry.sel);
     render();
   });
   els.bulkClearBtn.addEventListener('click', () => {
@@ -189,15 +262,27 @@ function initBulkBar() {
   });
 }
 
-// 入力のたびに保存すると同期が騒がしいので、少し待ってからまとめて書く
-function scheduleSave(path, mutate) {
-  const item = library.find((l) => l.path === path);
+function saveKind(k) {
+  if (k === 'ckpt') saveCkpts();
+  else saveLibrary(library);
+}
+
+// 入力のたびに保存すると同期が騒がしいので、少し待ってからまとめて書く。
+// kind は 'lora'（既定）か 'ckpt'。エンドポイントの印は endpointLib が即保存する
+function scheduleSave(path, mutate, k = 'lora') {
+  const items = k === 'ckpt' ? ckpts : library;
+  const item = items.find((l) => l.path === path);
   if (!item) return;
   mutate(item);
-  clearTimeout(saveTimers.get(path));
-  saveTimers.set(path, setTimeout(() => {
-    saveTimers.delete(path);
-    saveLibrary(library);
+  const timerKey = `${k}\t${path}`;
+  dirtyKinds.add(k);
+  clearTimeout(saveTimers.get(timerKey));
+  saveTimers.set(timerKey, setTimeout(() => {
+    saveTimers.delete(timerKey);
+    // 同じ種類の保存待ちが残っていれば、最後のものがまとめて書く
+    if ([...saveTimers.keys()].some((key) => key.startsWith(`${k}\t`))) return;
+    dirtyKinds.delete(k);
+    saveKind(k);
   }, SAVE_DELAY_MS));
 }
 
@@ -205,52 +290,88 @@ function flushSaves() {
   if (saveTimers.size === 0) return;
   for (const timer of saveTimers.values()) clearTimeout(timer);
   saveTimers.clear();
-  saveLibrary(library);
+  for (const k of dirtyKinds) saveKind(k);
+  dirtyKinds.clear();
 }
 
-function matchesSearch(item, q) {
+function matchesSearch(entry, q) {
   if (!q) return true;
-  const hay = [entryLabel(item), item.name, item.trigger, item.note, item.base, item.path]
+  const { item } = entry;
+  const hay = [entryName(entry), item.name, item.trigger, item.note, entryBase(entry), item.path, item.key,
+    ...(item.screens ?? []).map((sc) => endpointLib.screenLabel(sc))]
     .filter(Boolean).join(' ').toLowerCase();
   return hay.includes(q);
 }
 
+const isTodo = (entry) => entry.kind === 'lora' && needsAttention(entry.item);
+
+// 種類のチップで絞った一覧（ほかのチップの件数はこの中で数える）
+function kindEntries() {
+  const all = allEntries();
+  return kind === 'all' ? all : all.filter((e) => e.kind === kind);
+}
+
 // 非表示にしたものは、ほかの画面の候補からも、この一覧の既定の表示からも外す。
 // 「非表示」フィルタがそれらを見る（＝戻す）ための場所
-function visibleItems() {
+function visibleEntries() {
   const q = els.searchInput.value.trim().toLowerCase();
-  let items = library.filter((item) => matchesSearch(item, q));
-  items = items.filter((i) => (filter === 'hidden' ? i.hidden : !i.hidden));
-  if (filter === 'fav') items = items.filter((i) => i.fav);
-  else if (filter === 'todo') items = items.filter(needsAttention);
+  let entries = kindEntries().filter((e) => matchesSearch(e, q));
+  entries = entries.filter((e) => (filter === 'hidden' ? e.item.hidden : !e.item.hidden));
+  if (filter === 'fav') entries = entries.filter((e) => e.item.fav);
+  else if (filter === 'todo') entries = entries.filter(isTodo);
   else if (filter.startsWith('base:')) {
     const base = filter.slice('base:'.length);
-    items = items.filter((i) => (i.base || '') === base);
+    entries = entries.filter((e) => entryBase(e) === base);
   }
 
   const sort = els.sortSelect.value;
-  return items.sort((a, b) => {
-    if (sort === 'added') return (b.addedAt || 0) - (a.addedAt || 0);
-    if (sort === 'scale') return (b.scale ?? 1) - (a.scale ?? 1);
-    // 名前順。お気に入りは先頭に集める（生成画面のプルダウンと同じ並び）
-    if (!!a.fav !== !!b.fav) return a.fav ? -1 : 1;
-    return loraLib.compareLabels(entryLabel(a), entryLabel(b));
+  return entries.sort((a, b) => {
+    if (sort === 'added') return (b.item.addedAt || 0) - (a.item.addedAt || 0);
+    if (sort === 'scale') return (b.item.scale ?? 1) - (a.item.scale ?? 1);
+    // 名前順。お気に入りは先頭に集める（各画面のプルダウンと同じ並び）
+    if (!!a.item.fav !== !!b.item.fav) return a.item.fav ? -1 : 1;
+    if (a.kind !== b.kind) return KIND_ORDER[a.kind] - KIND_ORDER[b.kind];
+    return loraLib.compareLabels(entryName(a), entryName(b));
   });
 }
 
 /* ---------- 描画 ---------- */
 
+function renderKindChips() {
+  const all = allEntries();
+  const count = (k) => all.filter((e) => (k === 'all' || e.kind === k) && !e.item.hidden).length;
+  els.kindChips.innerHTML = '';
+  for (const k of ['all', 'lora', 'ckpt', 'endpoint']) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'lib-chip lib-kind-chip';
+    btn.classList.toggle('on', kind === k);
+    btn.setAttribute('aria-pressed', String(kind === k));
+    btn.textContent = `${k === 'all' ? 'すべて' : KIND_LABELS[k]} ${count(k)}`;
+    btn.addEventListener('click', () => {
+      if (kind === k) return;
+      kind = k;
+      // 種類が変わると意味を失う絞り込み（要整理・ベースモデル）は外す
+      if (filter === 'todo' || filter.startsWith('base:')) filter = 'all';
+      render();
+    });
+    els.kindChips.appendChild(btn);
+  }
+}
+
 function renderFilters() {
+  renderKindChips();
   // 件数は「非表示を除いたもの」で数える（一覧に出る数と合わせる）。
   // 「非表示」チップだけが非表示のものを数え、押すとそれだけを見せる
-  const shown = library.filter((i) => !i.hidden);
-  const bases = [...new Set(shown.map((i) => i.base).filter(Boolean))].sort();
+  const inKind = kindEntries();
+  const shown = inKind.filter((e) => !e.item.hidden);
+  const bases = [...new Set(shown.map(entryBase).filter(Boolean))].sort();
   const chips = [
     { key: 'all', label: 'すべて', count: shown.length },
-    { key: 'fav', label: '★', count: shown.filter((i) => i.fav).length },
-    { key: 'todo', label: '要整理', count: shown.filter(needsAttention).length },
-    { key: 'hidden', label: '非表示', count: library.filter((i) => i.hidden).length },
-    ...bases.map((b) => ({ key: `base:${b}`, label: b, count: shown.filter((i) => i.base === b).length })),
+    { key: 'fav', label: '★', count: shown.filter((e) => e.item.fav).length },
+    { key: 'todo', label: '要整理', count: shown.filter(isTodo).length },
+    { key: 'hidden', label: '非表示', count: inKind.filter((e) => e.item.hidden).length },
+    ...bases.map((b) => ({ key: `base:${b}`, label: b, count: shown.filter((e) => entryBase(e) === b).length })),
   ];
   els.filterChips.innerHTML = '';
   for (const chip of chips) {
@@ -273,24 +394,56 @@ function render() {
   renderBulkBar();
   els.list.innerHTML = '';
 
-  const items = visibleItems();
-  for (const item of items) els.list.appendChild(renderCard(item));
+  const entries = visibleEntries();
+  for (const entry of entries) els.list.appendChild(renderEntry(entry));
 
-  const hasAny = library.length > 0;
-  els.empty.hidden = items.length > 0;
-  els.empty.textContent = hasAny
-    ? '条件に合う LoRA がありません。'
-    : 'まだ LoRA が登録されていません。生成画面の「Hugging Face から一括登録」や「Civitai から取り込み」で追加してください。';
+  els.empty.hidden = entries.length > 0;
+  if (kind === 'lora' && library.length === 0) {
+    els.empty.textContent = 'まだ LoRA が登録されていません。生成画面の「Hugging Face から一括登録」や「Civitai から取り込み」で追加してください。';
+  } else if (kind === 'ckpt' && ckpts.length === 0) {
+    els.empty.textContent = 'まだモデル（チェックポイント）が登録されていません。生成画面でチェックポイント指定版を選び、「チェックポイント」欄から登録してください。';
+  } else {
+    els.empty.textContent = '条件に合う項目がありません。';
+  }
   els.fetchAllBtn.disabled = library.filter((i) => needsAttention(i) && isHfPath(i.path)).length === 0;
+  // 取り込み・情報の取得は LoRA（とモデル）のもの。エンドポイントだけを見ているときは出さない
+  els.civitaiBtn.hidden = kind === 'endpoint';
+  els.fetchAllBtn.hidden = kind === 'endpoint' || kind === 'ckpt';
 }
 
-function renderCard(item) {
-  const card = document.createElement('div');
-  card.className = 'lib-card';
-  if (expanded === item.path) card.classList.add('open');
-  if (item.hidden) card.classList.add('is-hidden');
+function renderEntry(entry) {
+  if (entry.kind === 'ckpt') return renderCkptCard(entry);
+  if (entry.kind === 'endpoint') return renderEndpointCard(entry);
+  return renderCard(entry);
+}
 
-  /* --- 見出し行 --- */
+function badge(text, cls = '') {
+  const el = document.createElement('span');
+  el.className = `lib-badge${cls ? ` ${cls}` : ''}`;
+  el.textContent = text;
+  return el;
+}
+
+// ★・非表示の付け外し。LoRA / モデルは遅延保存、エンドポイントは即保存
+function toggleFlag(entry, flag) {
+  if (entry.kind === 'endpoint') {
+    try {
+      if (flag === 'fav') endpointLib.toggleFav(entry.id);
+      else endpointLib.toggleHidden(entry.id);
+    } catch (err) {
+      setError(err.message);
+    }
+    return;
+  }
+  scheduleSave(entry.id, (i) => {
+    if (i[flag]) delete i[flag];
+    else i[flag] = true;
+  }, entry.kind);
+}
+
+// 見出し行（種類をまたいで共通）。一括選択・★・非表示・名前・バッジ
+function renderHead(entry, { expandable = true } = {}) {
+  const { item } = entry;
   const head = document.createElement('div');
   head.className = 'lib-card-head';
 
@@ -299,12 +452,12 @@ function renderCard(item) {
   const check = document.createElement('input');
   check.type = 'checkbox';
   check.className = 'lib-check';
-  check.checked = selected.has(item.path);
+  check.checked = selected.has(entry.sel);
   check.title = '一括操作の対象にする';
   check.addEventListener('click', (e) => e.stopPropagation());
   check.addEventListener('change', () => {
-    if (check.checked) selected.add(item.path);
-    else selected.delete(item.path);
+    if (check.checked) selected.add(entry.sel);
+    else selected.delete(entry.sel);
     renderBulkBar();
   });
   head.appendChild(check);
@@ -314,10 +467,10 @@ function renderCard(item) {
   star.className = 'lib-star';
   star.classList.toggle('on', !!item.fav);
   star.textContent = '★';
-  star.title = item.fav ? 'お気に入りから外す' : 'お気に入りに入れる';
+  star.title = item.fav ? 'お気に入りから外す' : 'お気に入りに入れる（候補の先頭に並びます）';
   star.addEventListener('click', (e) => {
     e.stopPropagation();
-    scheduleSave(item.path, (i) => { i.fav = !i.fav; });
+    toggleFlag(entry, 'fav');
     render();
   });
   head.appendChild(star);
@@ -333,47 +486,50 @@ function renderCard(item) {
     : '候補から隠す（登録は残ります。ほかの画面のプルダウンから消えます）';
   eye.addEventListener('click', (e) => {
     e.stopPropagation();
-    scheduleSave(item.path, (i) => {
-      if (i.hidden) delete i.hidden;
-      else i.hidden = true;
-    });
+    toggleFlag(entry, 'hidden');
     render();
   });
   head.appendChild(eye);
 
   const name = document.createElement('span');
   name.className = 'lib-name';
-  name.textContent = entryLabel(item);
+  name.textContent = entryName(entry);
   head.appendChild(name);
 
-  if (item.hidden) {
-    const badge = document.createElement('span');
-    badge.className = 'lib-badge';
-    badge.textContent = '非表示';
-    head.appendChild(badge);
+  // 種類をまたいで並べているときだけ、何の行かを添える
+  if (kind === 'all') head.appendChild(badge(KIND_LABELS[entry.kind], `kind-${entry.kind}`));
+  if (item.hidden) head.appendChild(badge('非表示'));
+
+  if (expandable) {
+    head.addEventListener('click', () => {
+      expanded = expanded === entry.sel ? null : entry.sel;
+      render();
+      if (expanded) {
+        document.querySelector('.lib-card.open')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    });
+  } else {
+    head.classList.add('static');
   }
+  return head;
+}
+
+function newCard(entry) {
+  const card = document.createElement('div');
+  card.className = 'lib-card';
+  if (expanded === entry.sel) card.classList.add('open');
+  if (entry.item.hidden) card.classList.add('is-hidden');
+  return card;
+}
+
+function renderCard(entry) {
+  const { item } = entry;
+  const card = newCard(entry);
+  const head = renderHead(entry);
 
   // ベースモデルと「まだ情報を取っていない」ことは別の情報なので両方出す
-  if (item.base) {
-    const badge = document.createElement('span');
-    badge.className = 'lib-badge base';
-    badge.textContent = item.base;
-    head.appendChild(badge);
-  }
-  if (needsAttention(item)) {
-    const badge = document.createElement('span');
-    badge.className = 'lib-badge warn';
-    badge.textContent = 'トリガー未取得';
-    head.appendChild(badge);
-  }
-
-  head.addEventListener('click', () => {
-    expanded = expanded === item.path ? null : item.path;
-    render();
-    if (expanded) {
-      document.querySelector('.lib-card.open')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }
-  });
+  if (item.base) head.appendChild(badge(item.base, 'base'));
+  if (needsAttention(item)) head.appendChild(badge('トリガー未取得', 'warn'));
   card.appendChild(head);
 
   /* --- トリガーワード --- */
@@ -403,8 +559,138 @@ function renderCard(item) {
   ].filter(Boolean).join(' ・ ');
   card.appendChild(sub);
 
-  if (expanded === item.path) card.appendChild(renderEditor(item));
+  if (expanded === entry.sel) card.appendChild(renderEditor(item));
   return card;
+}
+
+/* ---------- モデル（チェックポイント） ---------- */
+
+function renderCkptCard(entry) {
+  const { item } = entry;
+  const card = newCard(entry);
+  const head = renderHead(entry);
+  head.appendChild(badge(ckptLib.baseLabel(ckptLib.baseOf(item)), 'base'));
+  card.appendChild(head);
+
+  const sub = document.createElement('div');
+  sub.className = 'lib-sub';
+  const fileName = ckptLib.displayName(item.path);
+  sub.textContent = [
+    fileName === entryName(entry) ? null : fileName,
+    item.addedAt ? `${formatDate(item.addedAt)} 追加` : null,
+    item.note || null,
+  ].filter(Boolean).join(' ・ ') || 'チェックポイント（UNet）';
+  card.appendChild(sub);
+
+  if (expanded === entry.sel) card.appendChild(renderCkptEditor(item));
+  return card;
+}
+
+function renderCkptEditor(item) {
+  const box = document.createElement('div');
+  box.className = 'lib-editor';
+  const save = (mutate) => scheduleSave(item.path, mutate, 'ckpt');
+
+  const labelInput = document.createElement('input');
+  labelInput.type = 'text';
+  labelInput.value = item.label || '';
+  labelInput.placeholder = item.name || ckptLib.displayName(item.path);
+  labelInput.addEventListener('input', () => {
+    save((i) => { i.label = labelInput.value; });
+    box.closest('.lib-card').querySelector('.lib-name').textContent = ckptLib.labelOf({ ...item, label: labelInput.value });
+  });
+  box.appendChild(field('表示名', labelInput,
+    'プルダウンとこの一覧に出る名前です。生成時に送られるファイルは変わりません。'));
+
+  // 系統は取り違えるとエラーにならずに噛み合わない絵が出るので、選択式に限る
+  const baseSelect = document.createElement('select');
+  for (const b of ckptLib.baseKinds()) {
+    const opt = document.createElement('option');
+    opt.value = b;
+    opt.textContent = ckptLib.baseLabel(b);
+    baseSelect.appendChild(opt);
+  }
+  baseSelect.value = ckptLib.baseOf(item);
+  baseSelect.addEventListener('change', () => {
+    save((i) => { i.base = baseSelect.value; });
+    render();
+  });
+  box.appendChild(field('系統', baseSelect,
+    'このチェックポイントを候補に出すモデルの系統です。別系統のモデルには渡せません。'));
+
+  const noteInput = document.createElement('input');
+  noteInput.type = 'text';
+  noteInput.value = item.note || '';
+  noteInput.placeholder = '例: 学習 5000 step 版';
+  noteInput.addEventListener('input', () => {
+    save((i) => { i.note = noteInput.value; });
+  });
+  box.appendChild(field('メモ', noteInput));
+
+  const pathBox = document.createElement('div');
+  pathBox.className = 'lib-path';
+  pathBox.textContent = item.path;
+  box.appendChild(field('ファイル', pathBox));
+
+  const actions = document.createElement('div');
+  actions.className = 'lib-actions';
+  actions.appendChild(copyButton(item.path));
+  const spacer = document.createElement('span');
+  spacer.className = 'spacer';
+  actions.appendChild(spacer);
+
+  const delBtn = document.createElement('button');
+  delBtn.type = 'button';
+  delBtn.className = 'ghost-btn small lib-danger';
+  delBtn.textContent = '削除';
+  delBtn.addEventListener('click', () => {
+    const name = ckptLib.labelOf(item);
+    if (!confirm(`「${name}」をライブラリから削除します。よろしいですか？\n（モデルのファイル自体は消えません）`)) return;
+    flushSaves();
+    ckpts = ckpts.filter((c) => c.path !== item.path);
+    expanded = null;
+    saveCkpts();
+    render();
+    setStatus(`「${name}」を削除しました`, true);
+  });
+  actions.appendChild(delBtn);
+
+  box.appendChild(actions);
+  return box;
+}
+
+/* ---------- エンドポイント ---------- */
+
+// 呼び出し先そのものはコードが持つので、ここで変えられるのは★と非表示だけ
+function renderEndpointCard(entry) {
+  const { item } = entry;
+  const card = newCard(entry);
+  const head = renderHead(entry, { expandable: false });
+  for (const screen of item.screens) head.appendChild(badge(endpointLib.screenLabel(screen), 'base'));
+  card.appendChild(head);
+
+  const sub = document.createElement('div');
+  sub.className = 'lib-sub';
+  sub.textContent = item.key;
+  card.appendChild(sub);
+  return card;
+}
+
+function copyButton(text) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ghost-btn small';
+  btn.textContent = 'URL をコピー';
+  btn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = 'コピーしました';
+      setTimeout(() => { btn.textContent = 'URL をコピー'; }, 1500);
+    } catch {
+      setError('コピーできませんでした（ブラウザの許可が必要です）');
+    }
+  });
+  return btn;
 }
 
 function field(labelText, control, hint) {
@@ -568,20 +854,7 @@ function renderEditor(item) {
     actions.appendChild(link);
   }
 
-  const copyBtn = document.createElement('button');
-  copyBtn.type = 'button';
-  copyBtn.className = 'ghost-btn small';
-  copyBtn.textContent = 'URL をコピー';
-  copyBtn.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(item.path);
-      copyBtn.textContent = 'コピーしました';
-      setTimeout(() => { copyBtn.textContent = 'URL をコピー'; }, 1500);
-    } catch {
-      setError('コピーできませんでした（ブラウザの許可が必要です）');
-    }
-  });
-  actions.appendChild(copyBtn);
+  actions.appendChild(copyButton(item.path));
 
   const spacer = document.createElement('span');
   spacer.className = 'spacer';
@@ -745,22 +1018,33 @@ async function fetchAllMeta() {
 
 // 端末間同期（共有モジュール）。編集中の入力が消えないよう、保存待ちが
 // 残っている間は他端末の内容を反映しない（次の pull で追いつく）
+// 古い HTML を掴んでいると、あとから足した共有スクリプトが読まれない。無ければ一度だけ読み直す
+falBoot.requireShared(['ckptLib', 'endpointLib']);
 deviceSync.init({
   canApply: () => saveTimers.size === 0,
   onRemote() {
     library = loadLibrary();
+    ckpts = ckptLib.load();
     render();
   },
 });
 
 loraLib.onChange = () => deviceSync.markDirty('loras');
+ckptLib.onChange = () => deviceSync.markDirty('ckpts');
+endpointLib.onChange = () => deviceSync.markDirty('endpoints');
 loraLib.migrate();
 library = loadLibrary(); // 移行後の内容で描画する
 
 // この画面からも Civitai 取り込みができる（登録したらその場で一覧に出す）
 civitaiImport.init({
   defaultRepo: HF_DEFAULT_REPO,
-  register(kind, hfUrl, meta) {
+  register(importKind, hfUrl, meta) {
+    if (importKind === 'ckpt') {
+      ckptLib.register(hfUrl);
+      ckpts = ckptLib.load();
+      render();
+      return `モデルライブラリに登録しました: ${ckptLib.label(hfUrl)}`;
+    }
     loraLib.register(hfUrl, meta);
     library = loadLibrary();
     render();

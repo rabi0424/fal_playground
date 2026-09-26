@@ -76,7 +76,6 @@ const DIM_STEP = 8;
 const LS_HISTORY = 'fal_history'; // サーバー履歴の表示用キャッシュ
 const LS_HISTORY_MIGRATED = 'fal_history_migrated';
 const LS_LORAS = 'fal_lora_library';
-const LS_CKPTS = 'fal_ckpt_library'; // Modal チェックポイント指定版のライブラリ
 const LS_ARENA = 'fal_arena'; // 比較アリーナ（arena.js）のデータ。同期のためここでも扱う
 const LS_FORM = 'fal_form_state';
 const LS_JOB = 'fal_active_job';
@@ -409,13 +408,24 @@ function deleteHistoryRecord(id) {
 
 /* ---------- form ---------- */
 
-function initForm() {
-  for (const m of MODELS) {
+// モデルのプルダウン。★ を付けたエンドポイントを先頭に、非表示にしたものは
+// 外す（endpoint-library.js）。keep は非表示でも残す値（いま選ばれているもの・
+// 下書きや履歴から戻すもの）。黙って別のモデルに変わらないようにするため
+function populateModelSelect(keep = els.modelSelect.value) {
+  const keyOf = (m) => (m.id === '__custom__' ? null : m.id);
+  els.modelSelect.innerHTML = '';
+  for (const m of endpointLib.arrange(MODELS, keyOf, { keep })) {
     const opt = document.createElement('option');
     opt.value = m.id;
-    opt.textContent = m.name;
+    opt.textContent = endpointLib.optionLabel(keyOf(m), m.name);
     els.modelSelect.appendChild(opt);
   }
+  if (keep) els.modelSelect.value = keep;
+  if (els.modelSelect.selectedIndex < 0) els.modelSelect.selectedIndex = 0;
+}
+
+function initForm() {
+  populateModelSelect('');
   for (const s of SIZES) {
     const opt = document.createElement('option');
     opt.value = s.value;
@@ -867,41 +877,17 @@ function collectLoras() {
 // 登録しておき、生成時は checkpoint フィールドとして Modal API に渡す。
 // URL 指定の場合、初回使用時に Modal 側が HF から Volume へ取り込んでキャッシュする
 
-function loadCkptLibrary() {
-  try {
-    return JSON.parse(falStore.get(LS_CKPTS)) || [];
-  } catch {
-    return [];
-  }
-}
-
-function saveCkptLibrary(items) {
-  // 登録は失うと困るので、書けなかったことは黙って飲み込まない
-  falStore.setOrThrow(LS_CKPTS, JSON.stringify(items));
-  deviceSync.markDirty('ckpts');
-}
-
-// チェックポイントは .gguf / .safetensors の区別が重要なので拡張子ごと表示する
-function ckptDisplayName(path) {
-  const seg = path.split('?')[0].split('/').filter(Boolean).pop() || path;
-  try {
-    return decodeURIComponent(seg);
-  } catch {
-    return seg;
-  }
-}
+// 保存・★・非表示は共有モジュール（ckpt-library.js）。
+// 保存のたびの同期の通知は init で ckptLib.onChange に登録する
+const ckptDisplayName = (path) => ckptLib.displayName(path);
 
 function registerCkpt(path, base = currentCkptBase()) {
-  const library = loadCkptLibrary();
-  if (!library.some((item) => item.path === path)) {
-    library.push({ name: ckptDisplayName(path), path, base });
-    saveCkptLibrary(library);
-  }
+  ckptLib.register(path, base);
   populateCkptSelect(els.ckptSelect.value);
 }
 
 function unregisterCkpt(path) {
-  saveCkptLibrary(loadCkptLibrary().filter((item) => item.path !== path));
+  ckptLib.unregister(path);
   populateCkptSelect(els.ckptSelect.value);
 }
 
@@ -911,12 +897,10 @@ function currentCkptBase() {
   return model.ckptBase ?? DEFAULT_CKPT_BASE;
 }
 
-// 選択中のモデルで使えるものだけを返す（別系統のものを送らせない）
-function sortedCkptLibrary() {
-  const base = currentCkptBase();
-  return loadCkptLibrary()
-    .filter((item) => (item.base ?? DEFAULT_CKPT_BASE) === base)
-    .sort((a, b) => loraLib.compareLabels(a.name, b.name));
+// 選択中のモデルで使えるものだけを返す（別系統のものを送らせない）。
+// ★ が先頭、非表示にしたものは外す（keep に渡した選択中の値だけは残す）
+function sortedCkptLibrary(opts) {
+  return ckptLib.forBase(currentCkptBase(), opts);
 }
 
 // 「既定」+ 登録済みチェックポイント + 「URL / ファイル名を入力…」でプルダウンを構成
@@ -929,10 +913,10 @@ function populateCkptSelect(selected) {
   const fallback = DEFAULT_CKPTS[currentCkptBase()] ?? DEFAULT_CKPTS[DEFAULT_CKPT_BASE];
   defOpt.textContent = `既定（${fallback}）`;
   select.appendChild(defOpt);
-  for (const item of sortedCkptLibrary()) {
+  for (const item of sortedCkptLibrary({ keep: want })) {
     const opt = document.createElement('option');
     opt.value = item.path;
-    opt.textContent = item.name;
+    opt.textContent = ckptLib.optionLabel(item);
     opt.title = item.path;
     select.appendChild(opt);
   }
@@ -1026,7 +1010,7 @@ function initHfDialog() {
     currentBase: () => modelLoraBase() ?? 'krea2',
     // 「登録済み」の印は、いま選べるものだけを対象にする。別系統のチェック
     // ポイントまで登録済みに見えると、押せないのに押せそうな見た目になる
-    registeredPaths: (kind) => (kind === 'ckpt' ? sortedCkptLibrary() : loadLoraLibrary())
+    registeredPaths: (kind) => (kind === 'ckpt' ? sortedCkptLibrary({ includeHidden: true }) : loadLoraLibrary())
       .map((item) => item.path),
     register(kind, url, meta) {
       if (kind === 'ckpt') registerCkpt(url);
@@ -1690,15 +1674,24 @@ async function submitJob(modelId, input) {
 }
 
 // 既に送信済みの submitted をポーリングし、完了したら画像を取得する
-// onProgress には、キューを抜けて生成が始まったのを最初に見た時刻も渡す（未開始なら null）
+// onProgress には、キューを抜けて生成が始まったのを最初に見た時刻も渡す（未開始なら null）。
+// その時刻はジョブの控え（job.runningSince）にも残す。ローカル変数だけに持つと、
+// 画面を再読み込みして再開したときに「再開後に初めて見た時刻」から数え直し、
+// 経過秒が 0 に戻ってしまう
 async function awaitJob(job, submitted, onProgress) {
   let status;
-  let runningSince = null;
+  const key = submitted.request_id ?? submitted.status_url;
+  job.runningSince ??= {};
+  let runningSince = job.runningSince[key] ?? null;
   do {
     await sleep(POLL_INTERVAL_MS);
     if (job.cancelled) throw new Error('キャンセルされました');
     status = await falFetch(submitted.status_url);
-    if (status.status !== 'IN_QUEUE') runningSince ??= Date.now();
+    if (status.status !== 'IN_QUEUE' && runningSince === null) {
+      runningSince = Date.now();
+      job.runningSince[key] = runningSince;
+      if (activeJobs.includes(job)) persistActiveJobs();
+    }
     if (onProgress) onProgress(status, runningSince);
   } while (status.status !== 'COMPLETED');
 
@@ -1870,7 +1863,7 @@ async function modalAwaitJob(job, jobId, onStart) {
       }
       if (!res.ok) throw new Error(await modalErrorMessage(res));
       const job = await res.json().catch(() => null);
-      if (job && job.started !== false && onStart) { onStart(); onStart = null; }
+      if (job && job.started !== false && onStart) { onStart(job); onStart = null; }
       if (job?.status === 'done') return job;
       if (job?.status === 'error') throw modalErrors.fromJobError(job.error, '生成に失敗しました');
     }
@@ -1961,7 +1954,10 @@ async function runModalJobFrom(job) {
     const prefix = total > 1 ? `${i + 1}/${total} ` : '';
     // 経過秒の表示はポーリング間隔（2 秒）とは独立に 1 秒ごとに更新する。
     // サーバー側で先行ジョブの順番待ちをしている間は数えない
-    let runningSince = null;
+    // 再読み込みから再開したときも数え直さないよう、開始時刻はエントリに残す。
+    // サーバーが送り出してからの経過（runningMs）を返せばそちらを正とする
+    // （その端末で生成を見ていなかった場合や、時計のずれにも左右されない）
+    let runningSince = entry.runningSince ?? null;
     const tick = () => {
       if (runningSince === null) { setJobStatus(job, `${prefix}待機中…`); return; }
       const elapsed = ((Date.now() - runningSince) / 1000).toFixed(0);
@@ -1971,7 +1967,16 @@ async function runModalJobFrom(job) {
     const ticker = setInterval(tick, 1000);
     let r;
     try {
-      r = await modalAwaitJob(job, entry.jobId, () => { runningSince = Date.now(); tick(); });
+      r = await modalAwaitJob(job, entry.jobId, (state) => {
+        runningSince = Number.isFinite(state?.runningMs)
+          ? Date.now() - state.runningMs
+          : (runningSince ?? Date.now());
+        if (entry.runningSince !== runningSince) {
+          entry.runningSince = runningSince;
+          if (activeJobs.includes(job)) persistActiveJobs();
+        }
+        tick();
+      });
     } finally {
       clearInterval(ticker);
     }
@@ -2683,7 +2688,7 @@ function reuseRecord(record) {
   if (lastModelId && lastModelId !== (known ? record.model : '__custom__')) {
     perModelStore[lastModelId] = perModelSnapshot();
   }
-  els.modelSelect.value = known ? record.model : '__custom__';
+  populateModelSelect(known ? record.model : '__custom__');
   if (!known) els.customModel.value = record.model;
   lastModelId = els.modelSelect.value;
   updateModelFields();
@@ -2855,7 +2860,7 @@ function restoreFormState() {
 
   perModelStore = s.byModel && typeof s.byModel === 'object' ? s.byModel : {};
 
-  if (s.model) els.modelSelect.value = s.model;
+  if (s.model) populateModelSelect(s.model);
   els.customModel.value = s.customModel || '';
   els.prompt.value = s.prompt || '';
   els.numImages.value = s.numImages || '1';
@@ -2881,8 +2886,13 @@ deviceSync.init({
   onRemote() {
     refreshLoraSelects();
     populateCkptSelect(els.ckptSelect.value);
+    populateModelSelect();
   },
 });
+
+// チェックポイント・エンドポイントの★や非表示も同期する
+ckptLib.onChange = () => deviceSync.markDirty('ckpts');
+endpointLib.onChange = () => deviceSync.markDirty('endpoints');
 
 // LoRA ライブラリ（共有モジュール）。保存のたびに端末間同期へ知らせる
 loraLib.onChange = () => deviceSync.markDirty('loras');
@@ -2903,6 +2913,8 @@ civitaiImport.init({
 });
 els.civitaiOpenBtn.addEventListener('click', () => civitaiImport.open('lora'));
 els.ckptCivitaiBtn.addEventListener('click', () => civitaiImport.open('ckpt'));
+// 古い HTML を掴んでいると、あとから足した共有スクリプトが読まれない。無ければ一度だけ読み直す
+falBoot.requireShared(['ckptLib', 'endpointLib']);
 initStatsDialog();
 initCkptField();
 initForm();

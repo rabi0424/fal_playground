@@ -3,7 +3,7 @@
 /* ==========================================================================
  * 端末間同期（共有コンポーネント）
  *
- * LoRA ライブラリ・チェックポイントライブラリ・比較アリーナのデータを
+ * LoRA ライブラリ・チェックポイントライブラリ・エンドポイントの印・比較アリーナのデータを
  * /api/state 経由で全端末に揃える。生成画面・LoRA ライブラリ・比較アリーナ・
  * 画像編集が同じものを使う。
  *
@@ -44,6 +44,8 @@ const PUSH_DELAY_MS = 2000;
 const SECTIONS = {
   loras: 'fal_lora_library',
   ckpts: 'fal_ckpt_library',
+  // エンドポイント（各画面のモデル／プロバイダ）の★・非表示（endpoint-library.js）
+  endpoints: 'fal_endpoint_prefs',
   arena: 'fal_arena',
 };
 

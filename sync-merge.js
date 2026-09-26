@@ -32,7 +32,7 @@
 (() => {
 
 // 項目単位でマージするセクションと、項目を識別するキー
-const ITEM_KEYS = { loras: 'path', ckpts: 'path' };
+const ITEM_KEYS = { loras: 'path', ckpts: 'path', endpoints: 'key' };
 
 // 墓標はこれより古くなったら捨てる（ずっと持つと増え続けるため）。
 // これより長く同期していなかった端末から届いた古い版は生き返りうるが、実害は小さい

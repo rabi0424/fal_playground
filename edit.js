@@ -1542,7 +1542,7 @@ function restoreForm() {
   if (typeof saved.headSwapPrompt === 'string' && saved.headSwapPrompt.trim() !== '') {
     els.headSwapPrompt.value = saved.headSwapPrompt;
   }
-  if (BOTS.some((b) => b.id === saved.bot)) els.botSelect.value = saved.bot;
+  if (BOTS.some((b) => b.id === saved.bot)) renderBotOptions(saved.bot);
   if (typeof saved.customBot === 'string') els.customBot.value = saved.customBot;
   if (['low', 'medium', 'high'].includes(saved.quality)) els.qualitySelect.value = saved.quality;
   if (saved.blend != null) els.blendSlider.value = saved.blend;
@@ -1616,13 +1616,25 @@ function updateBotFields() {
   els.customBotField.hidden = bot.id !== '__custom__';
 }
 
-function initForm() {
-  for (const b of BOTS) {
+// 古い HTML を掴んでいると、あとから足した共有スクリプトが読まれない。無ければ一度だけ読み直す
+falBoot.requireShared(['endpointLib']);
+// ボットの候補。★ を付けたものが先頭、非表示にしたものは外す（印はライブラリ
+// 画面で付ける。endpoint-library.js）。keep は非表示でも残す値（下書きのもの）
+function renderBotOptions(keep) {
+  const keyOf = (b) => (b.id === '__custom__' ? null : `poe:${b.id}`);
+  els.botSelect.innerHTML = '';
+  for (const b of endpointLib.arrange(BOTS, keyOf, { keep: keep ? `poe:${keep}` : null })) {
     const opt = document.createElement('option');
     opt.value = b.id;
-    opt.textContent = b.name;
+    opt.textContent = endpointLib.optionLabel(keyOf(b), b.name);
     els.botSelect.appendChild(opt);
   }
+  if (keep) els.botSelect.value = keep;
+  if (els.botSelect.selectedIndex < 0) els.botSelect.selectedIndex = 0;
+}
+
+function initForm() {
+  renderBotOptions(null);
   els.headSwapPrompt.value = HEAD_SWAP_PROMPT; // 下書きがあれば restoreForm が上書きする
   restoreForm();
   updateBotFields();

@@ -3037,6 +3037,19 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 .lib-trigger-opts select { width: auto; }
 .lib-trigger-opts .check-row { color: var(--muted); }
 
+/* 展開しない行（エンドポイント）は、押せそうに見せない */
+.lib-card-head.static { cursor: default; }
+
+/* 種類（LoRA / モデル / エンドポイント）の絞り込み。ほかのチップと区別できるよう
+   少しだけ大きく、角を控えめにする */
+.lib-kinds .lib-kind-chip {
+  border-radius: 8px;
+  padding: 4px 12px;
+  font-size: 13px;
+}
+.lib-badge.kind-ckpt { color: #0e7490; border-color: color-mix(in srgb, #0e7490 35%, transparent); }
+.lib-badge.kind-endpoint { color: #7c3aed; border-color: color-mix(in srgb, #7c3aed 35%, transparent); }
+
 /* 非表示にしたものは、一覧でもそれと分かるように薄くする */
 .lib-card.is-hidden .lib-name { color: var(--muted); }
 
