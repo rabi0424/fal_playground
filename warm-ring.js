@@ -20,7 +20,7 @@
  *   });
  *   ring.sync();          // 選択を変えたとき。表示・1 秒ごとの描き直しを合わせる
  *   ring.refresh();       // サーバーに起点を訊き直す
- *   ring.note(endpoint);  // 自分のジョブが終わったとき（問い合わせずに起点を更新）
+ *   ring.note(endpoint);  // 自分のジョブが終わったとき（すぐ起点を更新し、サーバーの時刻で置き直す）
  *   ring.render();        // 実行中の本数が変わったときなど
  *
  * タブを裏に回したら描き直しを止め、戻ったら起点を訊き直す（ほかの画面・
@@ -37,27 +37,35 @@ const WARM_ARC_LEN = 2 * Math.PI * 9; // リングの円周（r=9・CSS の dash
 let warmWindowMs = 180_000; // サーバーの値で上書きする（modal_comfy の設定次第）
 let warmAt = {}; // endpoint -> 最後に使い終わった時刻
 let warmFetching = null;
+let warmSeq = 0;     // 問い合わせの通し番号
+let warmApplied = 0; // 反映済みのうち最も新しい番号（古い応答で上書きしない）
 
 function isHtml(res) {
   return (res.headers.get('Content-Type') ?? '').includes('text/html');
 }
 
-async function fetchWarm() {
-  if (warmFetching) return warmFetching;
-  warmFetching = (async () => {
+// fresh: 進行中の問い合わせに相乗りせず、新しく訊く（ジョブ完了の直後など、
+// 先に出ていた問い合わせではまだ完了が記録されていないかもしれないとき）
+async function fetchWarm({ fresh = false } = {}) {
+  if (warmFetching && !fresh) return warmFetching;
+  const seq = ++warmSeq;
+  const p = (async () => {
     try {
       const res = await fetch('/api/krea2/warm');
       if (!res.ok || isHtml(res)) return;
       const data = await res.json();
+      if (seq < warmApplied) return; // 後から出した問い合わせの結果がもう入っている
+      warmApplied = seq;
       if (Number(data?.windowMs) > 0) warmWindowMs = Number(data.windowMs);
       if (data?.endpoints) warmAt = { ...warmAt, ...data.endpoints };
     } catch {
       // 取れなければ手元の記録のまま（オフラインなど）
     } finally {
-      warmFetching = null;
+      if (warmFetching === p) warmFetching = null;
     }
   })();
-  return warmFetching;
+  warmFetching = p;
+  return p;
 }
 
 function attach(el, { endpoint, busy = () => false, verb = '生成' }) {
@@ -110,10 +118,14 @@ function attach(el, { endpoint, busy = () => false, verb = '生成' }) {
     render();
   }
 
+  // 手元では「今」を起点に仮置きし、サーバーが控えた実際の完了時刻で置き直す。
+  // アプリを裏に回している間に終わったジョブは、戻ってから完了に気づくので、
+  // 「今」のままだと戻った時刻から数え始めたように見えてしまう
   function note(key) {
     if (!key) return;
     warmAt[key] = Date.now();
     render();
+    fetchWarm({ fresh: true }).then(render);
   }
 
   // 表示が要るあいだだけ 1 秒ごとに描き直す（タブが裏なら止める）

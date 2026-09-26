@@ -2688,9 +2688,10 @@ export class SyncState extends DurableObject {
       job.execMs = Number.isFinite(execSeconds) && execSeconds > 0
         ? Math.round(execSeconds * 1000)
         : null;
-      await this.ctx.storage.put(key, job);
-      // コンテナがアイドルに戻った時刻。生成画面のウォーム表示の起点になる
+      // コンテナがアイドルに戻った時刻。生成画面のウォーム表示の起点になる。
+      // 完了を見たクライアントがすぐ起点を訊き直すので、done より先に控える
       await this.markWarm(job.endpointKey);
+      await this.ctx.storage.put(key, job);
     } catch (err) {
       // ネットワーク断など。pending のまま次の alarm で再試行する
       //（送信済みで pollUrl 未取得の場合は attempts 上限で打ち切られる）。
