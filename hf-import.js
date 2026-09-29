@@ -7,6 +7,10 @@
  * huggingface.co を直接叩くと CORS で失敗する環境があるので、一覧の取得は
  * Worker 経由（/api/hf/tree）で行う。
  *
+ * 入力中のリポジトリと同じユーザ（owner）のリポジトリ一覧もプルダウンに出し、
+ * 既定リポジトリの持ち主のほかのリポジトリへ打ち込まずに移れるようにする
+ *（一覧は Worker 経由の /api/hf/repos。owner ごとに開いている間だけ覚える）。
+ *
  * 生成画面（LoRA / チェックポイント）と画像編集画面から同じものを使うため、
  * ダイアログの DOM もこのファイルで組み立てる。使う側は:
  *
@@ -32,6 +36,10 @@ const DIALOG_HTML = `
       <input id="hfRepoInput" type="text" placeholder="owner/repo" spellcheck="false" autocomplete="off">
       <button id="hfLoadBtn" class="ghost-btn" type="button">読み込み</button>
     </div>
+    <label class="field hf-owner-field" id="hfOwnerField" hidden>
+      <span class="label" id="hfOwnerLabel">同じユーザのリポジトリ</span>
+      <select id="hfRepoSelect"></select>
+    </label>
     <input id="hfFilterInput" class="hf-filter" type="search" placeholder="ファイル名で絞り込み…" spellcheck="false" autocomplete="off">
     <label class="field" id="hfBaseField">
       <span class="label">ベースモデル <em>（どのモデル用の LoRA か。候補の絞り込みに使います）</em></span>
@@ -70,10 +78,59 @@ let opts = {
 let els = null;
 let mode = 'lora'; // 'lora' | 'ckpt'
 
+// owner → リポジトリ一覧（Promise）。ダイアログを開き直しても取り直さない。
+// 失敗したものは捨てて、次に同じ owner を読んだときに取り直す
+const ownerRepos = new Map();
+let ownerSeq = 0; // 追い越し対策（遅れて返った古い owner の一覧で上書きしない）
+let loadSeq = 0;  // 同じくファイル一覧（プルダウンで続けて切り替えたとき）
+
 function parseRepo(raw) {
   const s = raw.trim().replace(/^https?:\/\/huggingface\.co\//, '');
   const parts = s.split('/').filter(Boolean);
   return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null;
+}
+
+function fetchOwnerRepos(owner) {
+  if (!ownerRepos.has(owner)) {
+    const p = fetch(`/api/hf/repos?author=${encodeURIComponent(owner)}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .catch((err) => {
+        ownerRepos.delete(owner);
+        throw err;
+      });
+    ownerRepos.set(owner, p);
+  }
+  return ownerRepos.get(owner);
+}
+
+// 入力中のリポジトリの owner のリポジトリをプルダウンに出す。
+// 取れなかった・ほかに候補が無いときは欄ごと隠す（手入力はそのまま使える）
+async function renderOwnerRepos(repo) {
+  const seq = ++ownerSeq;
+  const owner = repo.split('/')[0];
+  let repos;
+  try {
+    repos = await fetchOwnerRepos(owner);
+  } catch {
+    repos = [];
+  }
+  if (seq !== ownerSeq) return;
+  const ids = repos.map((r) => r.id);
+  // 一覧に出てこないもの（取得の上限を超えた・直後に作った等）でも今の選択は残す
+  const list = ids.includes(repo) ? repos : [{ id: repo, private: false }, ...repos];
+  els.repoSelect.innerHTML = '';
+  for (const r of list) {
+    const opt = document.createElement('option');
+    opt.value = r.id;
+    opt.textContent = r.id.slice(owner.length + 1) + (r.private ? '（非公開）' : '');
+    els.repoSelect.appendChild(opt);
+  }
+  els.repoSelect.value = repo;
+  els.ownerLabel.textContent = `${owner} のリポジトリ（${repos.length} 件）`;
+  els.ownerField.hidden = list.length <= 1;
 }
 
 function setStatus(text) {
@@ -101,8 +158,10 @@ async function loadRepo() {
   setError('');
   els.list.innerHTML = '';
   updateAddBtn();
+  renderOwnerRepos(repo);
   setStatus('ファイル一覧を取得中…');
 
+  const seq = ++loadSeq;
   let entries;
   try {
     const res = await fetch(`/api/hf/tree?repo=${encodeURIComponent(repo)}`);
@@ -112,10 +171,12 @@ async function loadRepo() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     entries = await res.json();
   } catch (err) {
+    if (seq !== loadSeq) return;
     setStatus('');
     setError(`取得に失敗しました: ${err.message}`);
     return;
   }
+  if (seq !== loadSeq) return;
   setStatus('');
 
   const pattern = mode === 'ckpt' ? /\.(safetensors|gguf)$/i : /\.safetensors$/i;
@@ -217,6 +278,11 @@ function openDialog(which) {
 function initDialog() {
   els.loadBtn.addEventListener('click', loadRepo);
   els.filterInput.addEventListener('input', applyFilter);
+  els.repoSelect.addEventListener('change', () => {
+    els.repoInput.value = els.repoSelect.value;
+    els.filterInput.value = '';
+    loadRepo();
+  });
 
   // Enter で form が「閉じる」ボタンで submit されるのを防いで読み込みにする
   els.repoInput.addEventListener('keydown', (e) => {
@@ -258,6 +324,9 @@ window.hfImport = {
       filterInput: $('#hfFilterInput'),
       baseField: $('#hfBaseField'),
       baseSelect: $('#hfBaseSelect'),
+      ownerField: $('#hfOwnerField'),
+      ownerLabel: $('#hfOwnerLabel'),
+      repoSelect: $('#hfRepoSelect'),
       status: $('#hfStatus'),
       error: $('#hfError'),
       list: $('#hfList'),

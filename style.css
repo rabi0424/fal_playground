@@ -1687,6 +1687,8 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
 
 .hf-search input { flex: 1; min-width: 0; }
 
+.hf-owner-field select { width: 100%; }
+
 .hf-list {
   display: flex;
   flex-direction: column;

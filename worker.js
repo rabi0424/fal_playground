@@ -516,6 +516,31 @@ async function addHfCommitDates(repo, entries, env) {
   return entries;
 }
 
+// あるユーザ（または組織）の model リポジトリ一覧。更新の新しい順。
+// HF_TOKEN の持ち主なら非公開のものも返る（private で見分けられる）。
+// 一括登録ダイアログで「同じユーザのほかのリポジトリ」へすぐ移れるようにするためのもの
+const HF_REPOS_LIMIT = 200;
+async function fetchHfUserRepos(author, env) {
+  const res = await fetch(
+    `${HF_BASE}/api/models?author=${encodeURIComponent(author)}&sort=lastModified&direction=-1&limit=${HF_REPOS_LIMIT}`,
+    { headers: { 'User-Agent': 'fal-playground', ...hfAuthHeaders(env) }, signal: apiSignal() },
+  );
+  if (!res.ok) {
+    const err = new Error(`HF models error ${res.status}`);
+    err.status = res.status;
+    err.body = await res.text();
+    throw err;
+  }
+  const list = await res.json();
+  return (Array.isArray(list) ? list : [])
+    .map((m) => ({
+      id: m.id ?? m.modelId,
+      private: m.private === true,
+      lastModified: m.lastModified ?? m.createdAt ?? null,
+    }))
+    .filter((m) => typeof m.id === 'string' && m.id.startsWith(`${author}/`));
+}
+
 // HF リポジトリのファイル一覧（LFS の oid 付き）。候補ファイルには最終コミット
 // 日時も付ける。失敗時は { status } を投げる（ルート側で 404 等を区別するため）
 async function fetchHfTree(repo, env) {
@@ -3636,6 +3661,17 @@ export default {
         return new Response('サイト情報 JSON を解釈できませんでした', { status: 502 });
       }
       return Response.json(civitaiMetaSummary(doc));
+    }
+
+    if (url.pathname === '/api/hf/repos') {
+      if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
+      const author = url.searchParams.get('author') || '';
+      if (!/^[\w.-]+$/.test(author)) return new Response('Invalid author', { status: 400 });
+      try {
+        return Response.json(await fetchHfUserRepos(author, env));
+      } catch (err) {
+        return new Response(err.body ?? err.message, { status: err.status ?? 502 });
+      }
     }
 
     if (url.pathname === '/api/hf/tree') {
