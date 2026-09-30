@@ -114,7 +114,7 @@ npx wrangler d1 execute fal-playground --remote --file=schema.sql
 - fal の Krea 2 には `acceleration: "none"` も常に付けて送ります（高速化は品質と引き換えのため。いまの fal 側の既定値も `none` ですが、向こうで変わったときに静かに切り替わらないよう明示します。比較アリーナも同じ）
 - fal での生成は、結果のメタ行に**かかったコストの目安**を出します（例: `約 $0.0118（1.18 MP × $0.01/MP）`）。fal は生成結果にコストを返さないので、料金 API（`api.fal.ai/v1/models/pricing`）の単価に、返ってきた画像のメガピクセル数（枚数課金のモデルは枚数）を掛けて算出します。単価は端末に 1 日キャッシュし、取れなかったときはコスト欄が出ないだけで生成は止めません。比較モードは試行ぶんの合計です。秒課金など枚数と大きさから出せないモデルには出ません
 - サイズ（約 1MP 基準のプリセット 6 種 + カスタム px 指定）・枚数・シード（「固定」チェック時のみ適用）・ステップ数・ガイダンスの指定
-- Hugging Face 公開リポジトリからの LoRA 一括登録（.safetensors を一覧表示して選択）
+- Hugging Face 公開リポジトリからの LoRA 一括登録（.safetensors を一覧表示して選択。入力中のリポジトリと同じユーザのほかのリポジトリもプルダウンから選べる）
 - Civitai からの LoRA 取り込み（URL を貼ると Hugging Face へアップロードしてライブラリに登録・下記参照）
 - 画像編集（Qwen Image Edit 2511 + LoRA / FLUX.1 Fill [dev] OneReward / Wan2.2 + VACE / LanPaint。画像 1 枚と指示文で編集・下記参照）
 - LoRA 比較アリーナ（別画面 `arena.html`・下記参照）

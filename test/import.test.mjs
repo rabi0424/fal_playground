@@ -541,6 +541,43 @@ async function testHfTreeEndpoint() {
   assert.equal(bad.status, 404, '見つからないリポジトリの状態が伝わっていない');
 }
 
+async function testHfReposEndpoint() {
+  const mod = await loadWorker();
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const u = new URL(String(url));
+    calls.push({ url: u, auth: init?.headers?.Authorization });
+    if (u.pathname !== '/api/models') return new Response('nope', { status: 404 });
+    if (u.searchParams.get('author') === 'ghost') return new Response('nope', { status: 404 });
+    return Response.json([
+      { id: 'me/newer', private: false, lastModified: '2026-09-01T00:00:00.000Z' },
+      { id: 'me/secret', private: true, createdAt: '2026-08-01T00:00:00.000Z' },
+      // author 検索は前方一致しないはずだが、念のため別ユーザのものは落とす
+      { id: 'meme/other', private: false },
+    ]);
+  };
+  const env = { HF_TOKEN: 'hf_test', STATE: { idFromName: (n) => n, get: () => ({}) } };
+  const call = (qs) => mod.default.fetch(new Request(`https://app.example/api/hf/repos?${qs}`), env);
+
+  const res = await call('author=me');
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), [
+    { id: 'me/newer', private: false, lastModified: '2026-09-01T00:00:00.000Z' },
+    { id: 'me/secret', private: true, lastModified: '2026-08-01T00:00:00.000Z' },
+  ]);
+  const q = calls[0].url.searchParams;
+  assert.equal(q.get('sort'), 'lastModified', '更新の新しい順で取っていない');
+  assert.equal(calls[0].auth, 'Bearer hf_test', 'トークンを添えていない（非公開のものが出ない）');
+
+  // 不正な author は HF に問い合わせずに弾く
+  assert.equal((await call('author=me%2Frepo')).status, 400);
+  assert.equal((await call('author=')).status, 400);
+  assert.equal(calls.length, 1, '不正な author で HF を見に行っている');
+  // HF 側のエラーはそのまま返す
+  assert.equal((await call('author=ghost')).status, 404);
+  console.log('✓ hf repos: 同じユーザのリポジトリ一覧を返す');
+}
+
 async function testCivitaiResolveWithoutRepo() {
   const mod = await loadWorker();
   const calls = [];
@@ -740,6 +777,7 @@ await testWavespeedProxy();
 await testRunwareProxy();
 await testCivitaiResolveWithoutRepo();
 await testHfTreeEndpoint();
+await testHfReposEndpoint();
 await testUploadContentAddressed();
 await testCaptureEndpoint();
 rmSync(OUT, { force: true });
