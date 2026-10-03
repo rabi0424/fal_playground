@@ -68,6 +68,10 @@ const BUILTINS = {
     { path: 'krea2_turbo_bf16.safetensors', name: 'krea2_turbo_bf16.safetensors（BF16）' },
     { path: 'Krea-2-Turbo-Q8_0.gguf', name: 'Krea-2-Turbo-Q8_0.gguf（GGUF Q8_0）' },
   ],
+  qwen21: [
+    { path: 'qwen_image_2.1_bf16.safetensors', name: 'qwen_image_2.1_bf16.safetensors（BF16）' },
+    { path: 'qwen_image_2.1_Q8_0.gguf', name: 'qwen_image_2.1_Q8_0.gguf（GGUF Q8_0）' },
+  ],
 };
 
 // その系統の組み込み候補。exclude（そのモデルの既定）と、登録済みのものは除く

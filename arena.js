@@ -33,7 +33,7 @@ const ARENA_MODELS = [
   { id: 'modal/krea2-turbo-wan', name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・編集と共有）', provider: 'modal', endpoint: 'wan', loraBase: 'krea2', ckpt: true, cfgMax: 1 },
   { id: 'modal/krea2-turbo-lanpaint', name: 'Krea 2 [turbo] 自前ホスト（Modal LanPaint 版）', provider: 'modal', endpoint: 'lanpaint', loraBase: 'krea2', ckpt: true, cfgMax: 1 },
   { id: 'modal/krea2-turbo-unified', name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', provider: 'modal', endpoint: 'unified', loraBase: 'krea2', ckpt: true, defaultCkpt: 'krea2_turbo_bf16.safetensors', cfgMax: 1 },
-  { id: 'modal/qwen-image-2.1', name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版）', provider: 'modal', endpoint: 'qwen21', loraBase: 'qwen21', ckpt: true, ckptBase: 'qwen21', cfgMax: 10 },
+  { id: 'modal/qwen-image-2.1', name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版）', provider: 'modal', endpoint: 'qwen21', loraBase: 'qwen21', ckpt: true, ckptBase: 'qwen21', defaultCkpt: 'qwen_image_2.1_bf16.safetensors', cfgMax: 10 },
   { id: '__custom__', name: 'カスタム…（fal）', loraBase: 'krea2' },
 ];
 

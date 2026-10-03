@@ -47,7 +47,7 @@ const MODELS = [
   // ガイダンスは 1 に固定されず、negative_prompt を効かせるなら上げられる
   // unified: Qwen 2.1 と同居する統合版。Krea 2 側の API は wan / lanpaint と同じ
   { id: MODAL_KREA2_UNIFIED_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'unified', ckpt: true, defaultCkpt: 'krea2_turbo_bf16.safetensors', sampler: true },
-  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版・Krea 2 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', sampler: true, cfgMax: 10, stepsHint: '40（本家の既定。蒸留版が無いので必要）', cfgSteps: true },
+  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版・Krea 2 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', defaultCkpt: 'qwen_image_2.1_bf16.safetensors', sampler: true, cfgMax: 10, stepsHint: '40（本家の既定。蒸留版が無いので必要）', cfgSteps: true },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -92,7 +92,8 @@ const POLL_INTERVAL_MS = 900;
 // 既存の登録には base が無い。qwen21 を足すまでは Krea 2 用しか登録できなかった
 // ので、base 無しは krea2 とみなす（移行処理は不要）
 // アプリによって既定が違うものは、モデル定義の defaultCkpt で上書きする
-// （統合版 krea2-qwen21-api は 2026-10 に BF16 へ切り替えた。ほかは GGUF のまま）
+// （統合版 krea2-qwen21-api は 2026-10 に Krea 2・Qwen 2.1 とも BF16 へ切り替えた。
+// ほかは GGUF のまま）
 const DEFAULT_CKPTS = {
   krea2: 'Krea-2-Turbo-Q8_0.gguf',
   qwen21: 'qwen_image_2.1_Q8_0.gguf',
