@@ -32,12 +32,13 @@ const ARENA_MODELS = [
   { id: 'modal/krea2-turbo-ckpt', name: 'Krea 2 [turbo] 自前ホスト（Modal チェックポイント指定版）', provider: 'modal', endpoint: 'ckpt', loraBase: 'krea2', ckpt: true, cfgMax: 1 },
   { id: 'modal/krea2-turbo-wan', name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・編集と共有）', provider: 'modal', endpoint: 'wan', loraBase: 'krea2', ckpt: true, cfgMax: 1 },
   { id: 'modal/krea2-turbo-lanpaint', name: 'Krea 2 [turbo] 自前ホスト（Modal LanPaint 版）', provider: 'modal', endpoint: 'lanpaint', loraBase: 'krea2', ckpt: true, cfgMax: 1 },
-  { id: 'modal/krea2-turbo-unified', name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', provider: 'modal', endpoint: 'unified', loraBase: 'krea2', ckpt: true, cfgMax: 1 },
+  { id: 'modal/krea2-turbo-unified', name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', provider: 'modal', endpoint: 'unified', loraBase: 'krea2', ckpt: true, defaultCkpt: 'krea2_turbo_bf16.safetensors', cfgMax: 1 },
   { id: 'modal/qwen-image-2.1', name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版）', provider: 'modal', endpoint: 'qwen21', loraBase: 'qwen21', ckpt: true, ckptBase: 'qwen21', cfgMax: 10 },
   { id: '__custom__', name: 'カスタム…（fal）', loraBase: 'krea2' },
 ];
 
-// 系統ごとの既定チェックポイント（app.js と同じ。表示に使うだけ）
+// 系統ごとの既定チェックポイント（app.js と同じ。表示に使うだけ）。
+// アプリによって既定が違うものは、モデル定義の defaultCkpt で上書きする
 const DEFAULT_CKPTS = {
   krea2: 'Krea-2-Turbo-Q8_0.gguf',
   qwen21: 'qwen_image_2.1_Q8_0.gguf',
@@ -1675,13 +1676,23 @@ function renderPlist(base) {
 }
 
 // チェックポイント指定版で使う UNet の候補（登録は生成画面で行う）
-function populateSessionCkpt(base) {
+function populateSessionCkpt(model) {
+  const base = model.ckptBase ?? DEFAULT_CKPT_BASE;
   const prev = els.sessionCkpt.value;
   els.sessionCkpt.innerHTML = '';
   const defOpt = document.createElement('option');
   defOpt.value = '';
-  defOpt.textContent = `既定（${DEFAULT_CKPTS[base] ?? DEFAULT_CKPTS[DEFAULT_CKPT_BASE]}）`;
+  const fallback = model.defaultCkpt ?? DEFAULT_CKPTS[base] ?? DEFAULT_CKPTS[DEFAULT_CKPT_BASE];
+  defOpt.textContent = `既定（${fallback}）`;
   els.sessionCkpt.appendChild(defOpt);
+  // 登録しなくても選べる組み込みの候補（既定と同じものは除く）
+  for (const item of ckptLib.builtins(base, fallback)) {
+    const opt = document.createElement('option');
+    opt.value = item.path;
+    opt.textContent = item.name;
+    opt.title = item.path;
+    els.sessionCkpt.appendChild(opt);
+  }
   for (const item of ckptsForBase(base, prev)) {
     const opt = document.createElement('option');
     opt.value = item.path;
@@ -1698,7 +1709,7 @@ function syncSessionModelFields() {
   const model = dialogModel();
   els.sessionCustomModelField.hidden = els.sessionModel.value !== '__custom__';
   els.sessionCkptField.hidden = !model?.ckpt;
-  if (model?.ckpt) populateSessionCkpt(model.ckptBase ?? DEFAULT_CKPT_BASE);
+  if (model?.ckpt) populateSessionCkpt(model);
 
   const base = model?.loraBase ?? DEFAULT_LORA_BASE;
   if (els.plist.dataset.base !== base) {

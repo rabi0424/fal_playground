@@ -99,6 +99,23 @@ const eq = (label, actual, expected) => {
   eq('登録した系統で出る', paths('qwen21'), ['n.gguf', 'q.gguf']);
 }
 
+/* ---- チェックポイント: 組み込みの候補（Volume に最初から入っているもの） ---- */
+{
+  const { ckptLib } = load();
+  const bf16 = 'krea2_turbo_bf16.safetensors';
+  const gguf = 'Krea-2-Turbo-Q8_0.gguf';
+  const paths = (base, exclude) => ckptLib.builtins(base, exclude).map((i) => i.path);
+
+  eq('既定が BF16 のモデルには GGUF だけ出す', paths('krea2', bf16), [gguf]);
+  eq('既定が GGUF のモデルには BF16 だけ出す', paths('krea2', gguf), [bf16]);
+  eq('組み込みの無い系統は空', paths('qwen21', 'qwen_image_2.1_Q8_0.gguf'), []);
+
+  // 登録済みならライブラリ側の項目として出るので、組み込みとしては重ねない
+  ckptLib.register(gguf);
+  eq('登録済みは組み込みから外す', paths('krea2', bf16), []);
+  eq('登録したものはライブラリに出る', ckptLib.forBase('krea2').map((i) => i.path), [gguf]);
+}
+
 /* ---- CATALOG が各画面の選択肢を漏れなく持っているか ---- */
 {
   const { endpointLib } = load();

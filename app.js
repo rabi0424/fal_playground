@@ -46,7 +46,7 @@ const MODELS = [
   // ステップ数は 25 前後が必要（Krea 2 Turbo の 8 とは桁が違う）。そのぶん
   // ガイダンスは 1 に固定されず、negative_prompt を効かせるなら上げられる
   // unified: Qwen 2.1 と同居する統合版。Krea 2 側の API は wan / lanpaint と同じ
-  { id: MODAL_KREA2_UNIFIED_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'unified', ckpt: true, sampler: true },
+  { id: MODAL_KREA2_UNIFIED_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'unified', ckpt: true, defaultCkpt: 'krea2_turbo_bf16.safetensors', sampler: true },
   { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版・Krea 2 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', sampler: true, cfgMax: 10, stepsHint: '40（本家の既定。蒸留版が無いので必要）', cfgSteps: true },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
@@ -91,6 +91,8 @@ const POLL_INTERVAL_MS = 900;
 //
 // 既存の登録には base が無い。qwen21 を足すまでは Krea 2 用しか登録できなかった
 // ので、base 無しは krea2 とみなす（移行処理は不要）
+// アプリによって既定が違うものは、モデル定義の defaultCkpt で上書きする
+// （統合版 krea2-qwen21-api は 2026-10 に BF16 へ切り替えた。ほかは GGUF のまま）
 const DEFAULT_CKPTS = {
   krea2: 'Krea-2-Turbo-Q8_0.gguf',
   qwen21: 'qwen_image_2.1_Q8_0.gguf',
@@ -897,22 +899,39 @@ function currentCkptBase() {
   return model.ckptBase ?? DEFAULT_CKPT_BASE;
 }
 
+// 選択中のモデルの既定チェックポイント（checkpoint を省略したときにサーバーが使うもの）
+function currentDefaultCkpt() {
+  const model = MODELS.find((m) => m.id === els.modelSelect.value) || MODELS[0];
+  return model.defaultCkpt ?? DEFAULT_CKPTS[currentCkptBase()] ?? DEFAULT_CKPTS[DEFAULT_CKPT_BASE];
+}
+
+// 登録しなくても選べる組み込みの候補（既定と同じものは除く）
+function builtinCkpts() {
+  return ckptLib.builtins(currentCkptBase(), currentDefaultCkpt());
+}
+
 // 選択中のモデルで使えるものだけを返す（別系統のものを送らせない）。
 // ★ が先頭、非表示にしたものは外す（keep に渡した選択中の値だけは残す）
 function sortedCkptLibrary(opts) {
   return ckptLib.forBase(currentCkptBase(), opts);
 }
 
-// 「既定」+ 登録済みチェックポイント + 「URL / ファイル名を入力…」でプルダウンを構成
+// 「既定」+ 組み込み + 登録済みチェックポイント + 「URL / ファイル名を入力…」でプルダウンを構成
 function populateCkptSelect(selected) {
   const select = els.ckptSelect;
   const want = selected ?? '';
   select.innerHTML = '';
   const defOpt = document.createElement('option');
   defOpt.value = '';
-  const fallback = DEFAULT_CKPTS[currentCkptBase()] ?? DEFAULT_CKPTS[DEFAULT_CKPT_BASE];
-  defOpt.textContent = `既定（${fallback}）`;
+  defOpt.textContent = `既定（${currentDefaultCkpt()}）`;
   select.appendChild(defOpt);
+  for (const item of builtinCkpts()) {
+    const opt = document.createElement('option');
+    opt.value = item.path;
+    opt.textContent = item.name;
+    opt.title = item.path;
+    select.appendChild(opt);
+  }
   for (const item of sortedCkptLibrary({ keep: want })) {
     const opt = document.createElement('option');
     opt.value = item.path;
@@ -932,8 +951,9 @@ function populateCkptSelect(selected) {
 function syncCkptRow() {
   const urlMode = els.ckptSelect.value === LORA_URL_OPTION;
   els.ckptPath.hidden = !urlMode;
-  // 既定・直接入力では「登録解除」を出さない
-  els.ckptUnregBtn.hidden = urlMode || els.ckptSelect.value === '';
+  // 登録したもの以外（既定・組み込み・直接入力）では「登録解除」を出さない
+  els.ckptUnregBtn.hidden = urlMode
+    || !ckptLib.load().some((item) => item.path === els.ckptSelect.value);
   syncCkptAccordion();
 }
 
@@ -955,7 +975,8 @@ function syncCkptAccordion() {
   // （「URL / ファイル名を入力…」は選択肢ではなく入力欄の呼び出しなので数えない）。
   // ただし既定以外を使っているときは、隠さずに見せる
   if (!ckptToggledByUser) {
-    els.ckptField.open = sortedCkptLibrary().length > 0 || els.ckptSelect.value !== '';
+    els.ckptField.open = sortedCkptLibrary().length + builtinCkpts().length > 0
+      || els.ckptSelect.value !== '';
   }
 }
 

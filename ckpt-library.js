@@ -59,6 +59,24 @@ function label(path) {
 
 const baseOf = (item) => item?.base || DEFAULT_BASE;
 
+// サーバー（modal_comfy）の Volume に最初から入っていて、登録しなくても選べるもの。
+// path は Volume のファイル名で、そのまま checkpoint として送れる。
+// アプリごとに既定が違う（統合版は BF16、ほかは GGUF）ので、候補からは呼び出し側が
+// そのモデルの既定を除く（同じものが「既定」と並んで 2 回出ないように）
+const BUILTINS = {
+  krea2: [
+    { path: 'krea2_turbo_bf16.safetensors', name: 'krea2_turbo_bf16.safetensors（BF16）' },
+    { path: 'Krea-2-Turbo-Q8_0.gguf', name: 'Krea-2-Turbo-Q8_0.gguf（GGUF Q8_0）' },
+  ],
+};
+
+// その系統の組み込み候補。exclude（そのモデルの既定）と、登録済みのものは除く
+// （登録済みならライブラリ側の項目として ★ や表示名つきで出る）
+function builtins(base = DEFAULT_BASE, exclude = null) {
+  const registered = new Set(load().map((item) => item.path));
+  return (BUILTINS[base] ?? []).filter((b) => b.path !== exclude && !registered.has(b.path));
+}
+
 // ★ を先頭に、あとは表示名順
 function sorted(items = load()) {
   return [...items].sort((a, b) => {
@@ -117,6 +135,7 @@ window.ckptLib = {
   baseKinds: () => Object.keys(BASE_LABELS),
   sorted,
   forBase,
+  builtins,
   register,
   unregister,
   setFavMany: (paths, on) => setFlagMany(paths, 'fav', on),
