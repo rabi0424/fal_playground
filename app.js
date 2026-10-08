@@ -47,7 +47,7 @@ const MODELS = [
   // ガイダンスは 1 に固定されず、negative_prompt を効かせるなら上げられる
   // unified: Qwen 2.1 と同居する統合版。Krea 2 側の API は wan / lanpaint と同じ
   { id: MODAL_KREA2_UNIFIED_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'unified', ckpt: true, defaultCkpt: 'krea2_turbo_bf16.safetensors', sampler: true },
-  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版・Krea 2 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', defaultCkpt: 'qwen_image_2.1_bf16.safetensors', sampler: true, cfgMax: 10, stepsHint: '40（本家の既定。蒸留版が無いので必要）', cfgSteps: true },
+  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版・Krea 2 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', defaultCkpt: 'qwen_image_2.1_bf16.safetensors', sampler: true, defaultSampler: 'euler', cfgMax: 10, stepsHint: '40（本家の既定。蒸留版が無いので必要）', cfgSteps: true },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -69,6 +69,24 @@ const SIZES = [
 ];
 
 const CUSTOM_SIZE = '__custom_size__';
+
+// ComfyUI の KSampler が受け付ける値（comfy/samplers.py の SAMPLER_NAMES / SCHEDULER_NAMES）。
+// 並びも ComfyUI の画面と同じにしてある。ComfyUI を上げて増えたらここに足す
+// （足し忘れても、保存済みの値は setComboValue が選択肢に足して残す）
+const SAMPLER_NAMES = [
+  'euler', 'euler_cfg_pp', 'euler_ancestral', 'euler_ancestral_cfg_pp', 'heun', 'heunpp2',
+  'exp_heun_2_x0', 'exp_heun_2_x0_sde', 'dpm_2', 'dpm_2_ancestral', 'lms', 'dpm_fast',
+  'dpm_adaptive', 'dpmpp_2s_ancestral', 'dpmpp_2s_ancestral_cfg_pp', 'dpmpp_sde', 'dpmpp_sde_gpu',
+  'dpmpp_2m', 'dpmpp_2m_cfg_pp', 'dpmpp_2m_sde', 'dpmpp_2m_sde_gpu', 'dpmpp_2m_sde_heun',
+  'dpmpp_2m_sde_heun_gpu', 'dpmpp_3m_sde', 'dpmpp_3m_sde_gpu', 'ddpm', 'lcm', 'ipndm', 'ipndm_v',
+  'deis', 'cfgpp_ud10_ab', 'res_multistep', 'res_multistep_cfg_pp', 'res_multistep_ancestral',
+  'res_multistep_ancestral_cfg_pp', 'gradient_estimation', 'gradient_estimation_cfg_pp', 'er_sde',
+  'seeds_2', 'seeds_3', 'sa_solver', 'sa_solver_pece', 'ddim', 'uni_pc', 'uni_pc_bh2',
+];
+const SCHEDULER_NAMES = [
+  'simple', 'sgm_uniform', 'karras', 'exponential', 'ddim_uniform', 'beta', 'normal',
+  'linear_quadratic', 'kl_optimal',
+];
 const DIM_MIN = 256;
 const DIM_MAX = 2048;
 const DIM_STEP = 8;
@@ -427,6 +445,30 @@ function populateModelSelect(keep = els.modelSelect.value) {
   if (els.modelSelect.selectedIndex < 0) els.modelSelect.selectedIndex = 0;
 }
 
+// 先頭の空の選択肢は「送らない＝API の既定に任せる」。文言はモデルごとに
+// updateModelFields() が既定値入りに書き換える
+function fillComboSelect(select, names) {
+  for (const name of ['', ...names]) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name || 'デフォルト';
+    select.appendChild(opt);
+  }
+}
+
+// 一覧にない値（ComfyUI 側で増えたもの、自由入力だった頃に保存したもの）は
+// 黙って既定に戻さず、選択肢に足して選んだ状態で残す
+function setComboValue(select, value) {
+  const v = (value || '').trim();
+  if (v && ![...select.options].some((o) => o.value === v)) {
+    const opt = document.createElement('option');
+    opt.value = v;
+    opt.textContent = v;
+    select.appendChild(opt);
+  }
+  select.value = v;
+}
+
 function initForm() {
   populateModelSelect('');
   for (const s of SIZES) {
@@ -439,6 +481,8 @@ function initForm() {
   customOpt.value = CUSTOM_SIZE;
   customOpt.textContent = 'カスタム（px 指定）';
   els.sizeSelect.appendChild(customOpt);
+  fillComboSelect(els.samplerName, SAMPLER_NAMES);
+  fillComboSelect(els.scheduler, SCHEDULER_NAMES);
 
   els.modelSelect.addEventListener('change', onModelChange);
   els.sizeSelect.addEventListener('change', updateCustomSize);
@@ -490,6 +534,8 @@ function updateModelFields() {
 
   // サンプラー系は統合版だけが受け付ける
   els.wanSamplerRow.hidden = !model.sampler;
+  els.samplerName.options[0].textContent = `デフォルト（${model.defaultSampler ?? 'er_sde'}）`;
+  els.scheduler.options[0].textContent = `デフォルト（${model.defaultScheduler ?? 'simple'}）`;
   // 前半だけ cfg を掛ける 2 段サンプリング（Qwen-Image 2.1 の cfg_steps）
   els.q21CfgRow.hidden = !model.cfgSteps;
 
@@ -1826,8 +1872,8 @@ function buildModalInput(prompt) {
   if (els.guidance.value !== '') input.cfg = Number(els.guidance.value);
   // 統合版だけの項目。空欄はキーごと落として API の既定に任せる
   if (!els.wanSamplerRow.hidden) {
-    if (els.samplerName.value.trim() !== '') input.sampler_name = els.samplerName.value.trim();
-    if (els.scheduler.value.trim() !== '') input.scheduler = els.scheduler.value.trim();
+    if (els.samplerName.value !== '') input.sampler_name = els.samplerName.value;
+    if (els.scheduler.value !== '') input.scheduler = els.scheduler.value;
     if (els.denoise.value !== '') input.denoise = Number(els.denoise.value);
   }
   // 前半 cfg_steps ステップだけ cfg を掛け、残りは cfg=1 で回す。後半は
@@ -2827,8 +2873,8 @@ function perModelApply(s) {
   if (s.customHeight) els.customHeight.value = s.customHeight;
   els.steps.value = s.steps || '';
   els.guidance.value = s.guidance || '';
-  els.samplerName.value = s.samplerName || '';
-  els.scheduler.value = s.scheduler || '';
+  setComboValue(els.samplerName, s.samplerName);
+  setComboValue(els.scheduler, s.scheduler);
   els.denoise.value = s.denoise || '';
   els.cfgSteps.value = s.cfgSteps || '';
   updateCustomSize();
