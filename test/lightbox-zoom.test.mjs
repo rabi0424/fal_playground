@@ -19,7 +19,10 @@ const SRC = readFileSync(new URL('../lightbox-zoom.js', import.meta.url), 'utf8'
 class El {
   constructor(tag) {
     this.tag = tag;
-    this.style = {};
+    this.style = {
+      setProperty(name, value) { this[name] = value; },
+      removeProperty(name) { delete this[name]; },
+    };
     this.classes = new Set();
     this.listeners = new Map();
     this.rect = { left: 0, top: 0, width: 0, height: 0 };
@@ -123,6 +126,20 @@ test('触った点はその場に留まる（見たい所を押さえたまま�
   const after = { x: 400 + (x - 400) * t.scale + t.tx, y: 300 + (y - 300) * t.scale + t.ty };
   assert.ok(Math.abs(after.x - x) < 0.5, `横にずれている: ${after.x} ≠ ${x}`);
   assert.ok(Math.abs(after.y - y) < 0.5, `縦にずれている: ${after.y} ≠ ${y}`);
+});
+
+test('読み込めた画像の縦横比と元の幅を CSS に渡し、読めなければ消す', async () => {
+  const { img } = setup();
+  img.naturalWidth = 768;
+  img.naturalHeight = 1344;
+  img.fire('load');
+  assert.equal(Number(img.style['--lb-ratio']), 768 / 1344);
+  assert.equal(img.style['--lb-width'], '768px');
+
+  // 次の画像が読めなかったら、前の画像の大きさを残さない
+  img.fire('error');
+  assert.equal(img.style['--lb-ratio'], undefined);
+  assert.equal(img.style['--lb-width'], undefined);
 });
 
 test('シングルタップは間を置いてから閉じる（ダブルタップと見分けるため）', async () => {

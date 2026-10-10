@@ -432,12 +432,12 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
 .theme-label { overflow: hidden; text-overflow: ellipsis; }
 
 /* ---------- ページバー ---------- */
-/* PC では画面名の見出しだけ。狭いときだけハンバーガー付きの固定バーになる */
+/* PC では画面名の見出しだけ。狭いときだけハンバーガー付きの固定バーになる。
+   幅は各画面の本文（main）と同じ最大幅・同じ左端に揃える */
 .pagebar {
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: 1400px;
   margin: 0 auto;
   padding: 22px 24px 0;
 }
@@ -447,6 +447,13 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
 [data-page="imgedit.html"] .pagebar { max-width: 860px; }
 [data-page="imgedit.html"] .pagebar,
 [data-page="library.html"] .pagebar { padding-inline: 16px; }
+
+/* 大きなディスプレイでは、1 列のフォームを無理に引き伸ばさず 2 列にする
+   （画像編集・ライブラリ）。幅の値は下の .ie-main / .lib-main と揃える */
+@media (min-width: 1600px) {
+  [data-page="imgedit.html"] .pagebar { max-width: 1920px; }
+  [data-page="library.html"] .pagebar { max-width: 1560px; }
+}
 
 .pagebar-title {
   margin: 0;
@@ -547,14 +554,19 @@ h2, h3 { letter-spacing: -0.01em; line-height: 1.3; }
 /* 列は minmax(0, 1fr) にする。1fr だけだと最小幅が auto になり、
    折り返せない中身（select の長いモデル名など）の固有幅で列が
    ビューポートより広がってページ全体が横にはみ出す（スマホで
-   縮小表示・右に余白ができる）ため */
+   縮小表示・右に余白ができる）ため。
+   最大幅は付けない。右列は結果とギャラリー（自動で列が増える）なので、
+   大きなディスプレイでは左右に余白を残すより画面いっぱいに使うほうがよい */
 .layout {
   display: grid;
   grid-template-columns: 340px minmax(0, 1fr);
   gap: 24px;
-  max-width: 1400px;
-  margin: 0 auto;
   padding: 24px;
+}
+
+/* 横に余裕があるときは、操作パネルも少し広げて長いモデル名やボタン列を折り返しにくくする */
+@media (min-width: 1800px) {
+  .layout { grid-template-columns: 380px minmax(0, 1fr); }
 }
 
 @media (max-width: 900px) {
@@ -1569,6 +1581,8 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
   padding: 24px;
   cursor: zoom-out;
   animation: fade-in var(--dur-quick) ease-out;
+  /* 中の画像の幅を、この箱の内側（余白を除く）の大きさから決めるため */
+  container-type: size;
 }
 
 @keyframes fade-in { from { opacity: 0; } }
@@ -1576,6 +1590,12 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
 .lightbox img {
   max-width: 100%;
   max-height: 100%;
+  /* 読み込めたら lightbox-zoom.js が縦横比（--lb-ratio）と元の幅（--lb-width）を入れる。
+     箱に収まる幅を元の大きさを超えない範囲で明示し、読み込み後に幅が細いまま
+     残る崩れ（iOS Safari）を避ける。値が入る前（読み込み中）や cq 単位を知らない
+     実装では、この 2 行は捨てられて上の max-width / max-height だけで収まる */
+  width: min(100cqw, 100cqh * var(--lb-ratio), var(--lb-width));
+  aspect-ratio: var(--lb-ratio);
   border-radius: 8px;
   box-shadow: var(--shadow-floating);
   animation: rise-in var(--dur-move) var(--spring) backwards;
@@ -2059,9 +2079,8 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
 }
 
 /* ---------- arena（LoRA 比較アリーナ / arena.html） ---------- */
+/* 生成画面と同じく最大幅は付けない（セッション一覧・投票の画像は広いほど見やすい） */
 .arena-main {
-  max-width: 1400px;
-  margin: 0 auto;
   padding: 24px;
 }
 
@@ -2972,6 +2991,17 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
   gap: 10px;
 }
 
+/* 大きなディスプレイでは 2 列に並べる。1 列のまま広げると、名前と右端のバッジが
+   離れすぎて読みにくい。開いたカードは同じ行の隣を引き伸ばさないよう上揃えにする */
+@media (min-width: 1600px) {
+  .lib-main { max-width: 1560px; }
+  .lib-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+}
+
 .lib-card {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -3189,6 +3219,27 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
   gap: 16px;
 }
 
+/* 大きなディスプレイでは左に入力（画像・指示）、右に出力（結果・履歴）の 2 列にする。
+   狭いときは .ie-col を display: contents にして、従来どおり 1 列に流す */
+.ie-col { display: contents; }
+
+@media (min-width: 1600px) {
+  .ie-main {
+    max-width: 1920px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px 24px;
+    align-items: start;
+  }
+
+  .ie-col {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-width: 0;
+  }
+}
+
 .ie-panel {
   padding: 16px;
   display: flex;
@@ -3394,6 +3445,19 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* 2 列のときは、実行ボタンと順番待ちを入力側（左列）の真下に揃える。
+   本文と同じ列割りの grid にして、中身を 1 列目に置く（本文の左右 16px ぶんを引いた幅） */
+@media (min-width: 1600px) {
+  .ie-run-inner {
+    max-width: calc(1920px - 32px);
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 24px;
+  }
+
+  .ie-run-inner > * { grid-column: 1; }
 }
 
 .ie-run .primary-btn { width: 100%; }

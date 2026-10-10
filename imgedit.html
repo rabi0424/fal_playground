@@ -56,6 +56,9 @@
 
 <main class="ie-main">
 
+  <!-- 大きなディスプレイでは入力（左）と出力（右）の 2 列になる。狭いときは 1 列のまま -->
+  <div class="ie-col">
+
   <!-- 入力画像 -->
   <section class="panel ie-panel">
     <div class="ie-head">
@@ -387,6 +390,8 @@
 
   </section>
 
+  </div>
+
   <!-- 実行バー。生成画面と同じく下端に常駐させ、順番待ちもここにまとめる -->
   <div class="ie-run">
     <div class="ie-run-inner">
@@ -407,6 +412,8 @@
     </div>
   </div>
 
+  <div class="ie-col">
+
   <!-- 結果 -->
   <section id="resultPanel" class="panel ie-panel" hidden>
     <div class="ie-head">
@@ -426,6 +433,8 @@
     <div id="gallery" class="ie-gallery"></div>
     <p id="galleryEmpty" class="hint" hidden>まだこの画面で編集した画像はありません。</p>
   </section>
+
+  </div>
 
 </main>
 
