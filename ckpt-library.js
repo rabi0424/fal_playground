@@ -59,8 +59,23 @@ function label(path) {
 
 const baseOf = (item) => item?.base || DEFAULT_BASE;
 
+// 公式の Qwen-Image-2.1-Turbo（8 ステップ版、2026-10-09 公開）。Volume に入れて
+// いなくても動くよう HF の resolve URL で持つ（初回だけ Modal 側が 14.2GB を取り込み、
+// 2 回目からは Volume のものを使う）。サーバー（modal_comfy の krea2_qwen_app）は
+// ファイル名が qwen_image_2.1_turbo で始まると、steps を送らない限り公式の
+// 8 ステップの sigma 列で回す
+const QWEN21_TURBO_URL = 'https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_turbo_bf16.safetensors';
+
+// 公式 Turbo のチェックポイントか（URL でもファイル名でもよい）。サーバーの判定
+// （is_turbo）と同じく頭だけを見る。コミュニティの蒸留版は名前に turbo を
+// 含んでも別物（4 ステップの通常スケジューラ前提）なので当てない
+function isQwen21Turbo(path) {
+  return !!path && displayName(path).toLowerCase().startsWith('qwen_image_2.1_turbo');
+}
+
 // サーバー（modal_comfy）の Volume に最初から入っていて、登録しなくても選べるもの。
-// path は Volume のファイル名で、そのまま checkpoint として送れる。
+// path は Volume のファイル名で、そのまま checkpoint として送れる（Turbo だけは
+// 上のとおり HF の URL）。
 // アプリごとに既定が違う（統合版は BF16、ほかは GGUF）ので、候補からは呼び出し側が
 // そのモデルの既定を除く（同じものが「既定」と並んで 2 回出ないように）
 const BUILTINS = {
@@ -71,6 +86,7 @@ const BUILTINS = {
   qwen21: [
     { path: 'qwen_image_2.1_bf16.safetensors', name: 'qwen_image_2.1_bf16.safetensors（BF16）' },
     { path: 'qwen_image_2.1_Q8_0.gguf', name: 'qwen_image_2.1_Q8_0.gguf（GGUF Q8_0）' },
+    { path: QWEN21_TURBO_URL, name: 'qwen_image_2.1_turbo_bf16（公式 Turbo・8 ステップ）' },
   ],
 };
 
@@ -129,6 +145,8 @@ function optionLabel(item) {
 
 window.ckptLib = {
   DEFAULT_BASE,
+  QWEN21_TURBO_URL,
+  isQwen21Turbo,
   load,
   save,
   displayName,

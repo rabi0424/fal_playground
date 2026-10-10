@@ -223,6 +223,7 @@ const els = {
   fitSelect: $('#fitSelect'),
   numImages: $('#numImages'),
   steps: $('#steps'),
+  q21Ckpt: $('#q21Ckpt'),
   q21Steps: $('#q21Steps'),
   q21Cfg: $('#q21Cfg'),
   q21CfgSteps: $('#q21CfgSteps'),
@@ -3551,7 +3552,7 @@ const PROVIDERS = {
     // ウォーム表示のキー（Worker の MODAL_WARM_GROUPS）。統合版 Krea 2・Qwen 2.1 の生成と同じコンテナ
     warmKey: 'qwen21-edit',
     model: 'modal/qwen21-edit',
-    note: 'マスク不要。画像を丸ごと渡して、指示文で変更点を書きます。蒸留版が無いモデルなのでステップ数は 25 前後が必要で、1024×1536 で 20 秒ほどかかります（Krea 2 Turbo の 8 ステップとは桁が違います）。Krea 2 の LoRA は効きません。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。生成側の「Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）」「Qwen-Image 2.1 自前ホスト（Modal 統合版）」と同じコンテナなので、生成をそちらに寄せればコンテナが 1 つで済みます。',
+    note: 'マスク不要。画像を丸ごと渡して、指示文で変更点を書きます。通常版はステップ数 40 が既定で、1024×1536 で 30 秒ほどかかります（Krea 2 Turbo の 8 ステップとは桁が違います）。「モデル」で公式 Turbo（8 ステップ）を選ぶと 5 分の 1 ほどの時間で返ります（初回だけモデルの取り込みが入ります）。Krea 2 の LoRA は効きません。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。生成側の「Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）」「Qwen-Image 2.1 自前ホスト（Modal 統合版）」と同じコンテナなので、生成をそちらに寄せればコンテナが 1 つで済みます。',
     supports: { size: true, steps: true, guidance: true, negative: true },
     sizeKind: 'wan',
     // Krea 2 用でも、ノーマルの Qwen-Image 用でもない専用の枠
@@ -3583,7 +3584,10 @@ const PROVIDERS = {
         resolution: 0,
       };
       if (els.seedLock.checked && els.seed.value !== '') input.seed = Number(els.seed.value);
-      // 空欄はキーごと落として API の既定（40）に任せる。
+      // 公式 Turbo。サーバーはファイル名を見て、steps を送らなければ 8 ステップの
+      // sigma 列で回す（通常版は checkpoint を送らずサーバーの既定に任せる）
+      if (els.q21Ckpt.value === 'turbo') input.checkpoint = QWEN21_TURBO_URL;
+      // 空欄はキーごと落として API の既定（通常版 40 / Turbo 8）に任せる。
       // 共用の #steps は data-only="fal" で隠れていて値も動かないので使わない
       if (els.q21Steps.value !== '') input.steps = Number(els.q21Steps.value);
       // ガイダンス。**1 より上げると所要時間がほぼ倍になる**（ComfyUI は cfg=1 の
@@ -3639,10 +3643,22 @@ const QWEN21_REF_SECONDS = 18;
 const QWEN21_REF_STEPS = 25;
 // API（modal_comfy）の既定ステップ数。実測の基準（上の 25）とは別物
 const QWEN21_DEFAULT_STEPS = 40;
+// 公式 Turbo の sigma 列の長さ（steps を送らなければこれで回る）
+const QWEN21_TURBO_STEPS = 8;
+// 公式 Turbo のチェックポイント。生成画面の ckpt-library.js の QWEN21_TURBO_URL と
+// 同じもの（この画面は ckpt-library.js を読まないので持ち直している）。
+// Volume に無くても初回に Modal 側が取り込むよう HF の URL で渡す
+const QWEN21_TURBO_URL = 'https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_turbo_bf16.safetensors';
 
 function qwen21Steps() {
   const n = Number(els.q21Steps.value);
-  return els.q21Steps.value !== '' && Number.isFinite(n) && n > 0 ? n : QWEN21_DEFAULT_STEPS;
+  if (els.q21Steps.value !== '' && Number.isFinite(n) && n > 0) return n;
+  return els.q21Ckpt.value === 'turbo' ? QWEN21_TURBO_STEPS : QWEN21_DEFAULT_STEPS;
+}
+
+// ステップ欄の placeholder は選んだモデルの既定に合わせる
+function syncQwen21StepsHint() {
+  els.q21Steps.placeholder = String(els.q21Ckpt.value === 'turbo' ? QWEN21_TURBO_STEPS : QWEN21_DEFAULT_STEPS);
 }
 
 // cfg > 1 では ComfyUI が negative 側も評価するので、そのステップの UNet の
@@ -4598,6 +4614,7 @@ function saveForm() {
     rwOutputQuality: els.rwOutputQuality.value,
     rwPromptWeighting: els.rwPromptWeighting.checked,
     rwDefaults: RW_DEFAULTS_VERSION,
+    q21Ckpt: els.q21Ckpt.value,
     wanSteps: els.wanSteps.value,
     wanCfg: els.wanCfg.value,
     wanShift: els.wanShift.value,
@@ -4661,6 +4678,8 @@ async function restoreForm() {
   // 推奨値を入れる前の下書きは、モデル既定任せ（空欄）のままになっている。
   // それだと指示文がほとんど効かないので、一度だけ推奨値に入れ替える
   if ((s.rwDefaults ?? 0) < RW_DEFAULTS_VERSION) applyRunwareRecommended();
+  els.q21Ckpt.value = s.q21Ckpt === 'turbo' ? 'turbo' : '';
+  syncQwen21StepsHint();
   els.wanSteps.value = s.wanSteps ?? '';
   els.wanCfg.value = s.wanCfg ?? '';
   els.wanShift.value = s.wanShift ?? '';
@@ -4822,9 +4841,13 @@ for (const el of [els.sizeSelect, els.fitSelect, els.numImages, els.steps, els.g
   els.rwMaskGrow, els.rwPadEdges, els.rwScheduler, els.rwOutputQuality,
   els.rwPromptWeighting,
   els.wanSteps, els.wanCfg, els.wanShift, els.wanMaskGrow,
-  els.lpNumSteps, els.lpSteps, els.lpBlend, els.lpMaskGrow]) {
+  els.lpNumSteps, els.lpSteps, els.lpBlend, els.lpMaskGrow, els.q21Ckpt]) {
   el.addEventListener('change', saveForm);
 }
+els.q21Ckpt.addEventListener('change', () => {
+  syncQwen21StepsHint();
+  renderCostHint();
+});
 // Qwen-Image 2.1 のステップ・ガイダンスは所要時間の目安（実行バーの費用欄）に効く
 for (const el of [els.q21Steps, els.q21Cfg, els.q21CfgSteps]) {
   el.addEventListener('input', renderCostHint);

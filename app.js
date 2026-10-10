@@ -42,12 +42,13 @@ const MODELS = [
   // lanpaint: 画像編集の「LanPaint インペイント」と同居する版。API は統合版と同じ
   { id: MODAL_KREA2_LANPAINT_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal LanPaint 版・インペイントと共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'lanpaint', ckpt: true, sampler: true },
   // qwen21: Qwen-Image 2.1。Krea 2 系ともノーマルの Qwen-Image ともモデルが別で、
-  // **LoRA はどちらのものも効かない**（loraBase で分けている）。蒸留版が無いので
-  // ステップ数は 25 前後が必要（Krea 2 Turbo の 8 とは桁が違う）。そのぶん
-  // ガイダンスは 1 に固定されず、negative_prompt を効かせるなら上げられる
+  // **LoRA はどちらのものも効かない**（loraBase で分けている）。通常版は
+  // 40 ステップが既定（Krea 2 Turbo の 8 とは桁が違う）。そのぶん
+  // ガイダンスは 1 に固定されず、negative_prompt を効かせるなら上げられる。
+  // チェックポイントに公式 Turbo を選ぶと、サーバーが 8 ステップの sigma 列で回す
   // unified: Qwen 2.1 と同居する統合版。Krea 2 側の API は wan / lanpaint と同じ
   { id: MODAL_KREA2_UNIFIED_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'unified', ckpt: true, defaultCkpt: 'krea2_turbo_bf16.safetensors', sampler: true },
-  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版・Krea 2 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', defaultCkpt: 'qwen_image_2.1_bf16.safetensors', sampler: true, defaultSampler: 'euler', cfgMax: 10, stepsHint: '40（本家の既定。蒸留版が無いので必要）', cfgSteps: true },
+  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版・Krea 2 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', defaultCkpt: 'qwen_image_2.1_bf16.safetensors', sampler: true, defaultSampler: 'euler', cfgMax: 10, stepsHint: '40（本家の既定。Turbo のチェックポイントなら 8）', turboStepsHint: '8（公式 Turbo の固定スケジュール。数値を入れると通常のスケジューラで回る）', cfgSteps: true },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -539,7 +540,7 @@ function updateModelFields() {
   // Modal 版のデフォルト値・範囲は API の仕様（INTEGRATION.md）に合わせて案内する
   // 蒸留版の Krea 2 Turbo は 8 ステップ / cfg 0〜1 だが、Qwen-Image 2.1 は
   // 蒸留していないので前提が違う。モデル側の指定を優先する
-  els.steps.placeholder = model.stepsHint ?? (isModal ? '8（変更非推奨）' : 'デフォルト');
+  syncStepsHint(model);
   // cfg を 1 より上げると ComfyUI が negative 側も評価するので所要時間がほぼ倍に
   // なる（1 のときだけ uncond の計算を省く最適化が入る）。上げる価値はあるが、
   // 「空欄のままと同じ速さ」と誤解されないよう欄に出しておく
@@ -1050,6 +1051,16 @@ function unregisterCkpt(path) {
   populateCkptSelect(els.ckptSelect.value);
 }
 
+// ステップ数の欄の案内。Qwen-Image 2.1 は選んだチェックポイントで前提が変わる
+//（公式 Turbo はサーバーが 8 ステップの sigma 列で回す。steps を送ると通常の
+// スケジューラに戻るので、空欄のままにしておくのが公式どおり）
+function syncStepsHint(model = MODELS.find((m) => m.id === els.modelSelect.value) || MODELS[0]) {
+  const isModal = model.provider === 'modal';
+  const turbo = model.turboStepsHint && ckptLib.isQwen21Turbo(selectedCkpt() || currentDefaultCkpt());
+  els.steps.placeholder = (turbo ? model.turboStepsHint : model.stepsHint)
+    ?? (isModal ? '8（変更非推奨）' : 'デフォルト');
+}
+
 // 選択中のモデルのチェックポイント系統
 function currentCkptBase() {
   const model = MODELS.find((m) => m.id === els.modelSelect.value) || MODELS[0];
@@ -1106,6 +1117,7 @@ function populateCkptSelect(selected) {
 }
 
 function syncCkptRow() {
+  syncStepsHint();
   const urlMode = els.ckptSelect.value === LORA_URL_OPTION;
   els.ckptPath.hidden = !urlMode;
   // 登録したもの以外（既定・組み込み・直接入力）では「登録解除」を出さない
@@ -1148,7 +1160,10 @@ function initCkptField() {
   els.ckptLabel.addEventListener('click', () => { ckptToggledByUser = true; });
   populateCkptSelect('');
   els.ckptSelect.addEventListener('change', syncCkptRow);
-  els.ckptPath.addEventListener('input', syncCkptAccordion);
+  els.ckptPath.addEventListener('input', () => {
+    syncCkptAccordion();
+    syncStepsHint();
+  });
 
   // URL を入力したら自動登録して、その項目を選択状態にする
   //（素のファイル名は登録せずそのまま送る: Volume に既にあるものを指す用途）

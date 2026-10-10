@@ -108,7 +108,16 @@ const eq = (label, actual, expected) => {
 
   eq('既定が BF16 のモデルには GGUF だけ出す', paths('krea2', bf16), [gguf]);
   eq('既定が GGUF のモデルには BF16 だけ出す', paths('krea2', gguf), [bf16]);
-  eq('Qwen 2.1 も既定でない方を出す', paths('qwen21', 'qwen_image_2.1_bf16.safetensors'), ['qwen_image_2.1_Q8_0.gguf']);
+  const turbo = ckptLib.QWEN21_TURBO_URL;
+  eq('Qwen 2.1 も既定でない方と Turbo を出す', paths('qwen21', 'qwen_image_2.1_bf16.safetensors'), ['qwen_image_2.1_Q8_0.gguf', turbo]);
+  eq('Turbo は Volume に無くても動くよう HF の URL で持つ', turbo.startsWith('https://huggingface.co/') && ckptLib.displayName(turbo), 'qwen_image_2.1_turbo_bf16.safetensors');
+
+  // 公式 Turbo の判定はサーバー（modal_comfy の is_turbo）と同じく名前の頭だけで見る
+  eq('Turbo の URL', ckptLib.isQwen21Turbo(turbo), true);
+  eq('Turbo のファイル名', ckptLib.isQwen21Turbo('qwen_image_2.1_turbo_int8_convrot.safetensors'), true);
+  eq('通常版は Turbo ではない', ckptLib.isQwen21Turbo('qwen_image_2.1_bf16.safetensors'), false);
+  eq('コミュニティの蒸留版は名前に turbo があっても当てない', ckptLib.isQwen21Turbo('Qwen-Image-2.1-viggle-4-steps-turbo-Q8_0.gguf'), false);
+  eq('空は Turbo ではない', ckptLib.isQwen21Turbo(''), false);
   eq('組み込みの無い系統は空', paths('flux', 'x.gguf'), []);
 
   // 登録済みならライブラリ側の項目として出るので、組み込みとしては重ねない

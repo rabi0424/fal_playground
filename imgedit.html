@@ -309,7 +309,14 @@
       <div class="field" data-only="qwen21">
         <span class="label">生成パラメータ <em>（Qwen-Image 2.1）</em></span>
         <div class="row">
-          <label class="field num-field" title="蒸留版が無いモデルなので本家の既定は 40 です（Krea 2 Turbo の 8 とは桁が違います）。25 に下げると速くなります">
+          <label class="field" title="公式 Turbo は 8 ステップ専用に作られた版で、通常版の約 5 分の 1 の時間で返ります。初回だけ Modal 側でモデル（14.2GB）の取り込みが入ります">
+            <span class="label">モデル</span>
+            <select id="q21Ckpt">
+              <option value="">通常版（40 ステップ）</option>
+              <option value="turbo">公式 Turbo（8 ステップ）</option>
+            </select>
+          </label>
+          <label class="field num-field" title="通常版の本家の既定は 40 です（Krea 2 Turbo の 8 とは桁が違います）。25 に下げると速くなります。公式 Turbo は空欄のままにすると公式の 8 ステップの固定スケジュールで回り、数値を入れると通常のスケジューラに戻ります">
             <span class="label">ステップ</span>
             <input id="q21Steps" type="number" min="1" max="100" step="1" placeholder="40">
           </label>
