@@ -2114,7 +2114,7 @@ async function generateModal(model, prompt) {
 async function runModalJobFrom(job) {
   const total = job.entries.length;
 
-  // 未送信分を先にすべて投入する（サーバー側で順に処理される）
+  // 未送信分を先にすべて投入する（サーバー側でこの投入順に Modal へ送られる）
   for (const entry of job.entries) {
     if (entry.submitted || entry.result) continue;
     const body = { ...job.input, jobId: entry.jobId };
