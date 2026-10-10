@@ -39,6 +39,8 @@ const HISTORY_ID_RE = /^[\w.-]{1,100}$/;
 // Durable Object の一括 get / put / delete は 1 回 128 件まで
 const DO_BATCH = 128;
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function chunkBatch(items, size = DO_BATCH) {
   const out = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
@@ -53,6 +55,14 @@ const JOB_TTL_MS = 60 * 60 * 1000; // 完了・失敗ジョブの保持期間
 // クライアントが「編集中…」のまま止まり続ける
 const JOB_MAX_RUN_MS = 30 * 60 * 1000;
 const JOB_POLL_DELAY_MS = 2000;
+// Modal へ新しく送るジョブどうしの間隔。応答を待たずに続けて送るので、
+// 着く順（＝ Modal 側の入力キューの順）が通信の揺らぎで入れ替わらないよう空ける
+const MODAL_SUBMIT_GAP_MS = 1000;
+// Modal の応答待ちの間に、新しく積まれたジョブが無いかを見る間隔
+const MODAL_PICKUP_MS = 1000;
+// 1 回の alarm で新しいジョブを拾い続ける上限。alarm の実行は 15 分で打ち切られるので、
+// 締め切ってから送ったぶんの応答（303 まで最大 150 秒）を待ち切れる長さにとどめる
+const MODAL_PUMP_WINDOW_MS = 8 * 60 * 1000;
 // これ以上「予定時刻を過ぎているのに実行されていない」alarm は、配信されないまま
 // 残っているものとみなして張り直す。Durable Object の alarm は実行が繰り返し
 // 異常終了すると過去の時刻のまま居座ることがあり、その状態を「張られている」と
@@ -2202,6 +2212,10 @@ export class SyncState extends DurableObject {
       if (Date.now() - j.created > JOB_TTL_MS) await this.ctx.storage.delete(k);
     }
 
+    // 送り出す順番はこの時刻で決める（ジョブ ID は乱数なのでキー順は依頼順にならない）。
+    // 同じミリ秒に重なっても順番が割れないよう、前のジョブより必ず後にする
+    const created = Math.max(Date.now(), (this.krea2LastCreated ?? 0) + 1);
+    this.krea2LastCreated = created;
     await this.ctx.storage.put(key, {
       status: 'pending',
       payload,
@@ -2211,8 +2225,10 @@ export class SyncState extends DurableObject {
       endpointKey,
       pollUrl: null,
       attempts: 0,
-      created: Date.now(),
+      created,
     });
+    // 応答待ちで回っている alarm があれば、それにこのジョブも拾わせる
+    this.krea2Enqueued = true;
     await this.ensureAlarm();
   }
 
@@ -2250,15 +2266,44 @@ export class SyncState extends DurableObject {
     }
   }
 
-  // 未完了ジョブを順に処理する（順次実行なので Modal 側のウォーム状態も保ちやすい）。
+  // 未完了ジョブを進める。Modal（krea2:job:）は依頼順に送り出し、応答を待たずに
+  // 次を送る（pumpKrea2Jobs）。Poe と LoRA の取り込みはこれまでどおり 1 件ずつ回し、
+  // Modal の応答待ちに引きずられないよう並行させる。
   // lora:job: は数分かかりうるため専用の DO インスタンス（'lora-import'）にのみ
   // 登録され、singleton 側の生成ジョブのポーリングを妨げない
   async alarm() {
-    let pendingLeft = false;
     // 転送の予算はこの実行ぶんで、取り込みジョブが複数あっても合計で使う
     // （1 呼び出しあたりの上限はジョブ単位ではなく実行単位のため）
     const run = { parts: 0, bytes: 0, yielded: false };
-    for (const prefix of ['krea2:job:', 'poe:job:', 'lora:job:']) {
+    const [modalLeft, othersLeft] = await Promise.all([
+      this.pumpKrea2Jobs(),
+      this.runSerialJobs(run),
+    ]);
+    let nextAt = modalLeft || othersLeft ? Date.now() + JOB_POLL_DELAY_MS : null;
+    const bump = (at) => {
+      if (at != null && (nextAt === null || at < nextAt)) nextAt = at;
+    };
+    // 通知まわり（fal ジョブの完了の見張りと、まとめ送信の待ち合わせ）
+    bump(await this.runPushWatches());
+    bump(await this.flushPushNotice());
+    if (nextAt !== null) await this.ctx.storage.setAlarm(Math.max(nextAt, Date.now() + 100));
+  }
+
+  // Poe と LoRA の取り込みを 1 件ずつ進める。戻り値は未完了のジョブが残っているか
+  async runSerialJobs(run) {
+    // alarm が重なって届いても、同じジョブを二重に走らせない
+    if (this.serialJobsRunning) return true;
+    this.serialJobsRunning = true;
+    try {
+      return await this.runSerialJobsOnce(run);
+    } finally {
+      this.serialJobsRunning = false;
+    }
+  }
+
+  async runSerialJobsOnce(run) {
+    let pendingLeft = false;
+    for (const prefix of ['poe:job:', 'lora:job:']) {
       const jobs = await this.ctx.storage.list({ prefix });
       let entries = [...jobs];
       if (prefix === 'lora:job:') {
@@ -2269,26 +2314,99 @@ export class SyncState extends DurableObject {
       for (const [key, job] of entries) {
         if (job.status !== 'pending') continue;
         if (prefix === 'poe:job:') await this.runPoeJob(key, job);
-        else if (prefix === 'lora:job:') await this.runLoraImportJob(key, job, run);
-        else await this.runKrea2Job(key, job);
+        else await this.runLoraImportJob(key, job, run);
         const after = await this.ctx.storage.get(key);
         if (after?.status === 'pending') pendingLeft = true;
-        else if (after && prefix !== 'lora:job:') {
-          // 生成・編集が終わった瞬間に通知を積む（LoRA の取り込みは対象外）。
-          // Modal の edit / inpaint は画像編集の画面、Poe は部分AI編集の画面のもの
-          const kind = prefix === 'poe:job:' ? 'edit' : after.kind === 'generate' ? 'gen' : 'imgedit';
-          await this.queuePushNotice(after.status === 'done' ? kind : `${kind}Fail`);
-        }
+        else if (after && prefix === 'poe:job:') await this.queueJobNotice(prefix, after);
       }
     }
-    let nextAt = pendingLeft ? Date.now() + JOB_POLL_DELAY_MS : null;
-    const bump = (at) => {
-      if (at != null && (nextAt === null || at < nextAt)) nextAt = at;
+    return pendingLeft;
+  }
+
+  // 生成・編集が終わった瞬間に通知を積む（LoRA の取り込みは対象外）。
+  // Modal の edit / inpaint は画像編集の画面、Poe は部分AI編集の画面のもの
+  async queueJobNotice(prefix, job) {
+    const kind = prefix === 'poe:job:' ? 'edit' : job.kind === 'generate' ? 'gen' : 'imgedit';
+    await this.queuePushNotice(job.status === 'done' ? kind : `${kind}Fail`);
+  }
+
+  // Modal のジョブを依頼順（created の古い順）に送り出す。
+  //
+  // 送ったら応答を待たずに次を送る。Modal の Web エンドポイントは結果が出るか
+  // 150 秒経つ（303）まで応答を返さないので、1 本ずつ待つと max_containers を
+  // 増やしても 2 本目以降が DO に留まり、空いたコンテナが遊ぶ。順番は Modal 側の
+  // 入力キューに任せ、着く順が入れ替わらないよう新しい送信どうしは
+  // MODAL_SUBMIT_GAP_MS 空ける。
+  //
+  // 応答待ちの間に積まれたジョブもその場で拾って送る（startKrea2Job が印を付ける）。
+  // 303 を受けたジョブの結果待ちも同じ実行の中で続ける。応答待ちが無くなったら抜け、
+  // 202 などの続きは次の alarm に回す。戻り値は未完了のジョブが残っているか
+  async pumpKrea2Jobs() {
+    // alarm が重なって届いても、同じジョブを二重に送らない
+    if (this.krea2Pumping) return true;
+    this.krea2Pumping = true;
+    try {
+      return await this.pumpKrea2JobsOnce();
+    } finally {
+      this.krea2Pumping = false;
+    }
+  }
+
+  async pumpKrea2JobsOnce() {
+    const known = new Map();   // key -> 未完了のジョブ
+    const running = new Map(); // key -> 応答待ちの Promise
+    const retryAt = new Map(); // key -> 次に進めてよい時刻（202 を詰めて叩かない）
+    const admitUntil = Date.now() + MODAL_PUMP_WINDOW_MS;
+    let lastPostAt = -Infinity;
+    let rescan = true;
+
+    const step = (key, job) => {
+      const polledUrl = job.pollUrl; // runKrea2Job が書き換えるので先に控える
+      return this.runKrea2Job(key, job).then(async () => {
+        const after = await this.ctx.storage.get(key);
+        if (after?.status === 'pending') {
+          known.set(key, after);
+          // 303 で結果 URL を受け取ったばかりなら、すぐ取りにいく（結果 URL は
+          // 終わるまで応答を待たせるので、詰めて叩くことにはならない）。
+          // 202 や通信エラーは間を空けて次に回す
+          const redirected = after.pollUrl && after.pollUrl !== polledUrl;
+          retryAt.set(key, redirected ? 0 : Date.now() + JOB_POLL_DELAY_MS);
+        } else {
+          known.delete(key);
+          if (after) await this.queueJobNotice('krea2:job:', after);
+        }
+      })
+        .catch(() => retryAt.set(key, Date.now() + JOB_POLL_DELAY_MS))
+        .finally(() => running.delete(key));
     };
-    // 通知まわり（fal ジョブの完了の見張りと、まとめ送信の待ち合わせ）
-    bump(await this.runPushWatches());
-    bump(await this.flushPushNotice());
-    if (nextAt !== null) await this.ctx.storage.setAlarm(Math.max(nextAt, Date.now() + 100));
+
+    while (Date.now() < admitUntil) {
+      if (rescan || this.krea2Enqueued) {
+        rescan = false;
+        this.krea2Enqueued = false;
+        for (const [key, job] of await this.ctx.storage.list({ prefix: 'krea2:job:' })) {
+          if (job.status === 'pending' && !running.has(key)) known.set(key, job);
+        }
+      }
+      const now = Date.now();
+      const due = [...known]
+        .filter(([key]) => !running.has(key) && (retryAt.get(key) ?? 0) <= now)
+        .sort(([ka, a], [kb, b]) => (a.created - b.created) || (ka < kb ? -1 : ka > kb ? 1 : 0));
+      for (const [key, job] of due) {
+        if (!job.pollUrl) {
+          const wait = lastPostAt + MODAL_SUBMIT_GAP_MS - Date.now();
+          if (wait > 0) await sleep(wait);
+          lastPostAt = Date.now();
+        }
+        running.set(key, step(key, job));
+      }
+      if (running.size === 0) break;
+      await Promise.race([...running.values(), sleep(MODAL_PICKUP_MS)]);
+    }
+    // 受け付けを締め切った後も、送ったぶんの応答は待ち切る（alarm を抜けると
+    // 応答待ちの fetch ごと捨てられ、送り直しで二重に生成させてしまう）
+    await Promise.all(running.values());
+    return known.size > 0 || this.krea2Enqueued === true;
   }
 
   // 次の alarm を「この時刻まで」に前倒しする（既に早い予定があればそのまま）。
@@ -2426,11 +2544,13 @@ export class SyncState extends DurableObject {
   // 少し待ってから送る
   async queuePushNotice(kind) {
     if (!(await this.hasPushSubscribers())) return;
-    const pending = (await this.ctx.storage.get('push:pending')) ?? { counts: {} };
-    pending.counts[kind] = (pending.counts[kind] ?? 0) + 1;
-    pending.dueAt = Date.now() + PUSH_DEBOUNCE_MS;
-    await this.ctx.storage.put('push:pending', pending);
-    await this.alarmBy(pending.dueAt);
+    await this.exclusive(async () => {
+      const pending = (await this.ctx.storage.get('push:pending')) ?? { counts: {} };
+      pending.counts[kind] = (pending.counts[kind] ?? 0) + 1;
+      pending.dueAt = Date.now() + PUSH_DEBOUNCE_MS;
+      await this.ctx.storage.put('push:pending', pending);
+    });
+    await this.alarmBy(Date.now() + PUSH_DEBOUNCE_MS);
   }
 
   async flushPushNotice() {
@@ -2738,9 +2858,20 @@ export class SyncState extends DurableObject {
   async markWarm(endpointKey) {
     const group = MODAL_WARM_GROUPS[endpointKey];
     if (!group) return;
-    const warm = (await this.ctx.storage.get('krea2:warm')) ?? {};
-    warm[group] = Date.now();
-    await this.ctx.storage.put('krea2:warm', warm);
+    await this.exclusive(async () => {
+      const warm = (await this.ctx.storage.get('krea2:warm')) ?? {};
+      warm[group] = Date.now();
+      await this.ctx.storage.put('krea2:warm', warm);
+    });
+  }
+
+  // 読んで書き戻す更新を 1 本ずつ通す。alarm の中では Modal の応答待ちが並行して
+  // 終わるので、同じキー（通知の積み上げ・ウォームの時刻）を同時に書き換えて
+  // 片方の更新を失わないようにする
+  exclusive(fn) {
+    const result = (this.exclusiveTail ?? Promise.resolve()).then(fn);
+    this.exclusiveTail = result.catch(() => {});
+    return result;
   }
 
   // エンドポイントごとの「最後に使い終わった時刻」。同じコンテナを共有する

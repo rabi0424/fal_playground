@@ -10,6 +10,8 @@
 //   - 画像以外が返ったときに、それを結果として保存しないこと
 //   - いつまでも終わらないジョブを打ち切ること
 //   - 編集の結果から seed と実際の解像度（X-Width / X-Height）を拾うこと
+//   - 依頼順に送り出し、前の応答を待たずに次を送ること（応答待ちの間に積まれた
+//     ジョブもその場で送り、alarm が重なっても二重に送らないこと）
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
@@ -21,7 +23,11 @@ const OUT = new URL('./.modal.test.mjs', import.meta.url);
 const PATCHES = [
   ["import { DurableObject } from 'cloudflare:workers';",
     'class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }'],
+  // 送信の間隔と、新しいジョブを拾う間隔はテストでは縮める（筋書きは同じ）
+  ['const MODAL_SUBMIT_GAP_MS = 1000;', 'const MODAL_SUBMIT_GAP_MS = 40;'],
+  ['const MODAL_PICKUP_MS = 1000;', 'const MODAL_PICKUP_MS = 10;'],
 ];
+const SUBMIT_GAP_MS = 40;
 
 async function loadWorker() {
   let src = readFileSync(WORKER, 'utf8');
@@ -586,6 +592,126 @@ test('ウォーム: 使い終わった時刻を控え、同じコンテナの相
   const warm2 = await stub.getWarm();
   assert.ok(warm2.wan >= before);
   assert.equal(warm2['wan-edit'], warm2.wan);
+});
+
+/*
+ * 送り出す順番と、応答を待たずに次を送ること。
+ *
+ * ジョブ ID は乱数なので、ストレージのキー順（＝ list の順）は依頼順にならない。
+ * 以前はその順に送っていたため、複数枚の生成で順番が入れ替わっていた。
+ * また Modal は結果が出るか 150 秒経つまで応答を返さないので、1 本ずつ待つと
+ * max_containers を増やしてもコンテナが遊ぶ。ここではその両方を見る
+ */
+
+// POST を手で返すまで止めておける Modal。ポーリングにはすぐ PNG を返す
+function makeHeldModal() {
+  const posts = []; // { prompt, at, release }
+  const fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.includes('/poll/')) {
+      return new Response(PNG_1X1, { status: 200, headers: { 'Content-Type': 'image/png', 'X-Seed': '1' } });
+    }
+    const { prompt } = JSON.parse(init.body);
+    return new Promise((resolve) => {
+      posts.push({
+        prompt,
+        at: Date.now(),
+        release: () => resolve(new Response(null, {
+          status: 303, headers: { Location: `https://x--y.modal.run/poll/${prompt}` },
+        })),
+      });
+    });
+  };
+  return { posts, fetch, releaseAll: () => posts.forEach((p) => p.release()) };
+}
+
+async function waitFor(cond, what, ms = 3000) {
+  const until = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > until) assert.fail(`${what} が起きませんでした`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+test('順番: キーの辞書順ではなく依頼順に送り、送信の間を空ける', async () => {
+  const mod = await loadWorker();
+  const { stub, storage } = makeDo(mod);
+  const order = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (!u.includes('/poll/')) {
+      const { prompt } = JSON.parse(init.body);
+      order.push({ prompt, at: Date.now() });
+      return new Response(null, { status: 303, headers: { Location: `https://x--y.modal.run/poll/${prompt}` } });
+    }
+    return new Response(PNG_1X1, { status: 200, headers: { 'Content-Type': 'image/png', 'X-Seed': '1' } });
+  };
+
+  // キーの辞書順（'0' < '9' < 'e'）とわざと逆に積む
+  const url = 'https://x--y.modal.run/generate';
+  const ids = { first: 'e'.repeat(32), second: '9'.repeat(32), third: '0'.repeat(32) };
+  for (const [prompt, id] of Object.entries(ids)) {
+    await stub.startKrea2Job(id, { prompt }, url, 'generate', 'unified');
+  }
+  await runAlarms(stub, storage);
+
+  assert.deepEqual(order.map((o) => o.prompt), ['first', 'second', 'third']);
+  for (let i = 1; i < order.length; i++) {
+    assert.ok(order[i].at - order[i - 1].at >= SUBMIT_GAP_MS - 5,
+      `送信の間が詰まっている: ${order[i].at - order[i - 1].at}ms`);
+  }
+  for (const id of Object.values(ids)) assert.equal((await stub.getKrea2Job(id)).status, 'done');
+});
+
+test('並列: 前の応答を待たずに次を送り、応答待ちの間に積まれたジョブも拾う', async () => {
+  const mod = await loadWorker();
+  const { stub, storage } = makeDo(mod);
+  const modal = makeHeldModal();
+  globalThis.fetch = modal.fetch;
+
+  const url = 'https://x--y.modal.run/generate';
+  await stub.startKrea2Job('1'.repeat(32), { prompt: 'a' }, url, 'generate', 'unified');
+  await stub.startKrea2Job('2'.repeat(32), { prompt: 'b' }, url, 'generate', 'unified');
+  await storage.deleteAlarm();
+  const pass = stub.alarm();
+
+  // 1 本目が応答を返さないうちに 2 本目も送られている（コンテナが複数あれば並行で動く）
+  await waitFor(() => modal.posts.length === 2, '2 本目の送信');
+  assert.equal((await stub.getKrea2Job('2'.repeat(32))).started, true);
+
+  // 応答待ちの最中に積んだジョブも、この alarm のうちに送られる
+  await stub.startKrea2Job('3'.repeat(32), { prompt: 'c' }, url, 'generate', 'unified');
+  await waitFor(() => modal.posts.length === 3, '途中で積んだジョブの送信');
+  assert.deepEqual(modal.posts.map((p) => p.prompt), ['a', 'b', 'c']);
+
+  // 303 を受けたら、同じ alarm のうちに結果も取りにいく
+  modal.releaseAll();
+  await pass;
+  for (const id of ['1', '2', '3']) {
+    const job = await stub.getKrea2Job(id.repeat(32));
+    assert.equal(job.status, 'done', job.error ?? '');
+  }
+  assert.equal(modal.posts.length, 3, '送り直していない');
+});
+
+test('並列: alarm が重なって届いても、同じジョブを二重に送らない', async () => {
+  const mod = await loadWorker();
+  const { stub, storage } = makeDo(mod);
+  const modal = makeHeldModal();
+  globalThis.fetch = modal.fetch;
+
+  await stub.startKrea2Job('4'.repeat(32), { prompt: 'only' },
+    'https://x--y.modal.run/generate', 'generate', 'unified');
+  await storage.deleteAlarm();
+  const first = stub.alarm();
+  await waitFor(() => modal.posts.length === 1, '送信');
+  await stub.alarm(); // 1 本目が応答待ちのうちに次の alarm
+  modal.releaseAll();
+  await first;
+  await runAlarms(stub, storage);
+
+  assert.equal(modal.posts.length, 1);
+  assert.equal((await stub.getKrea2Job('4'.repeat(32))).status, 'done');
 });
 
 /* ---- 実行 ---- */
