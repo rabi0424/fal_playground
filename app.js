@@ -66,7 +66,12 @@ const SIZES = [
   { value: 'portrait_3_4', label: '縦長 3:4（896×1152）', width: 896, height: 1152, ratio: '3:4' },
   { value: 'portrait_2_3', label: '縦長 2:3（1024×1536）', width: 1024, height: 1536, ratio: '2:3' },
   { value: 'portrait_9_16', label: '縦長 9:16（768×1344）', width: 768, height: 1344, ratio: '9:16' },
+  // 縦長の高解像度。縦を上限の 2048 にしたもの（約 2.4MP）
+  { value: 'portrait_9_16_2k', label: '縦長 9:16 高解像度（1152×2048）', width: 1152, height: 2048, ratio: '9:16' },
 ];
+
+// カスタム解像度で選べるアスペクト比（幅:高さ）
+const CUSTOM_RATIOS = ['1:1', '5:4', '4:3', '3:2', '16:9', '21:9', '4:5', '3:4', '2:3', '9:16', '9:21'];
 
 const CUSTOM_SIZE = '__custom_size__';
 
@@ -161,6 +166,8 @@ const els = {
   customHeight: $('#customHeight'),
   swapSizeBtn: $('#swapSizeBtn'),
   mpReadout: $('#mpReadout'),
+  customRatio: $('#customRatio'),
+  customRatioLock: $('#customRatioLock'),
   numImages: $('#numImages'),
   seed: $('#seed'),
   seedLock: $('#seedLock'),
@@ -486,11 +493,19 @@ function initForm() {
 
   els.modelSelect.addEventListener('change', onModelChange);
   els.sizeSelect.addEventListener('change', updateCustomSize);
-  els.customWidth.addEventListener('input', updateMpReadout);
-  els.customHeight.addEventListener('input', updateMpReadout);
-  els.customWidth.addEventListener('change', () => snapDimInput(els.customWidth));
-  els.customHeight.addEventListener('change', () => snapDimInput(els.customHeight));
+  for (const r of ['', ...CUSTOM_RATIOS]) {
+    const opt = document.createElement('option');
+    opt.value = r;
+    opt.textContent = r || '指定なし';
+    els.customRatio.appendChild(opt);
+  }
+  els.customWidth.addEventListener('input', () => onDimInput('w'));
+  els.customHeight.addEventListener('input', () => onDimInput('h'));
+  els.customWidth.addEventListener('change', () => onDimChange('w'));
+  els.customHeight.addEventListener('change', () => onDimChange('h'));
   els.swapSizeBtn.addEventListener('click', swapDimensions);
+  els.customRatio.addEventListener('change', onRatioSelect);
+  els.customRatioLock.addEventListener('change', onRatioLockToggle);
   updateModelFields();
 }
 
@@ -556,9 +571,98 @@ function snapDim(value) {
   return Math.min(DIM_MAX, Math.max(DIM_MIN, n || DIM_MIN));
 }
 
-function snapDimInput(input) {
-  input.value = String(snapDim(input.value));
+// 固定中のアスペクト比（幅 / 高さ）。固定していなければ null
+let customRatioLock = null;
+
+function parseRatio(text) {
+  const [w, h] = String(text).split(':').map(Number);
+  return w > 0 && h > 0 ? w / h : null;
+}
+
+// 片方の辺（anchor: 'w' | 'h'）を value にして、もう一方を比率 r から決める。
+// もう一方が 256〜2048 を外れるときは、そちらを端に合わせて anchor 側を引き直す
+//（9:16 で幅 2048 と打たれたら、高さ 2048・幅 1152 にする）。
+// どちらも 8 の倍数に丸めるので、比率はわずかにずれることがある
+function fitToRatio(r, anchor, value) {
+  const other = (x) => (anchor === 'w' ? x / r : x * r);
+  const back = (y) => (anchor === 'w' ? y * r : y / r);
+  let a = snapDim(value);
+  let b = other(a);
+  if (b > DIM_MAX || b < DIM_MIN) {
+    b = Math.min(DIM_MAX, Math.max(DIM_MIN, b));
+    a = snapDim(back(b));
+  }
+  b = snapDim(b);
+  return anchor === 'w' ? { w: a, h: b } : { w: b, h: a };
+}
+
+function setDims({ w, h }) {
+  els.customWidth.value = String(w);
+  els.customHeight.value = String(h);
+}
+
+// 打っている途中はもう一方だけを追従させる（打ちかけの値を丸めて書き換えると打てない）
+function onDimInput(anchor) {
+  if (customRatioLock) {
+    const input = anchor === 'w' ? els.customWidth : els.customHeight;
+    const value = Number(input.value);
+    if (value > 0) {
+      const other = anchor === 'w' ? value / customRatioLock : value * customRatioLock;
+      (anchor === 'w' ? els.customHeight : els.customWidth).value = String(snapDim(other));
+    }
+  }
   updateMpReadout();
+  syncRatioSelect();
+}
+
+// 確定したら 8 の倍数・範囲内に丸め、固定中なら両辺を比率に合わせ直す
+function onDimChange(anchor) {
+  const input = anchor === 'w' ? els.customWidth : els.customHeight;
+  if (customRatioLock) setDims(fitToRatio(customRatioLock, anchor, input.value));
+  else input.value = String(snapDim(input.value));
+  updateMpReadout();
+  syncRatioSelect();
+}
+
+// 比率を選んだら、長辺はそのままに短辺を合わせ、その比率で固定する
+function onRatioSelect() {
+  const r = parseRatio(els.customRatio.value);
+  if (!r) {
+    setRatioLock(null);
+    return;
+  }
+  const long = Math.max(snapDim(els.customWidth.value), snapDim(els.customHeight.value));
+  setDims(fitToRatio(r, r >= 1 ? 'w' : 'h', long));
+  setRatioLock(r);
+  updateMpReadout();
+}
+
+// 比率を選ばずに固定したときは、いまの幅と高さの比で固定する
+function onRatioLockToggle() {
+  if (!els.customRatioLock.checked) {
+    setRatioLock(null);
+    return;
+  }
+  const r = parseRatio(els.customRatio.value)
+    ?? snapDim(els.customWidth.value) / snapDim(els.customHeight.value);
+  setRatioLock(r);
+}
+
+function setRatioLock(r) {
+  customRatioLock = r;
+  els.customRatioLock.checked = r !== null;
+  syncRatioSelect();
+}
+
+// プルダウンは「いまの比率に当たる選択肢」を指す。8 の倍数に丸めたぶんのずれは
+// 同じ比率とみなす（選択肢どうしは 6% 以上離れているので取り違えない）
+function syncRatioSelect() {
+  const r = customRatioLock
+    ?? Number(els.customWidth.value) / Number(els.customHeight.value);
+  const hit = Number.isFinite(r) && r > 0
+    ? CUSTOM_RATIOS.find((text) => Math.abs(parseRatio(text) / r - 1) < 0.015)
+    : null;
+  els.customRatio.value = hit ?? '';
 }
 
 function updateMpReadout() {
@@ -570,13 +674,19 @@ function swapDimensions() {
   const w = els.customWidth.value;
   els.customWidth.value = els.customHeight.value;
   els.customHeight.value = w;
+  // 縦横を入れ替えたら、固定している比率も裏返す（16:9 → 9:16）
+  if (customRatioLock) customRatioLock = 1 / customRatioLock;
   updateMpReadout();
+  syncRatioSelect();
 }
 
 function updateCustomSize() {
   const isCustom = els.sizeSelect.value === CUSTOM_SIZE;
   els.customSizeField.hidden = !isCustom;
-  if (isCustom) updateMpReadout();
+  if (isCustom) {
+    updateMpReadout();
+    syncRatioSelect();
+  }
 }
 
 /* ---------- LoRA ---------- */
@@ -2824,6 +2934,7 @@ function perModelSnapshot() {
     size: els.sizeSelect.value,
     customWidth: els.customWidth.value,
     customHeight: els.customHeight.value,
+    customRatioLock,
     steps: els.steps.value,
     guidance: els.guidance.value,
     samplerName: els.samplerName.value,
@@ -2847,6 +2958,7 @@ function perModelBlank() {
     size: els.sizeSelect.value,
     customWidth: els.customWidth.value,
     customHeight: els.customHeight.value,
+    customRatioLock,
     steps: '',
     guidance: '',
     samplerName: '',
@@ -2871,6 +2983,7 @@ function perModelApply(s) {
   }
   if (s.customWidth) els.customWidth.value = s.customWidth;
   if (s.customHeight) els.customHeight.value = s.customHeight;
+  setRatioLock(Number(s.customRatioLock) > 0 ? Number(s.customRatioLock) : null);
   els.steps.value = s.steps || '';
   els.guidance.value = s.guidance || '';
   setComboValue(els.samplerName, s.samplerName);

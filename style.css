@@ -991,6 +991,37 @@ details.lora-accordion { display: block; }
   gap: 8px;
 }
 
+.size-ratio-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.size-ratio {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.size-lock {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.size-lock input {
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .size-dim {
   flex: 1;
   display: flex;
