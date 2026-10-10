@@ -1569,6 +1569,8 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
   padding: 24px;
   cursor: zoom-out;
   animation: fade-in var(--dur-quick) ease-out;
+  /* 中の画像の幅を、この箱の内側（余白を除く）の大きさから決めるため */
+  container-type: size;
 }
 
 @keyframes fade-in { from { opacity: 0; } }
@@ -1576,6 +1578,12 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
 .lightbox img {
   max-width: 100%;
   max-height: 100%;
+  /* 読み込めたら lightbox-zoom.js が縦横比（--lb-ratio）と元の幅（--lb-width）を入れる。
+     箱に収まる幅を元の大きさを超えない範囲で明示し、読み込み後に幅が細いまま
+     残る崩れ（iOS Safari）を避ける。値が入る前（読み込み中）や cq 単位を知らない
+     実装では、この 2 行は捨てられて上の max-width / max-height だけで収まる */
+  width: min(100cqw, 100cqh * var(--lb-ratio), var(--lb-width));
+  aspect-ratio: var(--lb-ratio);
   border-radius: 8px;
   box-shadow: var(--shadow-floating);
   animation: rise-in var(--dur-move) var(--spring) backwards;

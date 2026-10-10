@@ -122,6 +122,21 @@ function attach(lightbox, opts = {}) {
 
   img.draggable = false; // PC で画像そのものをドラッグ＆ドロップし始めないように
 
+  // 等倍のときの大きさは、読み込めた画像の縦横比と元の幅から CSS で決める
+  //（style.css の .lightbox img）。max-width / max-height と flex の中央寄せだけに
+  // 任せると、iOS Safari では開いてから読み込み終わった画像（生成直後の 1 回目）が
+  // 画面幅より細いまま残ることがある。キャッシュから出る 2 回目以降は正しく出ていた
+  img.addEventListener('load', () => {
+    if (!img.naturalWidth || !img.naturalHeight) return;
+    img.style.setProperty('--lb-ratio', String(img.naturalWidth / img.naturalHeight));
+    img.style.setProperty('--lb-width', `${img.naturalWidth}px`);
+  });
+  // 読めなかった画像に前の画像の大きさを残さない（閉じるときの src = '' もここに来る）
+  img.addEventListener('error', () => {
+    img.style.removeProperty('--lb-ratio');
+    img.style.removeProperty('--lb-width');
+  });
+
   img.addEventListener('pointerdown', (e) => {
     drag = { x: e.clientX, y: e.clientY, tx, ty };
     moved = false;
