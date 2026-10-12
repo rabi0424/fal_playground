@@ -122,20 +122,33 @@ function attach(lightbox, opts = {}) {
 
   img.draggable = false; // PC で画像そのものをドラッグ＆ドロップし始めないように
 
-  // 等倍のときの大きさは、読み込めた画像の縦横比と元の幅から CSS で決める
-  //（style.css の .lightbox img）。max-width / max-height と flex の中央寄せだけに
-  // 任せると、iOS Safari では開いてから読み込み終わった画像（生成直後の 1 回目）が
-  // 画面幅より細いまま残ることがある。キャッシュから出る 2 回目以降は正しく出ていた
-  img.addEventListener('load', () => {
-    if (!img.naturalWidth || !img.naturalHeight) return;
-    img.style.setProperty('--lb-ratio', String(img.naturalWidth / img.naturalHeight));
-    img.style.setProperty('--lb-width', `${img.naturalWidth}px`);
-  });
+  // 等倍のときの大きさは、読み込めた画像の元の大きさと拡大表示の箱（余白を除く）から
+  // px で決める。元の大きさを超えては引き伸ばさない。
+  // max-width / max-height と flex の中央寄せだけに任せたり、container query 単位
+  //（cqw / cqh）で幅を出したりすると、iOS Safari では生成直後に開いた 1 回目だけ
+  // 画像が妙に小さく（細く）出ることがあった。隣の画像へ送って戻ると直っていた。
+  // 箱の大きさは読み込みと見える／隠れるの切り替えで前後するので、読み込めたときと
+  // 箱の大きさが変わったとき（開いた瞬間・回転）の両方で決め直す
+  const fit = () => {
+    const nw = img.naturalWidth;
+    const nh = img.naturalHeight;
+    if (!nw || !nh) return;
+    const cs = window.getComputedStyle?.(lightbox);
+    const pad = (a, b) => (cs ? (parseFloat(cs[a]) || 0) + (parseFloat(cs[b]) || 0) : 0);
+    const boxW = (lightbox.clientWidth || 0) - pad('paddingLeft', 'paddingRight');
+    const boxH = (lightbox.clientHeight || 0) - pad('paddingTop', 'paddingBottom');
+    if (boxW <= 0 || boxH <= 0) return; // 隠れている間は測れない。見えたときに決め直す
+    const w = Math.min(boxW, boxH * (nw / nh), nw);
+    img.style.setProperty('width', `${w}px`);
+    img.style.setProperty('height', `${w * (nh / nw)}px`);
+  };
+  img.addEventListener('load', fit);
   // 読めなかった画像に前の画像の大きさを残さない（閉じるときの src = '' もここに来る）
   img.addEventListener('error', () => {
-    img.style.removeProperty('--lb-ratio');
-    img.style.removeProperty('--lb-width');
+    img.style.removeProperty('width');
+    img.style.removeProperty('height');
   });
+  if (window.ResizeObserver) new window.ResizeObserver(fit).observe(lightbox);
 
   img.addEventListener('pointerdown', (e) => {
     drag = { x: e.clientX, y: e.clientY, tx, ty };
@@ -185,8 +198,10 @@ function attach(lightbox, opts = {}) {
   img.addEventListener('dblclick', (e) => e.preventDefault());
 
   // 画面の向きや大きさが変わると、はみ出し量の前提が崩れる
+  // 等倍の大きさも決め直す（ResizeObserver の無い実装向け。ある実装では二度手間なだけ）
   window.addEventListener?.('resize', () => {
     if (scale !== 1) reset();
+    fit();
   });
 
   api.reset = reset;
