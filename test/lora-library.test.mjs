@@ -110,6 +110,24 @@ check('Qwen-Image Edit 2509 は qwen', loraLib.baseKind('qwen-image-edit-2509'),
 // wan を先に見るので、Wan 側の版番号に巻き込まれない
 check('Wan 2.1 は wan', loraLib.baseKind('Wan Video 2.1 T2V'), 'wan');
 
+/* ---- baseKind: FLUX 3 Klein と FLUX.2 klein を取り違えない ---- */
+// FLUX 3 Image Klein は FLUX.2 klein（4B / 9B）とは別アーキテクチャで、LoRA に互換が無い
+for (const name of ['FLUX 3 Image Klein', 'Flux.3 Klein', 'flux3', 'FLUX.3', 'Flux 3',
+  'Flux.3 Klein 9B', 'FLUX.3 [klein]', 'flux-3-image-klein', 'flux3klein', 'FLUX 3 Klein']) {
+  check(`${name} は flux3klein`, loraLib.baseKind(name), 'flux3klein');
+}
+for (const name of ['Flux.2 Klein 9B', 'FLUX.2 [klein] 4B', 'flux2 klein', 'Flux.2 Klein 4B',
+  'klein', 'Flux.1 D', 'FLUX.1 [dev]', 'flux 32']) {
+  check(`${name} は flux3klein にしない`, loraLib.baseKind(name) === 'flux3klein', false);
+}
+check('FLUX.2 klein は other', loraLib.baseKind('Flux.2 Klein 9B'), 'other');
+// Klein のテキストエンコーダは Qwen3 だが、Qwen の枠には入れない
+check('Qwen3 を含んでも FLUX 3 Klein は flux3klein', loraLib.baseKind('Flux.3 Klein (Qwen3 TE)'), 'flux3klein');
+// 既存の判定は変わらない
+check('Krea 2 は krea2 のまま', loraLib.baseKind('Krea 2'), 'krea2');
+check('Qwen-Image 2.1 は qwen21 のまま', loraLib.baseKind('Qwen-Image 2.1'), 'qwen21');
+check('表示名から種類に戻る', loraLib.baseKind(loraLib.baseLabel('flux3klein')), 'flux3klein');
+
 /* ---- baseChoices: 選択中の値を絶対に落とさない ---- */
 // <select> は一致する option が無い値を代入されると空へ落ちる。候補を作る側が
 // 現在値を含め損ねると、開いただけでベースモデルが消える（保存まで気づけない）

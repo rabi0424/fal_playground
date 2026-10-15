@@ -226,6 +226,10 @@ const els = {
   q21Steps: $('#q21Steps'),
   q21Cfg: $('#q21Cfg'),
   q21CfgSteps: $('#q21CfgSteps'),
+  klCkpt: $('#klCkpt'),
+  klSteps: $('#klSteps'),
+  klCfg: $('#klCfg'),
+  klMegapixels: $('#klMegapixels'),
   guidance: $('#guidance'),
   acceleration: $('#acceleration'),
   outputFormat: $('#outputFormat'),
@@ -3099,6 +3103,8 @@ function modalEditParse(job) {
     images: [{ url: job.url, width: job.width ?? undefined, height: job.height ?? undefined }],
     seed: job.seed ?? null,
     flagged: 0,
+    // 当たらなかった LoRA のキーの数（FLUX 3 Klein が返す）
+    loraKeyMisses: job.loraKeyMisses ?? 0,
   };
 }
 
@@ -3629,7 +3635,105 @@ const PROVIDERS = {
         + ' ・ 自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です';
     },
   },
+
+  // FLUX 3 Image Klein（Modal 自前ホスト / modal_comfy の krea2_qwen_app の klein_edit）。
+  //
+  // Qwen 2.1 と同じく**マスクを使わない参照画像編集**だが、指示文に <image1> の
+  // ような参照タグは要らない。本家の推奨は「完成形の画像を丸ごと説明する
+  // キャプション」で、「青くして」だけだと構図ごと変わりやすい。
+  // **LoRA は FLUX 3 Klein 用のものだけが効く**（FLUX.2 klein 用は別アーキテクチャ）。
+  //
+  // 本番の統合版とは別の Modal アプリ（krea2-qwen21-klein-api）なので、上の
+  // Qwen 2.1 とはコンテナを共有しない（共有するのは生成側の FLUX 3 Klein だけ）。
+  klein: {
+    label: 'Modal 自前ホスト（FLUX 3 Image Klein 参照画像編集）',
+    // ウォーム表示のキー（Worker の MODAL_WARM_GROUPS）。生成側の FLUX 3 Klein と同じコンテナ
+    warmKey: 'klein-edit',
+    model: 'modal/klein-edit',
+    note: 'マスク不要。画像を丸ごと渡して、指示文で「完成形の画像」を説明します。既定の蒸留版は 16 ステップ・ガイダンス無しです（Base は 50 ステップ・ガイダンス 3.5 で遅い）。LoRA は FLUX 3 Klein 用のものだけが効きます（FLUX.2 klein 用は効きません）。自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です。生成側の「FLUX 3 Image Klein 自前ホスト（Modal）」と同じコンテナです（Krea 2 / Qwen 2.1 の統合版とは別）。',
+    supports: { size: true, steps: true, guidance: true, negative: true },
+    sizeKind: 'wan',
+    loraBase: 'flux3klein',
+    // 名前 / HF の resolve URL で指定する（Modal 側が Volume と既定リポジトリから引く）
+    loraByName: true,
+    maxLoras: 16, // modal_comfy 側の MAX_LORAS と揃える
+    // 画像全体を作り直すモデルなので、返ってくる絵が数 px ずれることがある
+    alignOutput: true,
+    pollMs: 2000,
+    promptHint: 'このモデルは参照タグ（<image1> など）が要りません。「どう変えるか」ではなく、編集後の画像全体を説明する長めのキャプションで書くと構図が保たれやすくなります。短い指示だと平凡な絵になりがちです。',
+    promptPlaceholder: '例: 同じ女性が、同じ部屋で同じポーズのまま赤いニットのセーターを着て立っている写真。顔立ち・髪型・背景・光の当たり方は元のまま',
+    maxSendPx: WAN_DIM_MAX,
+    snapSize: snap32,
+
+    buildInput(dataUri, size) {
+      const input = {
+        prompt: els.prompt.value.trim(),
+        // 参照画像の配列。API は 10 枚まで受けるが、この画面の入力欄は 1 枚なので
+        // 編集対象だけを渡す
+        images: [dataUri],
+      };
+      // 'base' はサーバー側の別名。空なら既定（蒸留版）
+      if (els.klCkpt.value) input.checkpoint = els.klCkpt.value;
+      if (els.seedLock.checked && els.seed.value !== '') input.seed = Number(els.seed.value);
+      // **steps / cfg は空欄ならキーごと落とす。** 既定はチェックポイントで変わる
+      // （蒸留版 16 / 1、Base 50 / 3.5）ので、こちらで値を埋めるとそれが崩れる
+      if (els.klSteps.value !== '') input.steps = Number(els.klSteps.value);
+      if (els.klCfg.value !== '') input.cfg = Number(els.klCfg.value);
+      // 出力サイズは既定で 1 枚目の参照画像（megapixels に縮めた後）に追従する。
+      // マスク合成は入出力のサイズが一致している前提なので、
+      // - 空欄: megapixels=0（縮めない）で送り、送信サイズのまま返させる
+      // - 指定: 参照は縮めるが、出力は width/height を両方渡して送信サイズに固定する
+      //   （片方だけだと 422 になる。size は snap32 済みなので 16 の倍数でもある）
+      const mp = Number(els.klMegapixels.value);
+      if (els.klMegapixels.value !== '' && Number.isFinite(mp) && mp > 0) {
+        input.megapixels = mp;
+        input.width = size.width;
+        input.height = size.height;
+      } else {
+        input.megapixels = 0;
+      }
+      // negative prompt は cfg > 1（= Base）のときだけ意味を持つ
+      const negative = els.negativePrompt.value.trim();
+      if (negative) input.negative_prompt = negative;
+      const loras = collectLoras();
+      if (loras.length > 0) {
+        input.loras = loras.map((l) => ({ name: loraLib.modalRef(l.path), strength: l.scale }));
+      }
+      return input;
+    },
+
+    // 画像本体（base64）は履歴にも再開用の記録にも残さない
+    strip(input) {
+      return { ...input, images: undefined };
+    },
+
+    submit(input) {
+      return modalEditSubmit(input, 'klein');
+    },
+
+    poll(handle) {
+      return modalEditPoll(handle, '初回はモデルの読み込みで 1 分ほどかかります');
+    },
+
+    parse: modalEditParse,
+
+    // 実測が無いので所要時間の目安は出さない
+    costHint() {
+      const size = sendSize();
+      if (!size) return '';
+      return `出力 ${size.width}×${size.height} × 1 枚`
+        + ' ・ 自前ホスト（Modal）なので枚数課金はなく、GPU の秒課金です';
+    },
+  },
 };
+
+// FLUX 3 Klein の steps / cfg 欄の目安は、選んだチェックポイントの既定に合わせる
+// （空欄で送るとサーバーがその既定を使う）
+function syncKleinPlaceholders() {
+  const base = els.klCkpt.value === 'base';
+  els.klSteps.placeholder = base ? '50' : '16';
+  els.klCfg.placeholder = base ? '3.5' : '1';
+}
 
 // 参照画像編集のだいたいの所要時間（秒）。実測（modal_comfy HANDOFF §12）では
 // L40S・1024×1536・25 ステップで 17〜19 秒だった。1 ステップあたりのコストは
@@ -4139,7 +4243,7 @@ async function waitAndFinish(job) {
 
   warmRing.note(api.warmKey); // コンテナがアイドルに戻った時刻
 
-  const { images, seed, flagged, cost } = api.parse(poll.result);
+  const { images, seed, flagged, cost, loraKeyMisses = 0 } = api.parse(poll.result);
   if (images.length === 0) throw new Error('画像が返されませんでした');
 
   // seed 未指定を表す -1 は「ランダム」なので記録しない
@@ -4198,6 +4302,10 @@ async function waitAndFinish(job) {
   }
 
   if (flagged > 0) setStatus(`安全性チェックにより ${flagged} 枚が塗り潰されて返りました`);
+  // 合わない LoRA はエラーにならず黙って（一部）無視されるので、ここで知らせる
+  if (loraKeyMisses > 0) {
+    setStatus(`⚠ LoRA のキーが ${loraKeyMisses} 個当たっていません（このモデル用ではない可能性）`);
+  }
   renderResult(saved);
 }
 
@@ -4829,6 +4937,7 @@ for (const el of [els.sizeSelect, els.fitSelect, els.numImages, els.steps, els.g
 for (const el of [els.q21Steps, els.q21Cfg, els.q21CfgSteps]) {
   el.addEventListener('input', renderCostHint);
 }
+els.klCkpt.addEventListener('change', syncKleinPlaceholders);
 // 思考回数は生成時間の目安（実行バーの費用欄）にも効く
 for (const el of [els.lpNumSteps, els.lpBlend]) {
   el.addEventListener('input', () => {

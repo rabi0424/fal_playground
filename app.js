@@ -26,6 +26,10 @@ const MODAL_KREA2_UNIFIED_ID = 'modal/krea2-turbo-unified';
 // Qwen-Image 2.1（modal_comfy の krea2_qwen_app）。**Krea 2 とは別モデル**で、
 // Krea 2 の LoRA は効かない。上の統合版と同じコンテナを共有する
 const MODAL_QWEN21_ID = 'modal/qwen-image-2.1';
+// FLUX 3 Image Klein（modal_comfy の krea2_qwen_app の klein_generate）。
+// **本番の統合版とは別の Modal アプリ（krea2-qwen21-klein-api）**に載っていて、
+// 上の Krea 2 / Qwen 2.1 とはコンテナを共有しない（そちらはまだ旧アプリを向いている）
+const MODAL_FLUX3_KLEIN_ID = 'modal/flux-3-image-klein';
 
 const MODELS = [
   // safetyChecker: fal 側の安全チェッカー（enable_safety_checker）を持つモデル。常に切って送る
@@ -48,6 +52,12 @@ const MODELS = [
   // unified: Qwen 2.1 と同居する統合版。Krea 2 側の API は wan / lanpaint と同じ
   { id: MODAL_KREA2_UNIFIED_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'unified', ckpt: true, defaultCkpt: 'krea2_turbo_bf16.safetensors', sampler: true },
   { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版・Krea 2 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', defaultCkpt: 'qwen_image_2.1_bf16.safetensors', sampler: true, defaultSampler: 'euler', cfgMax: 10, stepsHint: '40（本家の既定。蒸留版が無いので必要）', cfgSteps: true },
+  // klein: FLUX 3 Image Klein。Krea 2・Qwen 2.1・FLUX.2 klein のどれとも別モデルで、
+  // **LoRA は FLUX 3 Klein 用のものしか効かない**（loraBase で分けている）。
+  // steps / cfg の既定は**チェックポイントで変わる**（蒸留版 16 / 1、Base 50 / 3.5）。
+  // 空欄ならキーごと落として送るので（buildModalInput）、サーバーがチェックポイントに
+  // 合った既定を選ぶ。Krea 2 の 8 ステップのような既定値をこちらで埋めないこと
+  { id: MODAL_FLUX3_KLEIN_ID, name: 'FLUX 3 Image Klein 自前ホスト（Modal）', sizeParam: 'image_size', lora: true, loraBase: 'flux3klein', maxLoras: 16, provider: 'modal', modalEndpoint: 'klein', ckpt: true, ckptBase: 'flux3klein', defaultCkpt: 'flux3_image_klein_sd_bf16.safetensors', sampler: true, defaultSampler: 'euler', cfgMax: 10, stepsHint: '蒸留版 16 / Base 50（チェックポイントで既定が変わる）', cfgHint: '蒸留版 1 / Base 3.5（チェックポイントで既定が変わる）' },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -120,6 +130,8 @@ const POLL_INTERVAL_MS = 900;
 const DEFAULT_CKPTS = {
   krea2: 'Krea-2-Turbo-Q8_0.gguf',
   qwen21: 'qwen_image_2.1_Q8_0.gguf',
+  // 蒸留版（_sd_）。Base（flux3_image_klein_bf16.safetensors）は組み込みの候補から選べる
+  flux3klein: 'flux3_image_klein_sd_bf16.safetensors',
 };
 const DEFAULT_CKPT_BASE = 'krea2';
 
@@ -543,9 +555,10 @@ function updateModelFields() {
   // cfg を 1 より上げると ComfyUI が negative 側も評価するので所要時間がほぼ倍に
   // なる（1 のときだけ uncond の計算を省く最適化が入る）。上げる価値はあるが、
   // 「空欄のままと同じ速さ」と誤解されないよう欄に出しておく
-  els.guidance.placeholder = isModal
+  // チェックポイントで既定が変わるモデル（FLUX 3 Klein）は、その旨をそのまま出す
+  els.guidance.placeholder = model.cfgHint ?? (isModal
     ? ((model.cfgMax ?? 1) > 1 ? `1（0〜${model.cfgMax}。1 より上は約2倍遅い）` : '1（0〜1）')
-    : 'デフォルト';
+    : 'デフォルト');
 
   // サンプラー系は統合版だけが受け付ける
   els.wanSamplerRow.hidden = !model.sampler;
@@ -2160,6 +2173,9 @@ async function runModalJobFrom(job) {
     }
     entry.result = {
       url: r.url, seed: r.seed, elapsedMs: r.elapsedMs ?? null, execMs: r.execMs ?? null,
+      // 当たらなかった LoRA のキーの数（FLUX 3 Klein が返す。合わない LoRA は
+      // エラーにならず黙って無視されるので、結果の下に出して気づけるようにする）
+      ...(r.loraKeyMisses > 0 ? { loraKeyMisses: r.loraKeyMisses } : {}),
     };
     warmRing.note(job.input?.endpoint); // コンテナがアイドルに戻った時刻
     saveActiveJob(job);
@@ -2183,6 +2199,7 @@ function finishModal(job) {
   const procMs = done
     .map((e) => e.result.execMs ?? e.result.elapsedMs)
     .filter((v) => Number.isFinite(v) && v > 0);
+  const loraKeyMisses = Math.max(0, ...done.map((e) => e.result.loraKeyMisses ?? 0));
   const record = {
     id: `modal_${Date.now()}`,
     ts: Date.now(),
@@ -2193,6 +2210,7 @@ function finishModal(job) {
     seed: done[0].result.seed,
     elapsed: ((Date.now() - job.startedAt) / 1000).toFixed(1),
     ...(procMs.length > 0 ? { procMs } : {}),
+    ...(loraKeyMisses > 0 ? { loraKeyMisses } : {}),
     images: done.map((e) => ({ url: e.result.url, width: job.input.width, height: job.input.height })),
   };
   addHistoryRecord(record);
@@ -2541,6 +2559,15 @@ function renderDetail(record) {
     : '';
   metaLine.textContent = `${record.model}${loraText} ・ ${record.elapsed}s${record.seed !== null ? ` ・ seed: ${record.seed}` : ''}${costText(record.cost)}`;
   meta.appendChild(metaLine);
+
+  // LoRA がこのモデル向けでないと、エラーにならずに（一部）無視される。
+  // サーバーが数えた「当たらなかったキー」の数を、結果のすぐ下で知らせる
+  if (record.loraKeyMisses > 0) {
+    const warn = document.createElement('div');
+    warn.className = 'meta-line warn';
+    warn.textContent = `⚠ LoRA のキーが ${record.loraKeyMisses} 個当たっていません（このモデル用ではない可能性）`;
+    meta.appendChild(warn);
+  }
 
   const detailActions = document.createElement('div');
   detailActions.className = 'detail-actions';

@@ -1396,6 +1396,8 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
   color: var(--muted);
   overflow-wrap: anywhere;
 }
+/* LoRA のキー外れなど、結果に添える注意 */
+.detail-meta .meta-line.warn { color: var(--warn); }
 
 .detail-actions {
   display: flex;
