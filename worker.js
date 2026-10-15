@@ -76,7 +76,8 @@ const MODAL_WARM_MS_DEFAULT = 3 * 60 * 1000;
 
 // **同じコンテナを共有するエンドポイントの組**。片方を使えばもう片方も
 // ウォームになるので、最後に使った時刻はこの組ごとに 1 つ持つ
-// （統合版は Krea 2 の生成・Qwen 2.1 の生成・参照画像編集で 1 コンテナ）
+// （統合版は Krea 2 の生成・Qwen 2.1 の生成・参照画像編集で 1 コンテナ）。
+// FLUX 3 Klein は別アプリ（krea2-qwen21-klein-api）なので、生成と編集の 2 本で別の組
 const MODAL_WARM_GROUPS = {
   exp: 'exp',
   gpusnap: 'gpusnap',
@@ -88,6 +89,8 @@ const MODAL_WARM_GROUPS = {
   unified: 'krea2-qwen21',
   qwen21: 'krea2-qwen21',
   'qwen21-edit': 'krea2-qwen21',
+  klein: 'krea2-qwen21-klein',
+  'klein-edit': 'krea2-qwen21-klein',
 };
 const JOB_MAX_SUBMIT_ATTEMPTS = 2; // 送信自体の再試行上限（多重生成・多重課金の防止）
 
@@ -117,6 +120,9 @@ const JOB_META_KINDS = { edit: 'edit', inpaint: 'inpaint' };
 // Autogrow 入力 image_1..image_16 の限界**で、ノード側の上限そのもの。
 // ここで弾くのは、通らない本文を Durable Object に積まないため
 const MODAL_MAX_REF_IMAGES = 16;
+// FLUX 3 Image Klein（klein_edit）の参照画像の上限。Modal 側の KLEIN_MAX_REFS
+// （本家の仕様）と同じ値。エンドポイントごとの上限は許可リストの maxImages で持つ
+const KLEIN_MAX_REF_IMAGES = 10;
 
 // プロバイダ側の URL は失効しうるので、履歴に残す画像はすべて自分の R2 に取り込む。
 //
@@ -2253,6 +2259,9 @@ export class SyncState extends DurableObject {
       height: job.height ?? null,
       elapsedMs: job.elapsedMs ?? null, // 投げてから受け取るまで（Modal 側の順番待ち込み）
       execMs: job.execMs ?? null,       // サーバーが測った純生成時間（待ち時間を含まない）
+      // 当たらなかった LoRA のキーの数（返す相手だけ。null は「数えていない」）
+      loraKeyMisses: job.loraKeyMisses ?? null,
+      variant: job.variant ?? null,     // FLUX 3 Klein の蒸留版 / Base
       error: job.error ?? null,
     };
   }
@@ -2798,6 +2807,13 @@ export class SyncState extends DurableObject {
       // 実際に生成された解像度（編集では 32 の倍数に丸められる）
       const width = Number(res.headers.get('X-Width'));
       const height = Number(res.headers.get('X-Height'));
+      // 当たらなかった LoRA のキーの数（FLUX 3 Klein が LoRA を付けたときだけ返す）。
+      // 0 より大きければ、その LoRA はこのモデル向けではなく（一部）無視されている。
+      // ヘッダが無いときに Number(null) = 0 と読まないよう、有無を先に見る
+      const missHeader = res.headers.get('X-Lora-Key-Misses');
+      const loraKeyMisses = missHeader === null ? NaN : Number(missHeader);
+      // 蒸留版 / Base（FLUX 3 Klein）。checkpoint を省略したときに何が使われたかが分かる
+      const variant = res.headers.get('X-Variant');
       // 生成設定を画像に焼き込んでから保存する。画像本体（base64）は焼かない。
       // 正規化で拾われない項目（endpoint・sampler_name など）は raw に入る
       // images は参照画像（base64）の配列。image / mask と同じく、焼き込むと
@@ -2832,6 +2848,8 @@ export class SyncState extends DurableObject {
       job.seed = seed;
       if (Number.isFinite(width) && width > 0) job.width = width;
       if (Number.isFinite(height) && height > 0) job.height = height;
+      if (Number.isFinite(loraKeyMisses) && loraKeyMisses >= 0) job.loraKeyMisses = loraKeyMisses;
+      if (variant) job.variant = variant;
       job.elapsedMs = job.submittedAt ? Date.now() - job.submittedAt : null;
       job.execMs = Number.isFinite(execSeconds) && execSeconds > 0
         ? Math.round(execSeconds * 1000)
@@ -4340,7 +4358,7 @@ export default {
       delete payload.jobId;
 
       // エンドポイントはクライアントの endpoint フィールド
-      // （"exp" / "gpusnap" / "prod" / "ckpt" / "wan"）で切り替える。
+      // （"exp" / "gpusnap" / "prod" / "ckpt" / "wan" / … / "qwen21" / "klein"）で切り替える。
       // URL 自体はクライアントから受け取らず、ここの許可リストでのみ解決する。既定は実験版
       const endpoints = {
         exp: env.KREA2_ENDPOINT_EXP
@@ -4368,6 +4386,11 @@ export default {
         // qwen_generate なので URL は -comfyapi-qwen-generate になる
         qwen21: env.QWEN21_ENDPOINT_GENERATE
           || 'https://rabitteru--krea2-qwen21-api-comfyapi-qwen-generate.modal.run',
+        // FLUX 3 Image Klein。**本番の統合版とは別の Modal アプリ（krea2-qwen21-klein-api）**で、
+        // 上の unified / qwen21 とはコンテナを共有しない。steps / cfg の既定は
+        // チェックポイント（蒸留版 / Base）でサーバーが決めるので、ここでは補わない
+        klein: env.KLEIN_ENDPOINT_GENERATE
+          || 'https://rabitteru--krea2-qwen21-klein-api-comfyapi-klein-generate.modal.run',
       };
       // Object.hasOwn で見る（'constructor' のような継承プロパティを
       // 許可リストの当たりと取り違えないため）
@@ -4438,20 +4461,33 @@ export default {
           key: 'qwen21-edit',
           needs: 'images',
         },
+        // FLUX 3 Image Klein（krea2-qwen21-klein-api の klein_edit）。これもマスクを
+        // 使わない参照画像編集だが、<image1> のような参照タグは要らない。
+        // 参照画像は 10 枚まで（Qwen 2.1 の 16 枚とは上限が違う）
+        klein: {
+          url: env.KLEIN_ENDPOINT_EDIT
+            || 'https://rabitteru--krea2-qwen21-klein-api-comfyapi-klein-edit.modal.run',
+          kind: 'edit',
+          key: 'klein-edit',
+          needs: 'images',
+          maxImages: KLEIN_MAX_REF_IMAGES,
+        },
       };
       const target = Object.hasOwn(endpoints, payload.endpoint)
         ? endpoints[payload.endpoint] : endpoints.wan;
       delete payload.endpoint; // Modal API には存在しないフィールドなので転送しない
 
       if (target.needs === 'images') {
-        // base64（data URL 接頭辞付きも可）の配列。Modal 側の上限が 4 枚なので、
-        // 無駄に大きな本文を Durable Object に積まないようここでも弾く
+        // base64（data URL 接頭辞付きも可）の配列。上限は Modal 側と同じ値をエンドポイント
+        // ごとに持ち（Qwen 2.1 は 16 枚・Klein は 10 枚）、無駄に大きな本文を
+        // Durable Object に積まないようここでも弾く
         const images = payload.images;
         if (!Array.isArray(images) || images.length === 0) {
           return new Response('images is required', { status: 422 });
         }
-        if (images.length > MODAL_MAX_REF_IMAGES) {
-          return new Response(`images must be ${MODAL_MAX_REF_IMAGES} or fewer`, { status: 422 });
+        const maxImages = target.maxImages ?? MODAL_MAX_REF_IMAGES;
+        if (images.length > maxImages) {
+          return new Response(`images must be ${maxImages} or fewer`, { status: 422 });
         }
         if (images.some((i) => typeof i !== 'string' || i === '')) {
           return new Response('images must be non-empty base64 strings', { status: 422 });

@@ -193,7 +193,7 @@
       <p class="hint" id="rwLoraHint" hidden></p>
     </details>
 
-    <details class="field lora-accordion" data-only="fal wavespeed modal lanpaint qwen21" open>
+    <details class="field lora-accordion" data-only="fal wavespeed modal lanpaint qwen21 klein" open>
       <summary class="label" id="loraLabel">LoRA</summary>
       <div id="loraList" class="lora-list"></div>
       <div class="lora-actions">
@@ -325,6 +325,32 @@
         <p class="hint">ガイダンスを 1 より上げると negative prompt が効くようになり、指示への追従も上がります。ただし所要時間はほぼ倍になります（1 のときは ComfyUI が negative 側の計算を丸ごと省くため）。</p>
       </div>
 
+      <div class="field" data-only="klein">
+        <span class="label">生成パラメータ <em>（FLUX 3 Image Klein）</em></span>
+        <div class="row">
+          <label class="field" title="蒸留版は 16 ステップ・ガイダンス無しで速く、編集向けです。Base は 50 ステップ・ガイダンス 3.5 で遅く、LoRA の学習元・研究用です">
+            <span class="label">チェックポイント</span>
+            <select id="klCkpt">
+              <option value="">蒸留版（既定）</option>
+              <option value="base">Base</option>
+            </select>
+          </label>
+          <label class="field num-field" title="空欄ならチェックポイントに合った既定（蒸留版 16 / Base 50）を使います">
+            <span class="label">ステップ</span>
+            <input id="klSteps" type="number" min="1" max="100" step="1" placeholder="16">
+          </label>
+          <label class="field num-field" title="空欄ならチェックポイントに合った既定（蒸留版 1 / Base 3.5）を使います。蒸留版はガイダンスを焼き込んであるので、上げても効きません">
+            <span class="label">ガイダンス</span>
+            <input id="klCfg" type="number" min="0" max="10" step="0.1" placeholder="1">
+          </label>
+          <label class="field num-field" title="参照画像をこの面積（メガピクセル）に縮めてから使います。空欄なら送信サイズのまま使います（出力も送信サイズになります）">
+            <span class="label">参照の縮小（MP）</span>
+            <input id="klMegapixels" type="number" min="0" max="16" step="0.1" placeholder="縮めない">
+          </label>
+        </div>
+        <p class="hint">ステップ・ガイダンスは空欄ならチェックポイントに合った既定がサーバー側で選ばれます。negative prompt はガイダンスが 1 より上のとき（Base）だけ効きます。</p>
+      </div>
+
       <div class="field" data-only="modal">
         <span class="label">生成パラメータ <em>（Wan2.2 + VACE）</em></span>
         <div class="row">
@@ -381,7 +407,7 @@
         </div>
       </div>
 
-      <label class="field" data-only="fal runware modal qwen21">
+      <label class="field" data-only="fal runware modal qwen21 klein">
         <span class="label">除外したい要素（negative prompt）</span>
         <input id="negativePrompt" type="text" placeholder="空欄で未指定">
         <span class="hint" id="negativeHint" hidden></span>

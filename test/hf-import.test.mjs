@@ -70,6 +70,8 @@ checkIncludes('Wan が候補にある', defaults, 'wan');
 // Qwen-Image 2.1 は Qwen-Image（20B）と別アーキテクチャで LoRA に互換が無い。
 // 候補に無いと、2.1 を選んだ状態で登録してもベース無しで入ってしまう
 checkIncludes('Qwen-Image 2.1 が候補にある', defaults, 'qwen21');
+// FLUX 3 Klein も FLUX.2 klein と別物なので専用の枠がある
+checkIncludes('FLUX 3 Klein が候補にある', defaults, 'flux3klein');
 
 /* ---- 選択中の種類は必ず候補に含まれる ---- */
 

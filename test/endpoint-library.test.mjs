@@ -109,6 +109,9 @@ const eq = (label, actual, expected) => {
   eq('既定が BF16 のモデルには GGUF だけ出す', paths('krea2', bf16), [gguf]);
   eq('既定が GGUF のモデルには BF16 だけ出す', paths('krea2', gguf), [bf16]);
   eq('Qwen 2.1 も既定でない方を出す', paths('qwen21', 'qwen_image_2.1_bf16.safetensors'), ['qwen_image_2.1_Q8_0.gguf']);
+  // FLUX 3 Klein は蒸留版が既定。Base は登録しなくても選べる
+  eq('FLUX 3 Klein は Base を出す', paths('flux3klein', 'flux3_image_klein_sd_bf16.safetensors'), ['flux3_image_klein_bf16.safetensors']);
+  eq('FLUX 3 Klein の組み込みは 2 つ', paths('flux3klein').length, 2);
   eq('組み込みの無い系統は空', paths('flux', 'x.gguf'), []);
 
   // 登録済みならライブラリ側の項目として出るので、組み込みとしては重ねない

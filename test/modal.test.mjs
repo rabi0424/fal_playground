@@ -426,6 +426,30 @@ test('ルーティング: endpoint フィールドで URL を選び、未知の�
   await post('/api/krea2/generate', { ...base, jobId: '3'.repeat(32), endpoint: 'qwen21' });
   assert.match(seen.at(-1)[2], /krea2-qwen21-api-comfyapi-qwen-generate/);
   assert.deepEqual(seen.at(-1).slice(3), ['generate', 'qwen21']);
+
+  // FLUX 3 Image Klein。本番の統合版とは**別アプリ**（krea2-qwen21-klein-api）に向く
+  await post('/api/krea2/generate', { ...base, jobId: '5'.repeat(32), endpoint: 'klein' });
+  assert.equal(seen.at(-1)[2],
+    'https://rabitteru--krea2-qwen21-klein-api-comfyapi-klein-generate.modal.run');
+  assert.deepEqual(seen.at(-1).slice(3), ['generate', 'klein']);
+  // steps / cfg はチェックポイントでサーバーが既定を決めるので、送らなければ補わない
+  assert.equal(seen.at(-1)[1].steps, undefined);
+  assert.equal(seen.at(-1)[1].cfg, undefined);
+  // Krea 2 / Qwen 2.1 は旧アプリ（krea2-qwen21-api）のまま
+  await post('/api/krea2/generate', { ...base, jobId: '6'.repeat(32), endpoint: 'unified' });
+  assert.equal(seen.at(-1)[2], 'https://rabitteru--krea2-qwen21-api-comfyapi-krea2-generate.modal.run');
+
+  // 環境変数で上書きできる
+  const envOverride = {
+    ...env,
+    KLEIN_ENDPOINT_GENERATE: 'https://override--klein-generate.modal.run',
+  };
+  await mod.default.fetch(new Request('https://app/api/krea2/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...base, jobId: '7'.repeat(32), endpoint: 'klein' }),
+  }), envOverride);
+  assert.equal(seen.at(-1)[2], 'https://override--klein-generate.modal.run');
 });
 
 test('参照画像編集: qwen21 は images 配列で振り分け、image/mask は要求しない', async () => {
@@ -473,6 +497,92 @@ test('参照画像編集: qwen21 は images 配列で振り分け、image/mask �
 
   // マスク編集側は従来どおり image / mask が必須のまま
   assert.equal((await post({ ...base, endpoint: 'lanpaint', images: ['A'] })).status, 422);
+});
+
+test('参照画像編集: klein は別アプリへ振り分け、参照画像は 10 枚まで', async () => {
+  const mod = await loadWorker();
+  const seen = [];
+  const env = {
+    STATE: { idFromName: () => 'id', get: () => ({ startKrea2Job: (...a) => { seen.push(a); } }) },
+    MODAL_PROXY_KEY: 'wk-test',
+    MODAL_PROXY_SECRET: 'ws-test',
+  };
+  const post = (body, e = env) => mod.default.fetch(new Request('https://app/api/modal/edit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }), e);
+  const imgs = (n) => Array.from({ length: n }, (_, i) => `IMG${i}`);
+
+  // <image1> のようなタグは要らない（完成形を説明するキャプションで書く）
+  const base = { prompt: 'The same woman wearing a red knit sweater', jobId: '1'.repeat(32), endpoint: 'klein' };
+  assert.equal((await post({ ...base, images: ['AAA'], megapixels: 0 })).status, 200);
+  assert.equal(seen.at(-1)[2],
+    'https://rabitteru--krea2-qwen21-klein-api-comfyapi-klein-edit.modal.run');
+  assert.deepEqual(seen.at(-1).slice(3), ['edit', 'klein-edit']);
+  assert.deepEqual(seen.at(-1)[1].images, ['AAA']);
+  assert.equal(seen.at(-1)[1].megapixels, 0);
+  assert.equal(seen.at(-1)[1].endpoint, undefined);
+  assert.equal(seen.at(-1)[1].jobId, undefined);
+
+  // 上限ちょうど（10 枚 = Modal 側の KLEIN_MAX_REFS）まで通り、11 枚は弾く
+  assert.equal((await post({ ...base, jobId: '2'.repeat(32), images: imgs(10) })).status, 200);
+  assert.deepEqual(seen.at(-1)[1].images, imgs(10));
+  const before = seen.length;
+  assert.equal((await post({ ...base, jobId: '3'.repeat(32), images: imgs(11) })).status, 422);
+  assert.equal(seen.length, before, '弾いたものはジョブにしない');
+
+  // Qwen 2.1 は従来どおり 16 枚まで通る（上限はエンドポイントごと）
+  const q = { ...base, endpoint: 'qwen21' };
+  assert.equal((await post({ ...q, jobId: '4'.repeat(32), images: imgs(11) })).status, 200);
+  assert.equal((await post({ ...q, jobId: '5'.repeat(32), images: imgs(16) })).status, 200);
+  assert.deepEqual(seen.at(-1).slice(3), ['edit', 'qwen21-edit']);
+  assert.equal((await post({ ...q, jobId: '6'.repeat(32), images: imgs(17) })).status, 422);
+
+  // images が無ければ弾く（image / mask は要求しない）
+  assert.equal((await post({ ...base, jobId: '7'.repeat(32), image: 'A', mask: 'B' })).status, 422);
+
+  // 環境変数で上書きできる
+  await post({ ...base, jobId: '8'.repeat(32), images: ['A'] },
+    { ...env, KLEIN_ENDPOINT_EDIT: 'https://override--klein-edit.modal.run' });
+  assert.equal(seen.at(-1)[2], 'https://override--klein-edit.modal.run');
+});
+
+test('FLUX 3 Klein: LoRA のキー外れと蒸留版 / Base をクライアントへ渡す', async () => {
+  const mod = await loadWorker();
+  const { stub, storage } = makeDo(mod);
+
+  globalThis.fetch = makeModal({
+    headers: { 'X-Lora-Key-Misses': '12', 'X-Variant': 'distilled', 'X-Width': '1024', 'X-Height': '1536' },
+  }).fetch;
+  const id = 'a'.repeat(32);
+  await stub.startKrea2Job(id, {
+    prompt: 'x', loras: [{ name: 'flux2_klein_lora', strength: 1 }],
+  }, 'https://x--y.modal.run/klein', 'generate', 'klein');
+  await runAlarms(stub, storage);
+  const job = await stub.getKrea2Job(id);
+  assert.equal(job.status, 'done', job.error ?? '');
+  assert.equal(job.loraKeyMisses, 12);
+  assert.equal(job.variant, 'distilled');
+
+  // 全部当たった（0）ときも 0 として渡す
+  globalThis.fetch = makeModal({ headers: { 'X-Lora-Key-Misses': '0', 'X-Variant': 'base' } }).fetch;
+  const id2 = 'b'.repeat(32);
+  await stub.startKrea2Job(id2, { prompt: 'x', loras: [{ name: 'ok', strength: 1 }] },
+    'https://x--y.modal.run/klein', 'generate', 'klein');
+  await runAlarms(stub, storage);
+  const job2 = await stub.getKrea2Job(id2);
+  assert.equal(job2.loraKeyMisses, 0);
+  assert.equal(job2.variant, 'base');
+
+  // ヘッダを返さない相手（Krea 2 など）は null のまま（0 と読み違えない）
+  globalThis.fetch = makeModal().fetch;
+  const id3 = 'c'.repeat(32);
+  await stub.startKrea2Job(id3, { prompt: 'x' }, 'https://x--y.modal.run/generate', 'generate', 'unified');
+  await runAlarms(stub, storage);
+  const job3 = await stub.getKrea2Job(id3);
+  assert.equal(job3.loraKeyMisses, null);
+  assert.equal(job3.variant, null);
 });
 
 test('参照画像編集: 参照画像（base64）を画像のメタデータに焼き込まない', async () => {
@@ -583,6 +693,9 @@ test('ウォーム: 使い終わった時刻を控え、同じコンテナの相
   // 別アプリのコンテナには配らない
   assert.equal(warm.ckpt, undefined);
   assert.equal(warm.wan, undefined);
+  // FLUX 3 Klein は別アプリ（krea2-qwen21-klein-api）なので統合版とは共有しない
+  assert.equal(warm.klein, undefined);
+  assert.equal(warm['klein-edit'], undefined);
 
   // 編集（wan-edit）を流すと Wan の生成側もウォームになる
   await stub.startKrea2Job('c'.repeat(32), {
@@ -592,6 +705,17 @@ test('ウォーム: 使い終わった時刻を控え、同じコンテナの相
   const warm2 = await stub.getWarm();
   assert.ok(warm2.wan >= before);
   assert.equal(warm2['wan-edit'], warm2.wan);
+
+  // Klein の編集を流すと Klein の生成側もウォームになる（統合版の時刻は動かさない）
+  await new Promise((r) => setTimeout(r, 5));
+  await stub.startKrea2Job('d'.repeat(32), { prompt: 'z', images: ['AA'] },
+    'https://x--y.modal.run/klein-edit', 'edit', 'klein-edit');
+  await runAlarms(stub, storage);
+  const warm3 = await stub.getWarm();
+  assert.ok(warm3['klein-edit'] >= before);
+  assert.equal(warm3.klein, warm3['klein-edit']);
+  assert.equal(warm3.unified, warm.unified, '統合版のウォームは動かない');
+  assert.ok(warm3.klein > warm3.unified);
 });
 
 /*
