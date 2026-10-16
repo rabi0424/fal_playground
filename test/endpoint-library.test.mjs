@@ -118,6 +118,9 @@ const eq = (label, actual, expected) => {
   eq('通常版は Turbo ではない', ckptLib.isQwen21Turbo('qwen_image_2.1_bf16.safetensors'), false);
   eq('コミュニティの蒸留版は名前に turbo があっても当てない', ckptLib.isQwen21Turbo('Qwen-Image-2.1-viggle-4-steps-turbo-Q8_0.gguf'), false);
   eq('空は Turbo ではない', ckptLib.isQwen21Turbo(''), false);
+  // FLUX 3 Klein は蒸留版が既定。Base は登録しなくても選べる
+  eq('FLUX 3 Klein は Base を出す', paths('flux3klein', 'flux3_image_klein_sd_bf16.safetensors'), ['flux3_image_klein_bf16.safetensors']);
+  eq('FLUX 3 Klein の組み込みは 2 つ', paths('flux3klein').length, 2);
   eq('組み込みの無い系統は空', paths('flux', 'x.gguf'), []);
 
   // 登録済みならライブラリ側の項目として出るので、組み込みとしては重ねない

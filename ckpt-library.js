@@ -19,7 +19,7 @@
 
 const LS_CKPTS = 'fal_ckpt_library';
 const DEFAULT_BASE = 'krea2';
-const BASE_LABELS = { krea2: 'Krea 2', qwen21: 'Qwen-Image 2.1' };
+const BASE_LABELS = { krea2: 'Krea 2', qwen21: 'Qwen-Image 2.1', flux3klein: 'FLUX 3 Klein' };
 
 let onChange = null;
 
@@ -87,6 +87,12 @@ const BUILTINS = {
     { path: 'qwen_image_2.1_bf16.safetensors', name: 'qwen_image_2.1_bf16.safetensors（BF16）' },
     { path: 'qwen_image_2.1_Q8_0.gguf', name: 'qwen_image_2.1_Q8_0.gguf（GGUF Q8_0）' },
     { path: QWEN21_TURBO_URL, name: 'qwen_image_2.1_turbo_bf16（公式 Turbo・8 ステップ）' },
+  ],
+  // FLUX 3 Image Klein。**steps / cfg の既定はどちらを選ぶかでサーバーが変える**
+  // （蒸留版 16 / 1、Base 50 / 3.5）。既定は蒸留版
+  flux3klein: [
+    { path: 'flux3_image_klein_sd_bf16.safetensors', name: 'flux3_image_klein_sd_bf16.safetensors（蒸留版・16 ステップ）' },
+    { path: 'flux3_image_klein_bf16.safetensors', name: 'flux3_image_klein_bf16.safetensors（Base・50 ステップ / cfg 3.5）' },
   ],
 };
 

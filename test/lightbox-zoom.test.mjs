@@ -128,18 +128,69 @@ test('触った点はその場に留まる（見たい所を押さえたまま�
   assert.ok(Math.abs(after.y - y) < 0.5, `縦にずれている: ${after.y} ≠ ${y}`);
 });
 
-test('読み込めた画像の縦横比と元の幅を CSS に渡し、読めなければ消す', async () => {
+test('読み込めた画像を箱に収まる大きさ（px）にし、読めなければ消す', async () => {
   const { img } = setup();
+  // 縦長は箱の高さ（600）に合わせる
   img.naturalWidth = 768;
   img.naturalHeight = 1344;
   img.fire('load');
-  assert.equal(Number(img.style['--lb-ratio']), 768 / 1344);
-  assert.equal(img.style['--lb-width'], '768px');
+  assert.equal(parseFloat(img.style.height), 600);
+  assert.ok(Math.abs(parseFloat(img.style.width) - 600 * (768 / 1344)) < 1e-9);
+
+  // 横長は箱の幅（800）に合わせる
+  img.naturalWidth = 2000;
+  img.naturalHeight = 1000;
+  img.fire('load');
+  assert.equal(img.style.width, '800px');
+  assert.equal(img.style.height, '400px');
+
+  // 箱より小さい画像は元の大きさを超えて引き伸ばさない
+  img.naturalWidth = 300;
+  img.naturalHeight = 200;
+  img.fire('load');
+  assert.equal(img.style.width, '300px');
+  assert.equal(img.style.height, '200px');
 
   // 次の画像が読めなかったら、前の画像の大きさを残さない
   img.fire('error');
-  assert.equal(img.style['--lb-ratio'], undefined);
-  assert.equal(img.style['--lb-width'], undefined);
+  assert.equal(img.style.width, undefined);
+  assert.equal(img.style.height, undefined);
+});
+
+test('隠れている間に読み込めた画像は、見えて箱の大きさが決まったときに合わせる', async () => {
+  // 生成直後の 1 回目。箱がまだ測れない（0x0）うちに読み込みが終わることがある
+  let observed = null;
+  const lightbox = new El('div');
+  lightbox.clientWidth = 0;
+  lightbox.clientHeight = 0;
+  const img = new El('img');
+  lightbox.querySelector = () => img;
+  const window = {
+    addEventListener() {},
+    getComputedStyle: () => ({ paddingLeft: '16px', paddingRight: '16px', paddingTop: '24px', paddingBottom: '24px' }),
+    ResizeObserver: class {
+      constructor(cb) { this.cb = cb; }
+      observe(el) { observed = { el, cb: this.cb }; }
+    },
+  };
+  new Function('window', 'setTimeout', 'clearTimeout', 'Date', 'Math', SRC)(
+    window, setTimeout, clearTimeout, Date, Math,
+  );
+  window.falLightboxZoom.attach(lightbox);
+  assert.equal(observed?.el, lightbox, '箱の大きさの変化を見ていない');
+
+  img.naturalWidth = 768;
+  img.naturalHeight = 1344;
+  img.fire('load');
+  assert.equal(img.style.width, undefined, '測れない箱に合わせて大きさを決めている');
+
+  // 開いて箱の大きさが決まった（余白を除いた内側は 400x800）
+  lightbox.clientWidth = 432;
+  lightbox.clientHeight = 848;
+  observed.cb();
+  // 幅いっぱい（400）で、高さは縦横比から 700
+  assert.equal(img.style.width, '400px');
+  assert.equal(img.style.height, '700px');
 });
 
 test('シングルタップは間を置いてから閉じる（ダブルタップと見分けるため）', async () => {
