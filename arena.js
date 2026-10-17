@@ -77,6 +77,8 @@ const SIZES = [
 const LS_LORAS = 'fal_lora_library';
 const LS_ARENA = 'fal_arena';
 const LS_CHART_ORDER = 'fal_arena_chart_order'; // グラフの並び順（'step' | 'elo'）
+const LS_FORM = 'fal_form_state'; // 生成画面（app.js）の入力状態。チェックポイントの初期値に使う（読むだけ）
+const CKPT_URL_OPTION = '__url__'; // app.js の LORA_URL_OPTION（「URL / ファイル名を入力…」）
 
 // 20〜30 件を並行ポーリングするため、本体（900ms）より間隔を空ける
 const POLL_INTERVAL_MS = 2000;
@@ -1805,10 +1807,26 @@ function renderPlist(base) {
   return lib;
 }
 
-// チェックポイント指定版で使う UNet の候補（登録は生成画面で行う）
+// 生成画面でそのモデルに使っているチェックポイント（app.js がモデルごとに覚えている値）。
+// 生成画面で選んだものとアリーナの既定が食い違わないよう、セッションの初期値にする。
+// 空文字は「既定」（サーバーの既定）。生成画面でまだ使っていないモデルは null
+function generateScreenCkpt(modelId) {
+  let state;
+  try { state = JSON.parse(falStore.get(LS_FORM)); } catch { return null; }
+  if (!state) return null;
+  // byModel を持たない旧形式は、フラットな値が「そのときのモデルの分」
+  const per = state.byModel?.[modelId] ?? (state.model === modelId ? state : null);
+  if (!per) return null;
+  if (per.ckptSelect === CKPT_URL_OPTION) return String(per.ckptPath ?? '').trim();
+  return typeof per.ckptSelect === 'string' ? per.ckptSelect : '';
+}
+
+// チェックポイント指定版で使う UNet の候補（登録は生成画面で行う）。
+// 初期値は生成画面でそのモデルに使っているもの
 function populateSessionCkpt(model) {
   const base = model.ckptBase ?? DEFAULT_CKPT_BASE;
-  const prev = els.sessionCkpt.value;
+  const fromGenerate = generateScreenCkpt(model.id);
+  const prev = fromGenerate ?? '';
   els.sessionCkpt.innerHTML = '';
   const defOpt = document.createElement('option');
   defOpt.value = '';
@@ -1830,8 +1848,18 @@ function populateSessionCkpt(model) {
     opt.title = item.path;
     els.sessionCkpt.appendChild(opt);
   }
+  // 生成画面で直接入力したファイル名・URL や、非表示にした登録など、候補に無いものは足す
+  if (prev && ![...els.sessionCkpt.options].some((o) => o.value === prev)) {
+    const opt = document.createElement('option');
+    opt.value = prev;
+    opt.textContent = ckptLabel(prev);
+    opt.title = prev;
+    els.sessionCkpt.appendChild(opt);
+  }
+  // どれが生成画面と同じかを分かるようにする（生成画面で使ったことのあるモデルだけ）
+  const same = fromGenerate !== null && [...els.sessionCkpt.options].find((o) => o.value === prev);
+  if (same) same.textContent += '（生成画面で使用中）';
   els.sessionCkpt.value = prev;
-  if (els.sessionCkpt.value !== prev) els.sessionCkpt.value = '';
 }
 
 // モデルを変えると、使える LoRA もチェックポイントも変わる
@@ -1861,7 +1889,6 @@ function openSessionDialog() {
   populateSessionModels('');
   els.sessionModel.selectedIndex = 0; // ★ を付けたものが先頭に来る
   els.sessionCustomModel.value = '';
-  els.sessionCkpt.value = '';
   els.includeBaseline.checked = false;
   delete els.plist.dataset.base; // モデルが同じでも一覧は作り直す（登録が増えている）
   syncSessionModelFields();
