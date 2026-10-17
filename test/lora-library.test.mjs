@@ -128,6 +128,15 @@ check('Krea 2 は krea2 のまま', loraLib.baseKind('Krea 2'), 'krea2');
 check('Qwen-Image 2.1 は qwen21 のまま', loraLib.baseKind('Qwen-Image 2.1'), 'qwen21');
 check('表示名から種類に戻る', loraLib.baseKind(loraLib.baseLabel('flux3klein')), 'flux3klein');
 
+/* ---- baseKind: MOSS-Image ---- */
+for (const name of ['MOSS-Image', 'MOSS Image', 'moss-image-sft', 'MOSS-Image Base', 'mossimage']) {
+  check(`${name} は mossimage`, loraLib.baseKind(name), 'mossimage');
+}
+// テキストエンコーダは Qwen3.5 だが、Qwen の枠には入れない
+check('Qwen3.5 を含んでも MOSS-Image は mossimage', loraLib.baseKind('MOSS-Image (Qwen3.5 TE)'), 'mossimage');
+check('表示名から MOSS-Image に戻る', loraLib.baseKind(loraLib.baseLabel('mossimage')), 'mossimage');
+check('Qwen-Image は qwen のまま', loraLib.baseKind('Qwen-Image'), 'qwen');
+
 /* ---- baseChoices: 選択中の値を絶対に落とさない ---- */
 // <select> は一致する option が無い値を代入されると空へ落ちる。候補を作る側が
 // 現在値を含め損ねると、開いただけでベースモデルが消える（保存まで気づけない）

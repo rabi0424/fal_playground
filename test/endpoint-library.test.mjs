@@ -121,6 +121,9 @@ const eq = (label, actual, expected) => {
   // FLUX 3 Klein は蒸留版が既定。Base は登録しなくても選べる
   eq('FLUX 3 Klein は Base を出す', paths('flux3klein', 'flux3_image_klein_sd_bf16.safetensors'), ['flux3_image_klein_bf16.safetensors']);
   eq('FLUX 3 Klein の組み込みは 2 つ', paths('flux3klein').length, 2);
+  // MOSS-Image は SFT が既定。Base は登録しなくても選べる
+  eq('MOSS-Image は Base を出す', paths('mossimage', 'moss_image_sft_bf16.safetensors'), ['moss_image_base_bf16.safetensors']);
+  eq('MOSS-Image の組み込みは 2 つ', paths('mossimage').length, 2);
   eq('組み込みの無い系統は空', paths('flux', 'x.gguf'), []);
 
   // 登録済みならライブラリ側の項目として出るので、組み込みとしては重ねない

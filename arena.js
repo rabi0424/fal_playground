@@ -37,6 +37,8 @@ const ARENA_MODELS = [
   // FLUX 3 Image Klein。steps / cfg を空欄にすると、サーバーがチェックポイントに
   // 合った既定（蒸留版 16 / 1、Base 50 / 3.5）を選ぶ
   { id: 'modal/flux-3-image-klein', name: 'FLUX 3 Image Klein 自前ホスト（Modal）', provider: 'modal', endpoint: 'klein', loraBase: 'flux3klein', ckpt: true, ckptBase: 'flux3klein', defaultCkpt: 'flux3_image_klein_sd_bf16.safetensors', cfgMax: 10 },
+  // MOSS-Image。steps / cfg を空欄にすると、サーバーが本家の推奨（50 / 3）で回す
+  { id: 'modal/moss-image', name: 'MOSS-Image 自前ホスト（Modal）', provider: 'modal', endpoint: 'moss', loraBase: 'mossimage', ckpt: true, ckptBase: 'mossimage', defaultCkpt: 'moss_image_sft_bf16.safetensors', cfgMax: 10 },
   { id: '__custom__', name: 'カスタム…（fal）', loraBase: 'krea2' },
 ];
 
@@ -46,6 +48,7 @@ const DEFAULT_CKPTS = {
   krea2: 'Krea-2-Turbo-Q8_0.gguf',
   qwen21: 'qwen_image_2.1_Q8_0.gguf',
   flux3klein: 'flux3_image_klein_sd_bf16.safetensors',
+  mossimage: 'moss_image_sft_bf16.safetensors',
 };
 const DEFAULT_CKPT_BASE = 'krea2';
 

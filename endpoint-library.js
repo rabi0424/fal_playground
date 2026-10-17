@@ -41,6 +41,7 @@ const CATALOG = [
   { key: 'modal/krea2-turbo-unified', name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', screens: ['generate', 'arena'] },
   { key: 'modal/qwen-image-2.1', name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版）', screens: ['generate', 'arena'] },
   { key: 'modal/flux-3-image-klein', name: 'FLUX 3 Image Klein 自前ホスト（Modal）', screens: ['generate', 'arena'] },
+  { key: 'modal/moss-image', name: 'MOSS-Image 自前ホスト（Modal）', screens: ['generate', 'arena'] },
   { key: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]', screens: ['generate'] },
   { key: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', screens: ['generate'] },
   { key: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', screens: ['generate'] },

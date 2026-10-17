@@ -607,6 +607,7 @@ localStorage はブラウザごとに 5MB 前後で頭打ちになり、超え�
 - `QWEN21_ENDPOINT_EDIT` = Qwen-Image 2.1（参照画像編集）の URL
 - `KLEIN_ENDPOINT_GENERATE` = FLUX 3 Image Klein（生成）の URL
 - `KLEIN_ENDPOINT_EDIT` = FLUX 3 Image Klein（参照画像編集）の URL
+- `MOSS_ENDPOINT_GENERATE` = MOSS-Image（生成）の URL
 - `MODAL_WARM_SECONDS` = コンテナがアイドルで落ちるまでの秒数（既定 180）。下の「ウォーム表示」の目盛りに使うだけで、実際の値は modal_comfy 側の `scaledown_window` です
 
 ### ウォーム表示
@@ -615,7 +616,7 @@ Modal 版を選んでいるあいだ、**生成ボタンの隣に小さなリン
 
 - 緑 → 残り 30 秒で黄 → 残り 10 秒で赤 → 冷えたら輪郭だけ
 - 生成中は満ちたまま静かに脈打ちます（コンテナが動いている状態）
-- 起点は Worker が持ちます（`/api/krea2/warm`）。生成・画像編集・比較アリーナのどの画面から、どの端末で投げたジョブでも Worker を通るので、**ほかの端末で温めた分もそのまま反映**されます。**同じコンテナを共有するエンドポイント**（統合版と Qwen 2.1、Wan の生成と編集、LanPaint の生成とインペイント、FLUX 3 Klein の生成と編集）には同じ時刻が配られます
+- 起点は Worker が持ちます（`/api/krea2/warm`）。生成・画像編集・比較アリーナのどの画面から、どの端末で投げたジョブでも Worker を通るので、**ほかの端末で温めた分もそのまま反映**されます。**同じコンテナを共有するエンドポイント**（統合版と Qwen 2.1、Wan の生成と編集、LanPaint の生成とインペイント、FLUX 3 Klein の生成と編集）には同じ時刻が配られます（MOSS-Image は単独の組です）
 - 残り時間の計算はブラウザ側で毎秒行うので、表示の更新でサーバーに問い合わせることはありません（読み直すのはモデルを選び直したとき・タブに戻ったとき・冷えた瞬間の 1 回だけ）
 
 ## モデルごとの設定の記憶
@@ -730,6 +731,23 @@ Qwen 2.1 と同じくマスクを使わない参照画像編集ですが、**指
 - 「生成パラメータ（FLUX 3 Image Klein）」で、チェックポイント（蒸留版 / Base）・ステップ・ガイダンス・参照の縮小（メガピクセル）を指定できます。ステップ・ガイダンスは生成と同じく、空欄ならチェックポイントに合った既定です
 
 > **送信サイズについて。** API の既定は「参照画像を 1 MP に縮め、出力もその大きさ」で、そのままだとマスク合成の前提（入出力のサイズ一致）が崩れます。そこで「参照の縮小」が空欄なら `megapixels=0`（縮めない）を送って、出力を送信サイズのまま返させます。値を入れたときは参照だけを縮め、出力は `width` / `height` を両方渡して送信サイズに固定します
+
+## Modal 自前ホスト版 MOSS-Image（実験）
+
+モデル選択の「MOSS-Image 自前ホスト（Modal）」は、modal_comfy の `krea2_qwen_app` に足した `moss_generate` を使います。MOSS-Image は OpenMOSS の 5B の画像モデル（Apache-2.0）で、中国語・英語の文字描画と長いプロンプト（4096 トークンまで）が得意です。**生成だけ**で、参照画像編集はありません（本家にまだ無い）。
+
+| 用途 | URL（既定） | 上書き |
+|---|---|---|
+| 生成 | `https://rabitteru--krea2-qwen21-moss-api-comfyapi-moss-generate.modal.run` | `MOSS_ENDPOINT_GENERATE` |
+
+- **Modal のアプリ名がさらに別です（`krea2-qwen21-moss-api`）。** Klein のときと同じく、本番の `krea2-qwen21-api` にも Klein の `krea2-qwen21-klein-api` にも手を付けずに別名でデプロイしてあるので、**ほかのモデルとはコンテナを共有しません**（ウォーム表示も単独の組です）
+- **チェックポイントは SFT（`moss_image_sft_bf16.safetensors`。既定）と Base（`moss_image_base_bf16.safetensors`）。** どちらもチェックポイント欄から登録なしで選べます。SFT は Base を厳選データで追加学習した「仕上げ版」で、**Klein の蒸留版のような高速版ではありません。** 普段は SFT、Base は LoRA 学習の土台・比較用です
+- **ステップ・ガイダンスの既定は SFT / Base 共通で 50 ステップ / cfg 3**（本家の推奨）。空欄なら送らずサーバーの既定に任せます。ガイダンスを掛ける前提なので、1 枚あたりは Krea 2 / Klein 蒸留版より大幅に重くなります
+- サンプラー・スケジューラの既定は `euler` / `sgm_uniform`（OpenMOSS 公式の ComfyUI ワークフローの値）です。サーバー側で shift 5 と「negative 側だけ 22 層目を飛ばす」設定（本家の `uncond_skip_layers=[22]`）も既定で入ります
+- 解像度は 16 の倍数に丸められます。本家の推奨は総画素 1M / 1.5M / 2M で、**4M（2048×2048）を超えるとサーバーが 422 で断ります**
+- **プロンプトにはレイアウト指定の JSON も書けます**（本家の実験的機能）。`{"summary": {...}, "items": [...], "bbox_coord_space": "abs_centralized", "bbox_format": "yxyx"}` をそのままプロンプト欄に貼ると、文字・物の位置を指定できます。座標は**画像の中心が原点**の絶対ピクセル `[y1, x1, y2, x2]` なので、解像度と合わせてください（形式は本家の USERGUIDE.md）
+- **LoRA は MOSS-Image 用のものだけが効きます。** ライブラリのベースモデルは「MOSS-Image」という専用の枠で、`MOSS-Image` / `moss` を含む表記はこの枠に入ります。合わない LoRA は Klein と同じく `X-Lora-Key-Misses` で検出して結果の下に出します
+- 比較アリーナでも選べます
 
 ## 表示の軽さ（履歴まわり）
 

@@ -72,6 +72,8 @@ checkIncludes('Wan が候補にある', defaults, 'wan');
 checkIncludes('Qwen-Image 2.1 が候補にある', defaults, 'qwen21');
 // FLUX 3 Klein も FLUX.2 klein と別物なので専用の枠がある
 checkIncludes('FLUX 3 Klein が候補にある', defaults, 'flux3klein');
+// MOSS-Image も専用の枠
+checkIncludes('MOSS-Image が候補にある', defaults, 'mossimage');
 
 /* ---- 選択中の種類は必ず候補に含まれる ---- */
 
