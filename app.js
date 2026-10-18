@@ -2471,12 +2471,21 @@ function makeDetailDeleteBtn(record) {
   const btn = document.createElement('button');
   btn.className = 'ghost-btn small mobile-only';
   btn.textContent = '削除';
-  btn.addEventListener('click', () => {
-    deleteHistoryRecord(record.id);
-    clearDetail();
-    renderGallery();
-  });
+  btn.addEventListener('click', () => confirmDeleteHistory(record));
   return btn;
+}
+
+// 履歴 1 件を、確認してから消す。サーバーの画像ごと消えて戻せないので、
+// どの画面から消すときも必ずここを通す
+function confirmDeleteHistory(record) {
+  const prompt = String(record.prompt ?? '').trim();
+  const head = prompt.length > 60 ? `${prompt.slice(0, 60)}…` : prompt;
+  const ok = confirm(`この履歴を削除しますか？\n${head ? `「${head}」\n` : ''}画像もサーバーから消え、元に戻せません。`);
+  if (!ok) return false;
+  deleteHistoryRecord(record.id);
+  if (record.id === selectedId) clearDetail();
+  renderGallery();
+  return true;
 }
 
 // 画像読み込みが稀に失敗する（拡大表示では見える）ため、失敗時に少し待って再取得する
@@ -2822,11 +2831,14 @@ function galleryItemEl(record) {
   thumb.addEventListener('click', () => renderDetail(record));
   item.appendChild(thumb);
 
+  // 右上は「…」メニューが使うので、印は左上にまとめて縦に積む
+  const badges = document.createElement('div');
+  badges.className = 'badges';
   if (record.type === 'compare') {
     const badge = document.createElement('span');
     badge.className = 'compare-badge';
     badge.textContent = `比較 ×${record.variants.length}`;
-    item.appendChild(badge);
+    badges.appendChild(badge);
   }
 
   if (hasExternalImage(record)) {
@@ -2836,8 +2848,23 @@ function galleryItemEl(record) {
     badge.textContent = '未取り込み';
     badge.title = 'この記録の画像は、まだサーバーに取り込まれていません。'
       + '提供元の CDN が消すと失われます（しばらく使っていると裏で取り込まれます）。';
-    item.appendChild(badge);
+    badges.appendChild(badge);
   }
+  if (badges.childElementCount > 0) item.appendChild(badges);
+
+  const menuBtn = document.createElement('button');
+  menuBtn.type = 'button';
+  menuBtn.className = 'item-menu-btn';
+  menuBtn.textContent = '⋯';
+  menuBtn.title = 'この履歴の操作';
+  menuBtn.setAttribute('aria-label', 'この履歴の操作');
+  menuBtn.setAttribute('aria-haspopup', 'menu');
+  menuBtn.setAttribute('aria-expanded', 'false');
+  menuBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleHistoryMenu(record, menuBtn);
+  });
+  item.appendChild(menuBtn);
 
   const body = document.createElement('div');
   body.className = 'body';
@@ -2853,26 +2880,132 @@ function galleryItemEl(record) {
   meta.textContent = record.model.replace(/^fal-ai\//, '');
   body.appendChild(meta);
 
-  const actions = document.createElement('div');
-  actions.className = 'actions';
-
-  const deleteBtn = document.createElement('button');
-  deleteBtn.className = 'ghost-btn small';
-  deleteBtn.textContent = '削除';
-  deleteBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    deleteHistoryRecord(record.id);
-    if (record.id === selectedId) {
-      clearDetail();
-    }
-    renderGallery();
-  });
-  actions.appendChild(deleteBtn);
-
-  body.appendChild(actions);
   item.appendChild(body);
   return item;
 }
+
+/* ---------- 履歴カードの「…」メニュー ---------- */
+// 1 つの要素を使い回し、開いたカードのボタンの近くに出す（カードごとに作ると
+// 履歴の件数ぶんメニューの DOM が増える）
+
+let historyMenu = null; // { el, anchor, record }
+
+function historyMenuEl() {
+  if (historyMenu) return historyMenu.el;
+  const el = document.createElement('div');
+  el.className = 'history-menu';
+  el.setAttribute('role', 'menu');
+  el.hidden = true;
+  document.body.appendChild(el);
+
+  el.addEventListener('keydown', (e) => {
+    const items = [...el.querySelectorAll('[role="menuitem"]')];
+    const i = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      items[(i + step + items.length) % items.length]?.focus();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeHistoryMenu({ focusAnchor: true });
+    } else if (e.key === 'Tab') {
+      closeHistoryMenu();
+    }
+  });
+  historyMenu = { el, anchor: null, record: null };
+  return el;
+}
+
+function toggleHistoryMenu(record, anchor) {
+  if (historyMenu?.anchor === anchor && !historyMenu.el.hidden) {
+    closeHistoryMenu({ focusAnchor: true });
+    return;
+  }
+  openHistoryMenu(record, anchor);
+}
+
+function openHistoryMenu(record, anchor) {
+  closeHistoryMenu();
+  const el = historyMenuEl();
+  el.innerHTML = '';
+  const addItem = (label, onSelect, cls = '') => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `history-menu-item${cls ? ` ${cls}` : ''}`;
+    btn.setAttribute('role', 'menuitem');
+    btn.textContent = label;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeHistoryMenu();
+      onSelect();
+    });
+    el.appendChild(btn);
+  };
+  addItem('設定を再利用', () => reuseRecord(record));
+  addItem('プロンプトを再利用', () => reusePrompt(record));
+  const sep = document.createElement('div');
+  sep.className = 'history-menu-sep';
+  sep.setAttribute('role', 'separator');
+  el.appendChild(sep);
+  addItem('削除…', () => confirmDeleteHistory(record), 'danger');
+
+  historyMenu.anchor = anchor;
+  historyMenu.record = record;
+  anchor.setAttribute('aria-expanded', 'true');
+  anchor.closest('.gallery-item')?.classList.add('menu-open');
+  el.hidden = false;
+  placeHistoryMenu();
+  el.querySelector('[role="menuitem"]')?.focus({ preventScroll: true });
+}
+
+// ボタンの右端にそろえて下に出す。下に入らなければ上に出し、画面からはみ出さないよう寄せる
+function placeHistoryMenu() {
+  const { el, anchor } = historyMenu;
+  const r = anchor.getBoundingClientRect();
+  const w = el.offsetWidth;
+  const h = el.offsetHeight;
+  const margin = 8;
+  let left = r.right - w;
+  left = Math.max(margin, Math.min(left, window.innerWidth - w - margin));
+  let top = r.bottom + 4;
+  if (top + h > window.innerHeight - margin && r.top - 4 - h >= margin) top = r.top - 4 - h;
+  el.style.left = `${Math.round(left)}px`;
+  el.style.top = `${Math.round(Math.max(margin, top))}px`;
+}
+
+function closeHistoryMenu({ focusAnchor = false } = {}) {
+  if (!historyMenu || historyMenu.el.hidden) return;
+  const { el, anchor } = historyMenu;
+  el.hidden = true;
+  anchor?.setAttribute('aria-expanded', 'false');
+  anchor?.closest('.gallery-item')?.classList.remove('menu-open');
+  if (focusAnchor && anchor?.isConnected) anchor.focus();
+  historyMenu.anchor = null;
+  historyMenu.record = null;
+}
+
+// メニューの外を触ったら閉じる
+document.addEventListener('pointerdown', (e) => {
+  if (!historyMenu || historyMenu.el.hidden) return;
+  if (historyMenu.el.contains(e.target) || historyMenu.anchor?.contains(e.target)) return;
+  closeHistoryMenu();
+}, true);
+
+// スクロール・画面サイズの変化ではボタンに付いていく。**スクロールで閉じないこと。**
+// ボタンを押すとフォーカスが移り、カードが半分隠れているとブラウザがギャラリーを
+// 少しスクロールして見せる。その scroll は開いた直後に届くので、閉じると開いた
+// そばから消える（iOS の慣性スクロールでも同じ）。ボタンが見えなくなったら閉じる
+function followHistoryMenu() {
+  if (!historyMenu || historyMenu.el.hidden) return;
+  const { anchor } = historyMenu;
+  const r = anchor?.isConnected ? anchor.getBoundingClientRect() : null;
+  const box = els.gallery.getBoundingClientRect();
+  const visible = r && r.bottom > Math.max(0, box.top) && r.top < Math.min(window.innerHeight, box.bottom);
+  if (!visible) closeHistoryMenu();
+  else placeHistoryMenu();
+}
+document.addEventListener('scroll', followHistoryMenu, true);
+window.addEventListener('resize', followHistoryMenu);
 
 const galleryPager = falGallery.create(els.gallery, galleryItemEl, { onNeedMore: loadMoreHistory });
 
@@ -2907,6 +3040,14 @@ function revealGalleryItem(el) {
     ? item.top - view.top
     : Math.max(0, item.bottom - view.bottom);
   if (top !== 0) box.scrollBy({ top, behavior: 'smooth' });
+}
+
+// プロンプトだけを入れ替える（モデル・LoRA・シードなどの設定はそのまま）
+function reusePrompt(record) {
+  els.prompt.value = record.prompt ?? '';
+  // 下書きの保存などはふだんの入力と同じ経路で拾わせる
+  els.prompt.dispatchEvent(new Event('input', { bubbles: true }));
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 function reuseRecord(record) {

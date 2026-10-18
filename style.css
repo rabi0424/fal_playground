@@ -953,10 +953,32 @@ details.lora-accordion { display: block; }
 .gallery-item.external,
 .gallery-item.external:hover { border-color: var(--warn); }
 
-.external-badge {
+/* カード左上の印（比較・未取り込み）。右上は「…」メニューのボタンが使う */
+.gallery-item .badges {
   position: absolute;
   top: 6px;
-  right: 6px;
+  left: 6px;
+  right: 40px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  pointer-events: none;
+}
+
+/* 印は 1 行で出す（カードが狭いと「未取り込 / み」のように折り返していた） */
+.gallery-item .badges > span {
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 430px) {
+  .gallery-item .badges { right: 38px; }
+  .gallery-item .badges > span { font-size: 10px; padding: 2px 5px; }
+}
+
+.external-badge {
   background: var(--warn);
   color: #ffffff;
   font-size: 11px;
@@ -966,9 +988,6 @@ details.lora-accordion { display: block; }
 }
 
 .compare-badge {
-  position: absolute;
-  top: 6px;
-  left: 6px;
   background: var(--accent);
   color: var(--accent-text);
   font-size: 11px;
@@ -1587,9 +1606,91 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
   color: var(--muted);
 }
 
+/* 部分AI編集（edit.js）のカード下の操作。生成画面のカードは「…」メニューに移した */
 .gallery-item .actions {
   display: flex;
   gap: 4px;
+}
+
+/* サムネ右上の「…」。押すと再利用・削除のメニュー（app.js の openHistoryMenu） */
+.gallery-item .item-menu-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 0.45);
+  color: #ffffff;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  transition: opacity var(--dur-quick) ease, background var(--dur-quick) ease;
+}
+
+.gallery-item .item-menu-btn:hover,
+.gallery-item.menu-open .item-menu-btn { background: rgb(0 0 0 / 0.7); }
+
+.gallery-item .item-menu-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* マウスのある環境では、カードに載せたとき・開いているときだけ出す（サムネを隠さない）。
+   タッチ端末では常に出す（ホバーが無いので、出さないと押せない） */
+@media (hover: hover) {
+  .gallery-item .item-menu-btn { opacity: 0; }
+  .gallery-item:hover .item-menu-btn,
+  .gallery-item:focus-within .item-menu-btn,
+  .gallery-item.menu-open .item-menu-btn { opacity: 1; }
+}
+
+.history-menu {
+  position: fixed;
+  z-index: 90;
+  min-width: 180px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-floating);
+  display: flex;
+  flex-direction: column;
+}
+
+.history-menu[hidden] { display: none; }
+
+.history-menu-item {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  font-size: 14px;
+  padding: 9px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.history-menu-item:hover,
+.history-menu-item:focus-visible {
+  background: var(--nav-hover);
+  outline: none;
+}
+
+.history-menu-item.danger { color: var(--danger); }
+
+.history-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
 }
 
 .gallery-empty {
@@ -2095,11 +2196,12 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
   /* HF 一覧の行はタップしやすい高さにする */
   .hf-item { padding: 12px 10px; }
 
-  /* カード上の小さい削除ボタンは誤タップの元なので詳細側に移す */
-  .gallery-item .actions { display: none; }
   .gallery-item:active { border-color: var(--muted); }
 
   .mobile-only { display: inline-block; }
+
+  /* カード上の小さい削除ボタンは誤タップの元なので詳細側に移す（部分AI編集） */
+  .gallery-item .actions { display: none; }
 
   .lightbox {
     padding: calc(16px + env(safe-area-inset-top)) 16px
