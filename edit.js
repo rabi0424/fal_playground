@@ -1389,6 +1389,7 @@ function openLightbox(urls, index = 0) {
 }
 
 function showLightboxImage() {
+  lightboxZoom.reset(); // 前の画像のズームを持ち越さない
   els.lightbox.querySelector('img').src = lightboxUrls[lightboxIndex] ?? '';
   els.lightboxCounter.hidden = lightboxUrls.length < 2;
   els.lightboxCounter.textContent = `${lightboxIndex + 1} / ${lightboxUrls.length}`;
@@ -1401,6 +1402,7 @@ function lightboxNav(dir) {
 }
 
 function closeLightbox() {
+  lightboxZoom.reset();
   els.lightbox.hidden = true;
   els.lightbox.querySelector('img').src = '';
 }
@@ -1408,6 +1410,14 @@ function closeLightbox() {
 let lightboxTouchX = 0;
 let lightboxTouchY = 0;
 let lightboxSwiped = false;
+
+// 画像のダブルタップで拡大、ドラッグで移動（生成画面と同じ。画像の上のタップは
+// この中で始末され、シングルタップで閉じる）。lightbox-zoom.js は後から足したので、
+// 古い HTML を掴んでいると script タグごと無い。falBoot に読み直しを任せ、
+// それまではズーム無しで進む（落ちると画面ぜんぶが動かなくなる）
+const lightboxZoom = window.falLightboxZoom
+  ? falLightboxZoom.attach(els.lightbox, { onTap: closeLightbox })
+  : (falBoot.requireShared(['falLightboxZoom']), { reset: () => {}, zoomed: false });
 
 function initLightbox() {
   for (const img of [els.resultImg, els.aiImg, els.cropImg, els.overlayImg]) {
@@ -1426,6 +1436,7 @@ function initLightbox() {
     lightboxTouchY = e.touches[0].clientY;
   }, { passive: true });
   els.lightbox.addEventListener('touchend', (e) => {
+    if (lightboxZoom.zoomed) return; // ズーム中の指の動きは画像を動かすためのもの
     const dx = e.changedTouches[0].clientX - lightboxTouchX;
     const dy = e.changedTouches[0].clientY - lightboxTouchY;
     if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
