@@ -185,7 +185,7 @@
         <select id="sessionModel"></select>
       </label>
       <label class="field num-field scale-field">
-        <span class="label">LoRA scale</span>
+        <span class="label">参加 LoRA の scale</span>
         <input id="sessionScale" type="number" min="0" max="2" step="0.05" value="1">
       </label>
     </div>
@@ -200,7 +200,16 @@
     </label>
 
     <div class="field">
-      <span class="label">参加チェックポイント（LoRA ライブラリから選択）</span>
+      <span class="label">全員に付ける LoRA（共通・任意）</span>
+      <div id="commonLoraList" class="common-lora-list"></div>
+      <div class="plist-actions">
+        <button id="addCommonLoraBtn" class="ghost-btn small" type="button">＋ 共通 LoRA を追加</button>
+      </div>
+      <div class="hint">ここに置いた LoRA は全参加者に同じ強さで付きます。A+B と A のみを比べるときは、ここに A を置き、下で B と「共通 LoRA だけの参加者」を選びます。</div>
+    </div>
+
+    <div class="field">
+      <span class="label">参加チェックポイント（LoRA ライブラリから選択。1 つ = 1 参加者）</span>
       <div class="range-row">
         <select id="rangeStart"></select>
         <span class="range-tilde">〜</span>
@@ -213,7 +222,11 @@
         <span id="plistCount" class="meta"></span>
       </div>
       <div id="plist" class="plist"></div>
-      <div class="hint">2 つの LoRA を「範囲を選択」で指定すると、名前順（バージョン番号順）でその間にあるチェックポイントもすべて個別の参加者として選択されます。</div>
+      <label class="check-row baseline-row">
+        <input id="includeBaseline" type="checkbox">
+        <span id="includeBaselineLabel">LoRA なしの参加者も入れる</span>
+      </label>
+      <div class="hint">共通 LoRA があるときは、選んだ LoRA がその上に乗ります（強さは上の「LoRA scale」）。2 つの LoRA を「範囲を選択」で指定すると、名前順（バージョン番号順）でその間にあるチェックポイントもすべて個別の参加者として選択されます。</div>
     </div>
 
     <div id="sessionDialogError" class="error" hidden></div>

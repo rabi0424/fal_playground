@@ -132,6 +132,9 @@ function baseKind(base) {
   // qwen / krea より先に見る。Klein のテキストエンコーダは Qwen3-VL なので、
   // "Flux.3 Klein (Qwen3 TE)" のような表記を Qwen と取り違えないため
   if (/flux[\s._-]*3(?!\d)/.test(s)) return 'flux3klein';
+  // MOSS-Image（OpenMOSS）。テキストエンコーダが Qwen3.5 なので、Klein と同じ理由で
+  // qwen より先に見る（"MOSS-Image (Qwen3.5)" を Qwen と取り違えないため）
+  if (s.includes('moss')) return 'mossimage';
   // **Qwen-Image 2.1 は Qwen-Image（20B）とは別アーキテクチャ**で、LoRA に
   // 互換は無い。"qwen" だけで見ると同じ枠に混ざって、効かない LoRA が候補に
   // 出てしまうので、先に 2.1 を判定する。
@@ -143,13 +146,13 @@ function baseKind(base) {
   return 'other';
 }
 
-const BASE_LABELS = { qwen: 'Qwen', krea2: 'Krea 2', wan: 'Wan', qwen21: 'Qwen-Image 2.1', flux3klein: 'FLUX 3 Klein', other: 'その他' };
+const BASE_LABELS = { qwen: 'Qwen', krea2: 'Krea 2', wan: 'Wan', qwen21: 'Qwen-Image 2.1', flux3klein: 'FLUX 3 Klein', mossimage: 'MOSS-Image', other: 'その他' };
 
 // 画面に出すベースモデルの種類。**一覧を持つ場所をここ以外に作らないこと。**
 // 以前 hf-import.js が独自に 3 つ固定で持っていて、Qwen-Image 2.1 を足したときに
 // 候補から漏れ、<select> が黙って「指定しない」へ落ちてベースモデル無しで
 // 登録される不具合になった。'other' は分類の受け皿で、選ばせるものではないので出さない
-const BASE_KINDS = ['krea2', 'qwen', 'qwen21', 'flux3klein', 'wan'];
+const BASE_KINDS = ['krea2', 'qwen', 'qwen21', 'flux3klein', 'mossimage', 'wan'];
 
 // 選択肢に selected を必ず含める。<select> は一致する option が無い値を
 // 代入されると空へ落ちるので、補わないと既存の値が黙って消える。

@@ -2484,6 +2484,18 @@ a.ghost-btn {
 
 .scale-field { max-width: 110px; }
 
+/* 全員に付ける LoRA（共通）の行: LoRA の選択 + scale + 削除 */
+.common-lora-list { display: flex; flex-direction: column; gap: 6px; }
+.common-lora-list:empty { display: none; }
+.common-lora-row { display: flex; align-items: center; gap: 8px; }
+.common-lora-row select { flex: 1; min-width: 0; }
+.common-lora-row input[type="number"] { width: 72px; flex-shrink: 0; }
+.common-lora-row button { flex-shrink: 0; }
+
+/* 共通 LoRA に置いたものは上乗せの候補から外す（同じ LoRA を 2 回付けない） */
+.plist label.plist-common { opacity: 0.45; cursor: default; }
+.baseline-row { margin-top: 8px; font-size: 13px; }
+
 @media (max-width: 430px) {
   .arena-main { padding: 16px; }
   .vote-pair { gap: 8px; }

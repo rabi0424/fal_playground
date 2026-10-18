@@ -24,8 +24,10 @@
 // - loraBase: 参加チェックポイントの候補を絞るベースモデル
 // - ckpt: セッションで UNet（チェックポイント）を指定できる版
 // - cfgMax: ガイダンスの上限（Krea 2 Turbo は蒸留版なので 0〜1）
+// - maxLoras: 1 枚に付けられる LoRA の数（共通 LoRA + 上乗せ 1 つ）。Modal は
+//   MODAL_MAX_LORAS、カスタム（fal）は分からないので確かめない
 const ARENA_MODELS = [
-  { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA（fal）', loraBase: 'krea2' },
+  { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA（fal）', loraBase: 'krea2', maxLoras: 3 },
   { id: 'modal/krea2-turbo-exp', name: 'Krea 2 [turbo] 自前ホスト（Modal 実験版）', provider: 'modal', endpoint: 'exp', loraBase: 'krea2', cfgMax: 1 },
   { id: 'modal/krea2-turbo-gpusnap', name: 'Krea 2 [turbo] 自前ホスト（Modal GPUスナップ版）', provider: 'modal', endpoint: 'gpusnap', loraBase: 'krea2', cfgMax: 1 },
   { id: 'modal/krea2-turbo', name: 'Krea 2 [turbo] 自前ホスト（Modal 本番）', provider: 'modal', endpoint: 'prod', loraBase: 'krea2', cfgMax: 1 },
@@ -37,6 +39,8 @@ const ARENA_MODELS = [
   // FLUX 3 Image Klein。steps / cfg を空欄にすると、サーバーがチェックポイントに
   // 合った既定（蒸留版 16 / 1、Base 50 / 3.5）を選ぶ
   { id: 'modal/flux-3-image-klein', name: 'FLUX 3 Image Klein 自前ホスト（Modal）', provider: 'modal', endpoint: 'klein', loraBase: 'flux3klein', ckpt: true, ckptBase: 'flux3klein', defaultCkpt: 'flux3_image_klein_sd_bf16.safetensors', cfgMax: 10 },
+  // MOSS-Image。steps / cfg を空欄にすると、サーバーが本家の推奨（50 / 3）で回す
+  { id: 'modal/moss-image', name: 'MOSS-Image 自前ホスト（Modal）', provider: 'modal', endpoint: 'moss', loraBase: 'mossimage', ckpt: true, ckptBase: 'mossimage', defaultCkpt: 'moss_image_sft_bf16.safetensors', cfgMax: 10 },
   { id: '__custom__', name: 'カスタム…（fal）', loraBase: 'krea2' },
 ];
 
@@ -46,6 +50,7 @@ const DEFAULT_CKPTS = {
   krea2: 'Krea-2-Turbo-Q8_0.gguf',
   qwen21: 'qwen_image_2.1_Q8_0.gguf',
   flux3klein: 'flux3_image_klein_sd_bf16.safetensors',
+  mossimage: 'moss_image_sft_bf16.safetensors',
 };
 const DEFAULT_CKPT_BASE = 'krea2';
 
@@ -55,6 +60,9 @@ const DEFAULT_LORA_BASE = 'krea2';
 // サーバー側の打ち切り（30 分）に当たってしまうので、少しずつ流す。
 // 1 本走らせながら次を待たせておけばコンテナは温まったままなので、これで遅くならない
 const MODAL_ROUND_CONCURRENCY = 2;
+
+// modal_comfy の MAX_LORAS（1 リクエストに付けられる LoRA の上限）
+const MODAL_MAX_LORAS = 16;
 
 // app.js と同じ約 1MP のプリセット
 const SIZES = [
@@ -69,6 +77,8 @@ const SIZES = [
 const LS_LORAS = 'fal_lora_library';
 const LS_ARENA = 'fal_arena';
 const LS_CHART_ORDER = 'fal_arena_chart_order'; // グラフの並び順（'step' | 'elo'）
+const LS_FORM = 'fal_form_state'; // 生成画面（app.js）の入力状態。チェックポイントの初期値に使う（読むだけ）
+const CKPT_URL_OPTION = '__url__'; // app.js の LORA_URL_OPTION（「URL / ファイル名を入力…」）
 
 // 20〜30 件を並行ポーリングするため、本体（900ms）より間隔を空ける
 const POLL_INTERVAL_MS = 2000;
@@ -152,6 +162,10 @@ const els = {
   plistAllBtn: $('#plistAllBtn'),
   plistNoneBtn: $('#plistNoneBtn'),
   plistCount: $('#plistCount'),
+  commonLoraList: $('#commonLoraList'),
+  addCommonLoraBtn: $('#addCommonLoraBtn'),
+  includeBaseline: $('#includeBaseline'),
+  includeBaselineLabel: $('#includeBaselineLabel'),
   sessionDialogError: $('#sessionDialogError'),
   lightbox: $('#lightbox'),
   lightboxClose: $('#lightboxClose'),
@@ -289,7 +303,8 @@ function ckptLabel(path) {
 // {
 //   sessions: [{
 //     id, name, modelId, scale, createdAt,
-//     participants: [{ id, path, group }],
+//     commonLoras: [{ path, scale }],        // 全参加者に付ける LoRA（無ければ省略）
+//     participants: [{ id, path, group }],   // path: 上乗せする LoRA。null は「共通 LoRA のみ」
 //     groups: [{ id, name, prompt }],        // グループごとのプロンプト（最後に使ったもの）
 //     settings: { size, steps, guidance },   // 最後に使ったラウンド設定
 //     rounds: [{ id, prompt, seed, ts, status: 'generating'|'done',
@@ -326,16 +341,48 @@ function getSession(id) {
   return arena.sessions.find((s) => s.id === id) ?? null;
 }
 
+/* ---------- 参加者の LoRA ---------- */
+// 参加者 1 人 = 「共通 LoRA（全員に付ける）」+「上乗せする LoRA 1 つ」。A+B と A を
+// 比べたいときは、共通に A を置き、B の参加者と「共通のみ」（path: null）の参加者を
+// 作る。commonLoras を持たない古いセッションは、共通なし・全員 1 つずつのまま動く
+
+function commonLoras(session) {
+  return Array.isArray(session.commonLoras) ? session.commonLoras : [];
+}
+
+// 実際に付ける LoRA（共通が先、上乗せが後）
+function participantLoras(session, participant) {
+  const own = participant.path ? [{ path: participant.path, scale: session.scale }] : [];
+  return [...commonLoras(session), ...own];
+}
+
+// 一覧やグラフに出す名前。共通 LoRA があるときは上乗せ分だけを「＋B」と出す
+// （共通は全員同じなので、名前に入れても見分けの役に立たない）
+function participantLabel(session, participant) {
+  const hasCommon = commonLoras(session).length > 0;
+  if (!participant.path) return hasCommon ? '共通 LoRA のみ' : 'LoRA なし';
+  return hasCommon ? `＋${loraLabel(participant.path)}` : loraLabel(participant.path);
+}
+
+// title（マウスを載せたとき）に出す、実際に付ける LoRA の一覧
+function participantTitle(session, participant) {
+  const loras = participantLoras(session, participant);
+  if (loras.length === 0) return 'LoRA なし';
+  return loras.map((l) => `${loraLabel(l.path)} ×${l.scale}\n  ${l.path}`).join('\n');
+}
+
 function participantName(session, pid) {
   const p = session.participants.find((x) => x.id === pid);
-  return p ? loraLabel(p.path) : pid;
+  return p ? participantLabel(session, p) : pid;
 }
 
 // 同じ LoRA の別チェックポイント同士は名前の前半が共通で、肝心のステップ数は
 // 末尾にある。全参加者の共通プレフィックスを検出して「…0005000」のように
-// 末尾側を残した短縮名を作る（フル名は title で確認できる）
+// 末尾側を残した短縮名を作る（フル名は title で確認できる）。
+// 「共通のみ」の参加者は LoRA 名を持たないので、プレフィックスの計算から外す
 function participantShortNames(session) {
-  const names = session.participants.map((p) => loraLabel(p.path));
+  const withPath = session.participants.filter((p) => p.path);
+  const names = withPath.map((p) => loraLabel(p.path));
   let cut = 0;
   if (names.length >= 2) {
     let prefix = names[0];
@@ -349,10 +396,14 @@ function participantShortNames(session) {
       prefix.lastIndexOf('_'), prefix.lastIndexOf('-'), prefix.lastIndexOf('.'));
     cut = boundary >= 3 ? boundary + 1 : (prefix.length >= 4 ? prefix.length : 0);
   }
+  const plus = commonLoras(session).length > 0 ? '＋' : '';
   const map = {};
-  session.participants.forEach((p, i) => {
-    map[p.id] = cut > 0 && names[i].length > cut ? `…${names[i].slice(cut)}` : names[i];
+  withPath.forEach((p, i) => {
+    map[p.id] = cut > 0 && names[i].length > cut ? `${plus}…${names[i].slice(cut)}` : `${plus}${names[i]}`;
   });
+  for (const p of session.participants) {
+    if (!p.path) map[p.id] = participantLabel(session, p);
+  }
   return map;
 }
 
@@ -553,7 +604,7 @@ function buildRoundInput(session, round, participant) {
     num_images: 1,
     seed: round.seed,
     image_size: { width: size.width, height: size.height },
-    loras: [{ path: participant.path, scale: session.scale }],
+    loras: participantLoras(session, participant),
   };
   // Krea 2 は安全チェッカーを切り、高速化は使わずに送る（app.js と同じ。
   // 真っ黒な画像が返るのを避けるためと、品質を採るため）
@@ -583,7 +634,8 @@ function buildModalRoundInput(session, round, participant) {
     endpoint: sessionEndpoint(session),
     // LoRA は URL のまま渡す（名前だけに落とすと、別リポジトリから取り込んだものが
     // Modal 側で解決できず 404 になる）
-    loras: [{ name: loraLib.modalRef(participant.path), strength: session.scale }],
+    loras: participantLoras(session, participant)
+      .map((l) => ({ name: loraLib.modalRef(l.path), strength: l.scale })),
   };
   if (round.settings?.steps !== '' && round.settings?.steps != null) {
     input.steps = Number(round.settings.steps);
@@ -852,10 +904,11 @@ async function finalizeRound(session, round) {
 
   const variants = session.participants.map((p) => {
     const res = round.results[p.id] ?? { error: '未生成' };
-    const loras = [{ path: p.path, scale: session.scale }];
+    // 生成画面の比較と同じ形（共通 LoRA は record.common、参加者ごとの分は ownLoras）
+    const ownLoras = p.path ? [{ path: p.path, scale: session.scale }] : [];
     return {
-      ownLoras: loras,
-      loras,
+      ownLoras,
+      loras: participantLoras(session, p),
       images: res.url ? [{ url: res.url, width: res.width, height: res.height }] : [],
       seed: round.seed,
       elapsed: null,
@@ -872,7 +925,7 @@ async function finalizeRound(session, round) {
     model: session.modelId,
     prompt: round.prompt,
     seed: round.seed,
-    common: [],
+    common: commonLoras(session),
     variants,
     arena: { sessionId: session.id, sessionName: session.name, roundId: round.id },
   };
@@ -1117,9 +1170,13 @@ function renderSessionHead(session) {
   const groups = activeGroups(session);
   const groupText = groups.length > 1 ? ` ・ ${groups.length} グループ` : '';
   const ckptText = session.checkpoint ? ` ・ UNet ${ckptLabel(session.checkpoint)}` : '';
+  const common = commonLoras(session);
+  const commonText = common.length
+    ? ` ・ 共通 LoRA ${common.map((l) => `${loraLabel(l.path)} ×${l.scale}`).join(' + ')}`
+    : '';
   els.sessionMeta.textContent =
     `${session.modelId} ・ ${session.participants.length} チェックポイント${groupText}`
-    + ` ・ scale ${session.scale}${ckptText}`;
+    + ` ・ scale ${session.scale}${commonText}${ckptText}`;
 }
 
 function renderSessionBody(session) {
@@ -1173,7 +1230,7 @@ function renderLeaderboard(session) {
     const name = document.createElement('td');
     name.className = 'lb-name';
     name.textContent = shortNames[p.id];
-    name.title = `${loraLabel(p.path)}\n${p.path}`;
+    name.title = participantTitle(session, p);
     // グループ分けしているときは、どの系統の成績なのかが分からないと読めない
     if (multiGroup) {
       const group = groupOf(session, p);
@@ -1242,7 +1299,7 @@ function renderEloChart(session, matches, ratings, stats, shortNames) {
       return {
         id: p.id,
         label: shortNames[p.id],
-        title: loraLabel(p.path),
+        title: participantTitle(session, p),
         elo: ratings[p.id],
         lo: bands?.[p.id]?.lo ?? null,
         hi: bands?.[p.id]?.hi ?? null,
@@ -1411,13 +1468,13 @@ function renderRounds(session) {
           const img = document.createElement('img');
           img.loading = 'lazy';
           img.src = res.url;
-          img.alt = loraLabel(p.path);
+          img.alt = participantLabel(session, p);
           img.addEventListener('click', () => openLightbox(res.url));
           cell.appendChild(img);
           const label = document.createElement('div');
           label.className = 'name';
           label.textContent = shortNames[p.id];
-          label.title = `${loraLabel(p.path)}\n${p.path}`;
+          label.title = participantTitle(session, p);
           cell.appendChild(label);
           grid.appendChild(cell);
         }
@@ -1531,7 +1588,7 @@ function renderGroupDialog(session) {
     session.participants.forEach((p, i) => {
       const opt = document.createElement('option');
       opt.value = String(i);
-      opt.textContent = loraLabel(p.path);
+      opt.textContent = participantLabel(session, p);
       select.appendChild(opt);
     });
     select.value = value;
@@ -1558,8 +1615,8 @@ function renderGroupDialog(session) {
     const row = document.createElement('label');
     const name = document.createElement('span');
     name.className = 'plist-name';
-    name.textContent = loraLabel(p.path);
-    name.title = p.path;
+    name.textContent = participantLabel(session, p);
+    name.title = participantTitle(session, p);
     row.appendChild(name);
 
     const select = document.createElement('select');
@@ -1639,7 +1696,78 @@ function dialogSetError(text) {
 
 function updatePlistCount() {
   const n = els.plist.querySelectorAll('input:checked').length;
-  els.plistCount.textContent = `${n} 個を選択中`;
+  const extra = els.includeBaseline.checked ? ` ＋ ${els.includeBaselineLabel.dataset.short}` : '';
+  els.plistCount.textContent = `${n} 個を選択中${extra}`;
+}
+
+// 全員に付ける LoRA（共通）の 1 行。候補は参加者の一覧と同じ（モデルの系統に合うもの）
+function addCommonLoraRow(path = '', scale = 1) {
+  const row = document.createElement('div');
+  row.className = 'common-lora-row';
+  const select = document.createElement('select');
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = '（LoRA を選択）';
+  select.appendChild(none);
+  for (const item of sortedLoraLibrary(els.plist.dataset.base)) {
+    const opt = document.createElement('option');
+    opt.value = item.path;
+    opt.textContent = loraLabel(item.path);
+    opt.title = item.path;
+    select.appendChild(opt);
+  }
+  select.value = path;
+  const scaleInput = document.createElement('input');
+  scaleInput.type = 'number';
+  scaleInput.min = '0';
+  scaleInput.max = '2';
+  scaleInput.step = '0.05';
+  scaleInput.value = String(scale);
+  scaleInput.title = 'この LoRA の強さ（全参加者で同じ）';
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'ghost-btn small';
+  del.textContent = '✕';
+  del.title = 'この共通 LoRA を外す';
+  del.addEventListener('click', () => { row.remove(); syncCommonLoras(); });
+  select.addEventListener('change', syncCommonLoras);
+  row.append(select, scaleInput, del);
+  els.commonLoraList.appendChild(row);
+  syncCommonLoras();
+  return row;
+}
+
+// 共通 LoRA の一覧（未選択の行は無視、同じ LoRA は 1 つにまとめる）
+function collectCommonLoras() {
+  const out = [];
+  for (const row of els.commonLoraList.querySelectorAll('.common-lora-row')) {
+    const path = row.querySelector('select').value;
+    if (!path || out.some((l) => l.path === path)) continue;
+    const scale = Number(row.querySelector('input').value);
+    out.push({ path, scale: Number.isFinite(scale) && scale >= 0 ? scale : 1 });
+  }
+  return out;
+}
+
+// 共通に置いた LoRA は上乗せの候補から外し、「共通のみ」の文言を合わせる
+function syncCommonLoras() {
+  const common = new Set(collectCommonLoras().map((l) => l.path));
+  for (const cb of els.plist.querySelectorAll('input[type="checkbox"]')) {
+    const inCommon = common.has(cb.value);
+    if (inCommon) cb.checked = false;
+    cb.disabled = inCommon;
+    cb.closest('label').classList.toggle('plist-common', inCommon);
+    cb.closest('label').title = inCommon ? '共通 LoRA に置いているので、上乗せの候補からは外しています' : '';
+  }
+  const label = els.includeBaselineLabel;
+  if (common.size > 0) {
+    label.textContent = '共通 LoRA だけ（上乗せなし）の参加者も入れる';
+    label.dataset.short = '共通のみ 1 人';
+  } else {
+    label.textContent = 'LoRA なしの参加者も入れる';
+    label.dataset.short = 'LoRA なし 1 人';
+  }
+  updatePlistCount();
 }
 
 // いま選ばれているモデル（カスタムは fal 扱い）
@@ -1679,10 +1807,26 @@ function renderPlist(base) {
   return lib;
 }
 
-// チェックポイント指定版で使う UNet の候補（登録は生成画面で行う）
+// 生成画面でそのモデルに使っているチェックポイント（app.js がモデルごとに覚えている値）。
+// 生成画面で選んだものとアリーナの既定が食い違わないよう、セッションの初期値にする。
+// 空文字は「既定」（サーバーの既定）。生成画面でまだ使っていないモデルは null
+function generateScreenCkpt(modelId) {
+  let state;
+  try { state = JSON.parse(falStore.get(LS_FORM)); } catch { return null; }
+  if (!state) return null;
+  // byModel を持たない旧形式は、フラットな値が「そのときのモデルの分」
+  const per = state.byModel?.[modelId] ?? (state.model === modelId ? state : null);
+  if (!per) return null;
+  if (per.ckptSelect === CKPT_URL_OPTION) return String(per.ckptPath ?? '').trim();
+  return typeof per.ckptSelect === 'string' ? per.ckptSelect : '';
+}
+
+// チェックポイント指定版で使う UNet の候補（登録は生成画面で行う）。
+// 初期値は生成画面でそのモデルに使っているもの
 function populateSessionCkpt(model) {
   const base = model.ckptBase ?? DEFAULT_CKPT_BASE;
-  const prev = els.sessionCkpt.value;
+  const fromGenerate = generateScreenCkpt(model.id);
+  const prev = fromGenerate ?? '';
   els.sessionCkpt.innerHTML = '';
   const defOpt = document.createElement('option');
   defOpt.value = '';
@@ -1704,8 +1848,18 @@ function populateSessionCkpt(model) {
     opt.title = item.path;
     els.sessionCkpt.appendChild(opt);
   }
+  // 生成画面で直接入力したファイル名・URL や、非表示にした登録など、候補に無いものは足す
+  if (prev && ![...els.sessionCkpt.options].some((o) => o.value === prev)) {
+    const opt = document.createElement('option');
+    opt.value = prev;
+    opt.textContent = ckptLabel(prev);
+    opt.title = prev;
+    els.sessionCkpt.appendChild(opt);
+  }
+  // どれが生成画面と同じかを分かるようにする（生成画面で使ったことのあるモデルだけ）
+  const same = fromGenerate !== null && [...els.sessionCkpt.options].find((o) => o.value === prev);
+  if (same) same.textContent += '（生成画面で使用中）';
   els.sessionCkpt.value = prev;
-  if (els.sessionCkpt.value !== prev) els.sessionCkpt.value = '';
 }
 
 // モデルを変えると、使える LoRA もチェックポイントも変わる
@@ -1718,7 +1872,10 @@ function syncSessionModelFields() {
   const base = model?.loraBase ?? DEFAULT_LORA_BASE;
   if (els.plist.dataset.base !== base) {
     els.plist.dataset.base = base;
+    // 系統が変わると共通 LoRA の候補も変わる（別系統の LoRA は効かない）ので空に戻す
+    els.commonLoraList.innerHTML = '';
     const lib = renderPlist(base);
+    syncCommonLoras();
     dialogSetError(lib.length === 0
       ? 'このモデルの系統に合う LoRA がライブラリにありません。生成画面の「Hugging Face から一括登録」などで登録してください。'
       : '');
@@ -1732,7 +1889,7 @@ function openSessionDialog() {
   populateSessionModels('');
   els.sessionModel.selectedIndex = 0; // ★ を付けたものが先頭に来る
   els.sessionCustomModel.value = '';
-  els.sessionCkpt.value = '';
+  els.includeBaseline.checked = false;
   delete els.plist.dataset.base; // モデルが同じでも一覧は作り直す（登録が増えている）
   syncSessionModelFields();
   els.sessionDialog.showModal();
@@ -1746,7 +1903,7 @@ function applyRangeSelection() {
   const [lo, hi] = a <= b ? [a, b] : [b, a];
   for (const cb of els.plist.querySelectorAll('input[type="checkbox"]')) {
     const i = Number(cb.dataset.index);
-    if (i >= lo && i <= hi) cb.checked = true;
+    if (i >= lo && i <= hi && !cb.disabled) cb.checked = true;
   }
   updatePlistCount();
 }
@@ -1760,13 +1917,24 @@ function createSessionFromDialog() {
     return false;
   }
   const paths = [...els.plist.querySelectorAll('input:checked')].map((cb) => cb.value);
-  if (paths.length < 2) {
-    dialogSetError('チェックポイントを 2 つ以上選択してください');
+  const common = collectCommonLoras();
+  const baseline = els.includeBaseline.checked;
+  if (paths.length + (baseline ? 1 : 0) < 2) {
+    dialogSetError(baseline
+      ? `チェックポイントをもう 1 つ以上選択してください（${els.includeBaselineLabel.dataset.short}と比べる相手）`
+      : 'チェックポイントを 2 つ以上選択してください');
     return false;
   }
   const scale = Number(els.sessionScale.value);
 
   const model = dialogModel();
+  // 1 枚に付ける LoRA の数 = 共通 + 上乗せ 1 つ。カスタム（fal）は上限が分からないので見ない
+  const limit = model?.provider === 'modal' ? MODAL_MAX_LORAS : (model?.maxLoras ?? null);
+  const perImage = common.length + (paths.length > 0 ? 1 : 0);
+  if (limit != null && perImage > limit) {
+    dialogSetError(`1 枚に付く LoRA が ${perImage} 個（共通 ${common.length} + 上乗せ 1）ですが、このモデルは最大 ${limit} 個までです。共通 LoRA を減らしてください`);
+    return false;
+  }
   const session = {
     id: makeId('s'),
     name: els.sessionName.value.trim() || 'セッション',
@@ -1778,7 +1946,12 @@ function createSessionFromDialog() {
     ...(model?.ckpt && els.sessionCkpt.value ? { checkpoint: els.sessionCkpt.value } : {}),
     scale: Number.isFinite(scale) && scale > 0 ? scale : 1,
     createdAt: Date.now(),
-    participants: paths.map((path, i) => ({ id: `p${i + 1}`, path })),
+    ...(common.length ? { commonLoras: common } : {}),
+    participants: [
+      ...paths.map((path, i) => ({ id: `p${i + 1}`, path })),
+      // 共通 LoRA だけ（共通が無ければ LoRA なし）の参加者。上乗せの効き目を見る基準
+      ...(baseline ? [{ id: `p${paths.length + 1}`, path: null }] : []),
+    ],
     settings: { size: SIZES[0].value, steps: '', guidance: '' },
     rounds: [],
     matches: [],
@@ -1812,7 +1985,7 @@ function initSessionDialog() {
 
   els.rangeAddBtn.addEventListener('click', applyRangeSelection);
   els.plistAllBtn.addEventListener('click', () => {
-    for (const cb of els.plist.querySelectorAll('input')) cb.checked = true;
+    for (const cb of els.plist.querySelectorAll('input')) cb.checked = !cb.disabled;
     updatePlistCount();
   });
   els.plistNoneBtn.addEventListener('click', () => {
@@ -1820,6 +1993,8 @@ function initSessionDialog() {
     updatePlistCount();
   });
   els.plist.addEventListener('change', updatePlistCount);
+  els.includeBaseline.addEventListener('change', updatePlistCount);
+  els.addCommonLoraBtn.addEventListener('click', () => addCommonLoraRow());
 
   // 「作成」は検証に通ったときだけ閉じる
   $('#createSessionBtn').addEventListener('click', (e) => {

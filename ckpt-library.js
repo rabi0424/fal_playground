@@ -19,7 +19,7 @@
 
 const LS_CKPTS = 'fal_ckpt_library';
 const DEFAULT_BASE = 'krea2';
-const BASE_LABELS = { krea2: 'Krea 2', qwen21: 'Qwen-Image 2.1', flux3klein: 'FLUX 3 Klein' };
+const BASE_LABELS = { krea2: 'Krea 2', qwen21: 'Qwen-Image 2.1', flux3klein: 'FLUX 3 Klein', mossimage: 'MOSS-Image' };
 
 let onChange = null;
 
@@ -93,6 +93,11 @@ const BUILTINS = {
   flux3klein: [
     { path: 'flux3_image_klein_sd_bf16.safetensors', name: 'flux3_image_klein_sd_bf16.safetensors（蒸留版・16 ステップ）' },
     { path: 'flux3_image_klein_bf16.safetensors', name: 'flux3_image_klein_bf16.safetensors（Base・50 ステップ / cfg 3.5）' },
+  ],
+  // MOSS-Image。SFT と Base で steps / cfg の既定は変わらない（どちらも 50 / 3）。既定は SFT
+  mossimage: [
+    { path: 'moss_image_sft_bf16.safetensors', name: 'moss_image_sft_bf16.safetensors（SFT・普段使い）' },
+    { path: 'moss_image_base_bf16.safetensors', name: 'moss_image_base_bf16.safetensors（Base・LoRA 学習の土台）' },
   ],
 };
 

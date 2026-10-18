@@ -439,10 +439,21 @@ test('ルーティング: endpoint フィールドで URL を選び、未知の�
   await post('/api/krea2/generate', { ...base, jobId: '6'.repeat(32), endpoint: 'unified' });
   assert.equal(seen.at(-1)[2], 'https://rabitteru--krea2-qwen21-api-comfyapi-krea2-generate.modal.run');
 
+  // MOSS-Image。これも**別アプリ**（krea2-qwen21-moss-api）に向く
+  await post('/api/krea2/generate', { ...base, jobId: '8'.repeat(32), endpoint: 'moss' });
+  assert.equal(seen.at(-1)[2],
+    'https://rabitteru--krea2-qwen21-moss-api-comfyapi-moss-generate.modal.run');
+  assert.deepEqual(seen.at(-1).slice(3), ['generate', 'moss']);
+  // steps / cfg はサーバーが本家の推奨（50 / 3）で補うので、こちらでは足さない
+  assert.equal(seen.at(-1)[1].steps, undefined);
+  assert.equal(seen.at(-1)[1].cfg, undefined);
+  assert.equal(seen.at(-1)[1].endpoint, undefined, 'endpoint は Modal に転送しない');
+
   // 環境変数で上書きできる
   const envOverride = {
     ...env,
     KLEIN_ENDPOINT_GENERATE: 'https://override--klein-generate.modal.run',
+    MOSS_ENDPOINT_GENERATE: 'https://override--moss-generate.modal.run',
   };
   await mod.default.fetch(new Request('https://app/api/krea2/generate', {
     method: 'POST',
@@ -450,6 +461,12 @@ test('ルーティング: endpoint フィールドで URL を選び、未知の�
     body: JSON.stringify({ ...base, jobId: '7'.repeat(32), endpoint: 'klein' }),
   }), envOverride);
   assert.equal(seen.at(-1)[2], 'https://override--klein-generate.modal.run');
+  await mod.default.fetch(new Request('https://app/api/krea2/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...base, jobId: '9'.repeat(32), endpoint: 'moss' }),
+  }), envOverride);
+  assert.equal(seen.at(-1)[2], 'https://override--moss-generate.modal.run');
 });
 
 test('参照画像編集: qwen21 は images 配列で振り分け、image/mask は要求しない', async () => {
@@ -696,6 +713,8 @@ test('ウォーム: 使い終わった時刻を控え、同じコンテナの相
   // FLUX 3 Klein は別アプリ（krea2-qwen21-klein-api）なので統合版とは共有しない
   assert.equal(warm.klein, undefined);
   assert.equal(warm['klein-edit'], undefined);
+  // MOSS-Image も別アプリ（krea2-qwen21-moss-api）
+  assert.equal(warm.moss, undefined);
 
   // 編集（wan-edit）を流すと Wan の生成側もウォームになる
   await stub.startKrea2Job('c'.repeat(32), {
@@ -716,6 +735,17 @@ test('ウォーム: 使い終わった時刻を控え、同じコンテナの相
   assert.equal(warm3.klein, warm3['klein-edit']);
   assert.equal(warm3.unified, warm.unified, '統合版のウォームは動かない');
   assert.ok(warm3.klein > warm3.unified);
+  assert.equal(warm3.moss, undefined, 'Klein を流しても MOSS-Image は温まらない');
+
+  // MOSS-Image は単独の組。流すと自分だけが温まる
+  await new Promise((r) => setTimeout(r, 5));
+  await stub.startKrea2Job('e'.repeat(32), { prompt: 'w' },
+    'https://x--y.modal.run/moss-generate', 'generate', 'moss');
+  await runAlarms(stub, storage);
+  const warm4 = await stub.getWarm();
+  assert.ok(warm4.moss > warm3.klein);
+  assert.equal(warm4.klein, warm3.klein, 'MOSS-Image を流しても Klein は動かない');
+  assert.equal(warm4.unified, warm.unified);
 });
 
 /*

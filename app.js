@@ -30,6 +30,9 @@ const MODAL_QWEN21_ID = 'modal/qwen-image-2.1';
 // **本番の統合版とは別の Modal アプリ（krea2-qwen21-klein-api）**に載っていて、
 // 上の Krea 2 / Qwen 2.1 とはコンテナを共有しない（そちらはまだ旧アプリを向いている）
 const MODAL_FLUX3_KLEIN_ID = 'modal/flux-3-image-klein';
+// MOSS-Image（modal_comfy の krea2_qwen_app の moss_generate）。Klein と同じく
+// **本番の統合版とは別の Modal アプリ（krea2-qwen21-moss-api）**に載っている
+const MODAL_MOSS_IMAGE_ID = 'modal/moss-image';
 
 const MODELS = [
   // safetyChecker: fal 側の安全チェッカー（enable_safety_checker）を持つモデル。常に切って送る
@@ -59,6 +62,10 @@ const MODELS = [
   // 空欄ならキーごと落として送るので（buildModalInput）、サーバーがチェックポイントに
   // 合った既定を選ぶ。Krea 2 の 8 ステップのような既定値をこちらで埋めないこと
   { id: MODAL_FLUX3_KLEIN_ID, name: 'FLUX 3 Image Klein 自前ホスト（Modal）', sizeParam: 'image_size', lora: true, loraBase: 'flux3klein', maxLoras: 16, provider: 'modal', modalEndpoint: 'klein', ckpt: true, ckptBase: 'flux3klein', defaultCkpt: 'flux3_image_klein_sd_bf16.safetensors', sampler: true, defaultSampler: 'euler', cfgMax: 10, stepsHint: '蒸留版 16 / Base 50（チェックポイントで既定が変わる）', cfgHint: '蒸留版 1 / Base 3.5（チェックポイントで既定が変わる）' },
+  // moss: MOSS-Image。**SFT と Base は蒸留版 / Base の関係ではない**（SFT は品質の
+  // 追加学習）ので、steps / cfg の既定はどちらも 50 / 3（本家の推奨）。cfg を掛ける
+  // 前提なので 1 枚が重い。スケジューラは公式ワークフローの sgm_uniform が既定
+  { id: MODAL_MOSS_IMAGE_ID, name: 'MOSS-Image 自前ホスト（Modal）', sizeParam: 'image_size', lora: true, loraBase: 'mossimage', maxLoras: 16, provider: 'modal', modalEndpoint: 'moss', ckpt: true, ckptBase: 'mossimage', defaultCkpt: 'moss_image_sft_bf16.safetensors', sampler: true, defaultSampler: 'euler', defaultScheduler: 'sgm_uniform', cfgMax: 10, stepsHint: '50（本家の推奨。SFT / Base 共通）', cfgHint: '3（本家の推奨。1 より上は約2倍遅い）' },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -133,6 +140,8 @@ const DEFAULT_CKPTS = {
   qwen21: 'qwen_image_2.1_Q8_0.gguf',
   // 蒸留版（_sd_）。Base（flux3_image_klein_bf16.safetensors）は組み込みの候補から選べる
   flux3klein: 'flux3_image_klein_sd_bf16.safetensors',
+  // SFT（普段使い）。Base（moss_image_base_bf16.safetensors）は組み込みの候補から選べる
+  mossimage: 'moss_image_sft_bf16.safetensors',
 };
 const DEFAULT_CKPT_BASE = 'krea2';
 
@@ -2188,7 +2197,7 @@ async function runModalJobFrom(job) {
     }
     entry.result = {
       url: r.url, seed: r.seed, elapsedMs: r.elapsedMs ?? null, execMs: r.execMs ?? null,
-      // 当たらなかった LoRA のキーの数（FLUX 3 Klein が返す。合わない LoRA は
+      // 当たらなかった LoRA のキーの数（FLUX 3 Klein / MOSS-Image が返す。合わない LoRA は
       // エラーにならず黙って無視されるので、結果の下に出して気づけるようにする）
       ...(r.loraKeyMisses > 0 ? { loraKeyMisses: r.loraKeyMisses } : {}),
     };
