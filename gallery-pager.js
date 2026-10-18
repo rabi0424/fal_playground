@@ -14,6 +14,7 @@
  * サーバー側にも続きがあるときは setHasMore(true) を渡しておく。末尾まで並べ切って
  * なお続きがあれば onNeedMore が呼ばれるので、呼び出し側が次のページを取って
  * render し直す（取得中に何度も呼ばれないよう、呼び出し側で番をすること）。
+ * 前の配列の後ろに足しただけの render は、並べたカードを作り直さずに続きを足す。
  *
  *   const pager = falGallery.create(el, (record) => 要素を作って返す, { onNeedMore });
  *   pager.render(records);      // 並べ直す（並べていた件数は保つ）
@@ -60,6 +61,11 @@ function create(container, buildItem, opts = {}) {
     // 手元に続きがあるか、サーバー側に続きがあるうちは番人を置いたままにする
     if (shown < records.length || hasMore) {
       container.appendChild(sentinel); // 追記のたびに末尾へ動かす
+      // **観測し直す。** IntersectionObserver は見え方が「変わった」ときしか知らせない。
+      // 一番下に居たまま続きが届き、足したあとも番人が見えたままだと何も来ず、
+      // 少し戻ってスクロールし直すまで止まって見えていた。observe() し直すと
+      // その時点の見え方を 1 回知らせてくるので、見えていればそのまま続きを足せる
+      io.unobserve(sentinel);
       io.observe(sentinel);
     } else {
       io?.unobserve(sentinel);
@@ -82,13 +88,28 @@ function create(container, buildItem, opts = {}) {
       append(Math.min(target, records.length));
       return;
     }
-    // 手元のぶんは並べ切った。続きは呼び出し側に取ってきてもらう
-    if (hasMore) onNeedMore?.();
+    // 手元のぶんは並べ切った。続きは呼び出し側に取ってきてもらう。
+    // 届いたら 1 ページぶんをすぐ出せるよう、並べたい件数を先に広げておく
+    //（広げておかないと、届いても次に末尾が見えるまで出てこない）
+    if (hasMore) {
+      target = Math.max(target, shown + pageSize);
+      onNeedMore?.();
+    }
   }
 
   return {
     render(list) {
-      records = Array.isArray(list) ? list : [];
+      const next = Array.isArray(list) ? list : [];
+      // 続きのページが届いただけ（並べたぶんがそのまま先頭に残り、後ろが伸びた）なら、
+      // 作り直さずに足す。全部作り直すとサムネが読み込み直しになり、高さが一瞬
+      // 崩れてスクロール位置も揺れる
+      const extended = io && shown > 0 && next.length > records.length
+        && records.every((r, i) => next[i] === r);
+      records = next;
+      if (extended) {
+        append(Math.min(Math.max(target, pageSize), records.length));
+        return;
+      }
       container.innerHTML = '';
       shown = 0;
       // 未対応環境では全件。対応環境では、それまでに広げたぶんを保つ

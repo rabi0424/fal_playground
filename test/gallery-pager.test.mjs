@@ -9,6 +9,10 @@
 //   - reset() で先頭 1 ページぶんに戻ること（絞り込みが変わったとき）
 //   - ensure() で未描画の位置まで広げられること（キーでの前後移動）
 //   - IntersectionObserver が無い環境では全件並べること（従来どおり）
+//   - サーバーから続きのページが届いたら、作り直さずに後ろへ足すこと
+//   - 末尾に居たまま続きが届いても止まらないこと（番人が見えっぱなしだと
+//     IntersectionObserver は「変化」が無いので知らせてこない。以前はここで途切れ、
+//     少し戻ってスクロールし直すと続きが出ていた）
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 
@@ -62,16 +66,30 @@ const document = {
   createDocumentFragment: () => new El('#fragment'),
 };
 
-// 観測対象と、テストから叩くための発火口だけを持つ
+// 観測対象と、テストから叩くための発火口を持つ。
+// 本物と同じく、**新しく observe() した要素はそのときの見え方を 1 回知らせる**
+// （非同期なので flush() で配る）。見えっぱなしの要素は、それ以外では知らせない
 function makeIo() {
   const observed = new Set();
   let fire = () => {};
+  let pending = false;
+  const state = { visible: false }; // 番人が画面（+ rootMargin）内にあるか
   class IntersectionObserver {
     constructor(cb) { this.cb = cb; fire = () => this.cb([{ isIntersecting: true }]); }
-    observe(el) { observed.add(el); }
+    observe(el) {
+      if (!observed.has(el)) pending = true;
+      observed.add(el);
+    }
     unobserve(el) { observed.delete(el); }
   }
-  return { IntersectionObserver, observed, fire: () => fire() };
+  // observe() 直後の初回通知を配る（見えていれば isIntersecting: true）
+  const flush = () => {
+    if (!pending) return false;
+    pending = false;
+    if (state.visible && observed.size > 0) fire();
+    return true;
+  };
+  return { IntersectionObserver, observed, fire: () => fire(), flush, state };
 }
 
 function load(withIo = true) {
@@ -94,7 +112,7 @@ function shownIds(container) {
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
-function setup(count, withIo = true) {
+function setup(count, withIo = true, opts = {}) {
   const { falGallery, io } = load(withIo);
   const container = new El('div');
   const built = [];
@@ -103,9 +121,10 @@ function setup(count, withIo = true) {
     const el = new El('div');
     el.id = record.id;
     return el;
-  });
-  pager.render(records(count));
-  return { pager, container, io, built };
+  }, opts);
+  const list = records(count);
+  pager.render(list);
+  return { pager, container, io, built, list };
 }
 
 test('最初は 1 ページぶん（30 件）だけ並べる', () => {
@@ -174,6 +193,43 @@ test('clear() は空にする', () => {
   const { pager, container } = setup(100);
   pager.clear();
   assert.equal(container.children.length, 0);
+});
+
+test('続きのページが届いたら、作り直さずに 1 ページぶん足す', () => {
+  let asked = 0;
+  const { pager, container, io, built, list } = setup(60, true, { onNeedMore: () => { asked += 1; } });
+  pager.setHasMore(true);
+  io.fire(); // 30 → 60
+  const before = container.children.slice(0, 60);
+  io.fire(); // 手元は出し切った → 続きを頼む
+  assert.equal(asked, 1);
+
+  // 呼び出し側は同じ配列の後ろに足して render し直す（app.js / edit.js の loadMoreHistory）
+  const more = [...list, ...records(120).slice(60)];
+  pager.render(more);
+  pager.setHasMore(true);
+  assert.equal(shownIds(container).length, 90, '届いたぶんが並んでいません（次にスクロールするまで出ない）');
+  assert.ok(before.every((el, i) => container.children[i] === el), '並んでいたカードを作り直しています（サムネが読み込み直しになる）');
+  assert.equal(built.length, 90);
+  assert.equal(new Set(built).size, 90);
+});
+
+test('末尾に居たまま続きが届いても、そこで止まらない', () => {
+  let asked = 0;
+  const { pager, container, io, list } = setup(30, true, { onNeedMore: () => { asked += 1; } });
+  pager.setHasMore(true);
+  io.flush();
+  io.state.visible = true; // ユーザーは一番下に居て、番人が見えっぱなし
+  io.fire(); // 手元は 30 件で出し切っている → 続きを頼む
+  assert.equal(asked, 1);
+
+  // 小さいページが届いて、足しても番人がまだ見えている（画面の高さが足りない）
+  pager.render([...list, ...records(40).slice(30)]);
+  pager.setHasMore(true);
+  assert.equal(shownIds(container).length, 40);
+  // 見えっぱなしでも、足したあとに見え方を確かめ直して続きを頼む
+  while (io.flush()) { /* 初回通知を配り切る */ }
+  assert.equal(asked, 2, '番人が見えたままなのに続きを頼んでいません（ここで途切れる）');
 });
 
 test('IntersectionObserver が無い環境では全件並べる', () => {
