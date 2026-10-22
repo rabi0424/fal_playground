@@ -12,6 +12,9 @@
 //   - 編集の結果から seed と実際の解像度（X-Width / X-Height）を拾うこと
 //   - 依頼順に送り出し、前の応答を待たずに次を送ること（応答待ちの間に積まれた
 //     ジョブもその場で送り、alarm が重なっても二重に送らないこと）
+//   - 同じコンテナの組へ同時に送るのは MODAL_MAX_INFLIGHT 本までで、あふれたぶんは
+//     Worker で待たせること（Modal の前で待たせると 524 で切られる）
+//   - 打ち切りと記録の保持期間を、積んだ時刻ではなく送り出した / 終わった時刻から数えること
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
@@ -65,13 +68,14 @@ function makeModal({ headers = {} } = {}) {
   return { calls, fetch };
 }
 
-function makeDo(mod) {
+function makeDo(mod, extraEnv = {}) {
   const storage = makeStorage();
   const bucket = makeBucket({ sub: 0 });
   const env = {
     IMAGES: bucket,
     MODAL_PROXY_KEY: 'wk-test',
     MODAL_PROXY_SECRET: 'ws-test',
+    ...extraEnv,
   };
   return { stub: new mod.SyncState({ storage }, env), storage, bucket, env };
 }
@@ -311,10 +315,10 @@ test('いつまでも終わらないジョブは打ち切る（「編集中…�
   await stub.alarm();
   assert.equal((await stub.getKrea2Job(id)).status, 'pending');
 
-  // 上限を過ぎるまで走ったことにする
+  // 上限を過ぎるまで走ったことにする（数えるのは Modal へ送り出してから）
   const key = `krea2:job:${id}`;
   const stored = await storage.get(key);
-  stored.created = Date.now() - 31 * 60 * 1000;
+  stored.submittedAt = Date.now() - 31 * 60 * 1000;
   await storage.put(key, stored);
   await storage.deleteAlarm();
   await stub.alarm();
@@ -819,7 +823,8 @@ test('順番: キーの辞書順ではなく依頼順に送り、送信の間を
 
 test('並列: 前の応答を待たずに次を送り、応答待ちの間に積まれたジョブも拾う', async () => {
   const mod = await loadWorker();
-  const { stub, storage } = makeDo(mod);
+  // コンテナを 3 つまで使える設定（max_containers を上げたとき）
+  const { stub, storage } = makeDo(mod, { MODAL_MAX_INFLIGHT: '3' });
   const modal = makeHeldModal();
   globalThis.fetch = modal.fetch;
 
@@ -866,6 +871,131 @@ test('並列: alarm が重なって届いても、同じジョブを二重に送
 
   assert.equal(modal.posts.length, 1);
   assert.equal((await stub.getKrea2Job('4'.repeat(32))).status, 'done');
+});
+
+test('同時送信数: コンテナ数を超えたぶんは Modal に送らず、Worker で待たせる', async () => {
+  const mod = await loadWorker();
+  const { stub, storage } = makeDo(mod); // 既定は 1（max_containers=1）
+  const modal = makeHeldModal();
+  globalThis.fetch = modal.fetch;
+
+  const unified = 'https://x--y.modal.run/generate';
+  await stub.startKrea2Job('1'.repeat(32), { prompt: 'a' }, unified, 'generate', 'unified');
+  await stub.startKrea2Job('2'.repeat(32), { prompt: 'b' }, unified, 'generate', 'qwen21');
+  // 別アプリ（別コンテナ）の組は待たせない
+  await stub.startKrea2Job('3'.repeat(32), { prompt: 'c' },
+    'https://x--y.modal.run/klein', 'generate', 'klein');
+  await storage.deleteAlarm();
+  const pass = stub.alarm();
+
+  await waitFor(() => modal.posts.length === 2, '別の組のジョブの送信');
+  await new Promise((r) => setTimeout(r, 100));
+  // 同じコンテナの組（unified と qwen21）は 1 本ずつ
+  assert.deepEqual(modal.posts.map((p) => p.prompt), ['a', 'c']);
+  const queued = await stub.getKrea2Job('2'.repeat(32));
+  assert.equal(queued.status, 'pending');
+  assert.equal(queued.started, false, 'Worker で待っている間は送り出していない');
+
+  // 1 本目が終われば、次が送られる
+  modal.posts[0].release();
+  await waitFor(() => modal.posts.length === 3, '空いたコンテナへの送信');
+  assert.equal(modal.posts[2].prompt, 'b');
+  modal.releaseAll();
+  await pass;
+  await runAlarms(stub, storage);
+  for (const id of ['1', '2', '3']) {
+    const job = await stub.getKrea2Job(id.repeat(32));
+    assert.equal(job.status, 'done', job.error ?? '');
+  }
+  assert.equal(modal.posts.length, 3, '送り直していない');
+});
+
+test('同時送信数: 環境変数がおかしな値なら既定の 1 に落とす', async () => {
+  const mod = await loadWorker();
+  const { stub, storage } = makeDo(mod, { MODAL_MAX_INFLIGHT: 'abc' });
+  const modal = makeHeldModal();
+  globalThis.fetch = modal.fetch;
+
+  const url = 'https://x--y.modal.run/generate';
+  await stub.startKrea2Job('1'.repeat(32), { prompt: 'a' }, url, 'generate', 'unified');
+  await stub.startKrea2Job('2'.repeat(32), { prompt: 'b' }, url, 'generate', 'unified');
+  await storage.deleteAlarm();
+  const pass = stub.alarm();
+  await waitFor(() => modal.posts.length === 1, '1 本目の送信');
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(modal.posts.length, 1);
+  modal.releaseAll();
+  await waitFor(() => modal.posts.length === 2, '2 本目の送信');
+  modal.releaseAll();
+  await pass;
+});
+
+test('打ち切り: Worker で順番を待っているだけのジョブは打ち切らない', async () => {
+  const mod = await loadWorker();
+  const { stub, storage } = makeDo(mod);
+  const modal = makeHeldModal();
+  globalThis.fetch = modal.fetch;
+
+  const url = 'https://x--y.modal.run/generate';
+  await stub.startKrea2Job('1'.repeat(32), { prompt: 'a' }, url, 'generate', 'unified');
+  await stub.startKrea2Job('2'.repeat(32), { prompt: 'b' }, url, 'generate', 'unified');
+  // 2 本目は積まれてから 31 分経っているが、まだ一度も送り出していない
+  const key = `krea2:job:${'2'.repeat(32)}`;
+  const stored = await storage.get(key);
+  stored.created = Date.now() - 31 * 60 * 1000;
+  await storage.put(key, stored);
+
+  await storage.deleteAlarm();
+  const pass = stub.alarm();
+  await waitFor(() => modal.posts.length >= 1, '送信');
+  modal.releaseAll();
+  await waitFor(() => modal.posts.length === 2, '2 本目の送信');
+  modal.releaseAll();
+  await pass;
+  await runAlarms(stub, storage);
+  assert.equal((await stub.getKrea2Job('2'.repeat(32))).status, 'done');
+});
+
+test('保持: 未完了は消さず、終わったものは終わった時刻から数えて残し、入力画像は落とす', async () => {
+  const mod = await loadWorker();
+  const { stub, storage } = makeDo(mod);
+  globalThis.fetch = makeModal().fetch;
+
+  const done = '1'.repeat(32);
+  await stub.startKrea2Job(done, { prompt: 'edit', image: 'A'.repeat(1000), mask: 'B' },
+    'https://x--y.modal.run/edit', 'edit', 'wan-edit');
+  await runAlarms(stub, storage);
+  const doneKey = `krea2:job:${done}`;
+  const rec = await storage.get(doneKey);
+  assert.equal(rec.status, 'done');
+  assert.ok(rec.finishedAt, '終わった時刻を控える');
+  assert.equal(rec.payload.image, undefined, '入力画像は残さない');
+  assert.equal(rec.payload.mask, undefined);
+  assert.equal(rec.payload.prompt, 'edit');
+
+  // 積まれてから何時間経っていても、終わってからが浅ければ消さない
+  rec.created = Date.now() - 5 * 60 * 60 * 1000;
+  await storage.put(doneKey, rec);
+  // まだ送り出していない古いジョブ（Worker で待っているだけ）も消さない
+  const waiting = '2'.repeat(32);
+  const waitingKey = `krea2:job:${waiting}`;
+  globalThis.fetch = async () => new Promise(() => {}); // 応答しない
+  await stub.startKrea2Job(waiting, { prompt: 'w' }, 'https://x--y.modal.run/generate', 'generate', 'unified');
+  const w = await storage.get(waitingKey);
+  w.created = Date.now() - 5 * 24 * 60 * 60 * 1000;
+  await storage.put(waitingKey, w);
+
+  await stub.startKrea2Job('3'.repeat(32), { prompt: 'x' }, 'https://x--y.modal.run/generate', 'generate', 'unified');
+  assert.ok(await storage.get(doneKey), '終わってから 3 日以内の記録は残る');
+  assert.ok(await storage.get(waitingKey), '未完了の記録は残る');
+
+  // 終わってから 3 日を過ぎたら消す
+  const old = await storage.get(doneKey);
+  old.finishedAt = Date.now() - 4 * 24 * 60 * 60 * 1000;
+  await storage.put(doneKey, old);
+  await stub.startKrea2Job('4'.repeat(32), { prompt: 'y' }, 'https://x--y.modal.run/generate', 'generate', 'unified');
+  assert.equal(await storage.get(doneKey), undefined);
+  assert.ok(await storage.get(waitingKey));
 });
 
 /* ---- 実行 ---- */
