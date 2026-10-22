@@ -50,10 +50,25 @@ function chunkBatch(items, size = DO_BATCH) {
 // Modal 生成ジョブの設定。ジョブは Durable Object の alarm でサーバー側完結で
 // 処理する（クライアントとの接続が切れても結果を取りこぼさないため）
 const JOB_TTL_MS = 60 * 60 * 1000; // 完了・失敗ジョブの保持期間
+// Modal のジョブは**終わってから**この間残す。履歴への登録は結果を受け取った画面が
+// 行うので、ページを離れている間に終わったジョブは、戻ってきた画面が取りに来るまで
+// 消してはいけない（消すと画像は R2 に残るのに履歴に載らず、やがて掃除される）。
+// 終わったジョブは重い入力（画像・マスク）を落としてから残すので、長めに取っても軽い
+const MODAL_JOB_DONE_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 // 走り続けているジョブを打ち切る上限。Wan2.2 + VACE の編集が 900 秒級なので
 // その倍以上を取る。ここが無いと、ポーリングが何かの理由で終わらないときに
-// クライアントが「編集中…」のまま止まり続ける
+// クライアントが「編集中…」のまま止まり続ける。数えるのは Modal へ送り出してから
+// （Worker の中で順番を待っていた時間は含めない）
 const JOB_MAX_RUN_MS = 30 * 60 * 1000;
+// 同じコンテナの組（MODAL_WARM_GROUPS）へ同時に送るジョブの数の既定値。
+// modal_comfy の max_containers（既定 1）に合わせる。上げたときは Worker の
+// 環境変数 MODAL_MAX_INFLIGHT も同じ値にする。
+//
+// コンテナ数より多く送ると、あふれた分は Modal の前で HTTP 接続を開いたまま
+// 順番を待つ。その待ちが 100 秒前後に達すると、Modal の 303（150 秒）より先に
+// 経路の途中で 524 で切られ、一度に大量に投げた後ろのほうが全部失敗していた。
+// あふれた分は Worker の中で待たせる
+const MODAL_MAX_INFLIGHT_DEFAULT = 1;
 const JOB_POLL_DELAY_MS = 2000;
 // Modal へ新しく送るジョブどうしの間隔。応答を待たずに続けて送るので、
 // 着く順（＝ Modal 側の入力キューの順）が通信の揺らぎで入れ替わらないよう空ける
@@ -93,6 +108,17 @@ const MODAL_WARM_GROUPS = {
   'klein-edit': 'krea2-qwen21-klein',
   moss: 'krea2-qwen21',
 };
+
+// ジョブが使うコンテナの組。組の表に無いもの（古い記録など）は送り先の URL ごとに分ける
+function modalGroup(job) {
+  return MODAL_WARM_GROUPS[job.endpointKey] ?? job.endpoint;
+}
+
+// 組ごとの同時送信数。環境変数 MODAL_MAX_INFLIGHT（modal_comfy の max_containers と揃える）
+function modalMaxInflight(env) {
+  const n = Math.floor(Number(env?.MODAL_MAX_INFLIGHT));
+  return Number.isFinite(n) && n >= 1 ? n : MODAL_MAX_INFLIGHT_DEFAULT;
+}
 const JOB_MAX_SUBMIT_ATTEMPTS = 2; // 送信自体の再試行上限（多重生成・多重課金の防止）
 
 // プッシュ通知（生成完了の通知）の設定
@@ -2213,10 +2239,13 @@ export class SyncState extends DurableObject {
     const key = `krea2:job:${id}`;
     if (await this.ctx.storage.get(key)) return;
 
-    // ついでに保持期間を過ぎた古いジョブを掃除する
+    // ついでに保持期間を過ぎた古いジョブを掃除する。未完了のものは、Worker の中で
+    // 順番を待っているだけかもしれないので消さない（打ち切りは runKrea2Job が行う）
     const jobs = await this.ctx.storage.list({ prefix: 'krea2:job:' });
     for (const [k, j] of jobs) {
-      if (Date.now() - j.created > JOB_TTL_MS) await this.ctx.storage.delete(k);
+      if (j.status !== 'pending' && Date.now() - (j.finishedAt ?? j.created) > MODAL_JOB_DONE_TTL_MS) {
+        await this.ctx.storage.delete(k);
+      }
     }
 
     // 送り出す順番はこの時刻で決める（ジョブ ID は乱数なのでキー順は依頼順にならない）。
@@ -2367,6 +2396,7 @@ export class SyncState extends DurableObject {
     const running = new Map(); // key -> 応答待ちの Promise
     const retryAt = new Map(); // key -> 次に進めてよい時刻（202 を詰めて叩かない）
     const admitUntil = Date.now() + MODAL_PUMP_WINDOW_MS;
+    const maxInflight = modalMaxInflight(this.env);
     let lastPostAt = -Infinity;
     let rescan = true;
 
@@ -2383,7 +2413,13 @@ export class SyncState extends DurableObject {
           retryAt.set(key, redirected ? 0 : Date.now() + JOB_POLL_DELAY_MS);
         } else {
           known.delete(key);
-          if (after) await this.queueJobNotice('krea2:job:', after);
+          if (after) {
+            // 保持期間は終わった時刻から数える。入力の画像・マスクはもう要らないので
+            // 落としてから残す（数 MB の base64 を何日も抱えないため）
+            const { image: _img, mask: _mask, images: _imgs, ...payload } = after.payload ?? {};
+            await this.ctx.storage.put(key, { ...after, payload, finishedAt: Date.now() });
+            await this.queueJobNotice('krea2:job:', after);
+          }
         }
       })
         .catch(() => retryAt.set(key, Date.now() + JOB_POLL_DELAY_MS))
@@ -2398,11 +2434,26 @@ export class SyncState extends DurableObject {
           if (job.status === 'pending' && !running.has(key)) known.set(key, job);
         }
       }
+      // コンテナの組ごとに、いま Modal に預けているジョブの数（送信中・303 後の結果待ち・
+      // 202 の間を空けている最中のどれも、コンテナを 1 つ使っている）
+      const inflight = new Map();
+      for (const [key, job] of known) {
+        if (job.submittedAt == null && !running.has(key)) continue;
+        const group = modalGroup(job);
+        inflight.set(group, (inflight.get(group) ?? 0) + 1);
+      }
       const now = Date.now();
       const due = [...known]
         .filter(([key]) => !running.has(key) && (retryAt.get(key) ?? 0) <= now)
         .sort(([ka, a], [kb, b]) => (a.created - b.created) || (ka < kb ? -1 : ka > kb ? 1 : 0));
       for (const [key, job] of due) {
+        // まだ送っていないジョブは、その組に空きがあるときだけ送る。空くまでは
+        // ここ（Worker）で待たせる。組が違えば別のコンテナなので互いに待たない
+        if (job.submittedAt == null) {
+          const group = modalGroup(job);
+          if ((inflight.get(group) ?? 0) >= maxInflight) continue;
+          inflight.set(group, (inflight.get(group) ?? 0) + 1);
+        }
         if (!job.pollUrl) {
           const wait = lastPostAt + MODAL_SUBMIT_GAP_MS - Date.now();
           if (wait > 0) await sleep(wait);
@@ -2737,8 +2788,10 @@ export class SyncState extends DurableObject {
   // 1 ジョブを進める。Modal が 303（処理継続中）を返したらポーリング URL を保存して
   // pending のまま戻り、次の alarm で続きを確認する
   async runKrea2Job(key, job) {
-    // いつまでも「編集中…」のままにしない。打ち切った理由も添える
-    if (Date.now() - job.created > JOB_MAX_RUN_MS) {
+    // いつまでも「編集中…」のままにしない。打ち切った理由も添える。
+    // 数えるのは Modal へ送り出してから（Worker の中で順番を待っていた時間は
+    // 含めない。一度に大量に積むと、後ろのジョブはそれだけで上限を超えてしまう）
+    if (job.submittedAt != null && Date.now() - job.submittedAt > JOB_MAX_RUN_MS) {
       job.status = 'error';
       job.error = `${Math.round(JOB_MAX_RUN_MS / 60000)} 分以内に完了しませんでした`
         + `（Modal ダッシュボードで状態を確認してください${job.lastError ? `。最後のエラー: ${job.lastError}` : ''}）`;

@@ -2066,13 +2066,20 @@ async function modalSubmit(body) {
 // started を返さない古い Worker では、最初の応答で開始したものとみなす
 async function modalAwaitJob(job, jobId, onStart) {
   const timeoutMs = job.input?.checkpoint ? MODAL_CKPT_TIMEOUT_MS : MODAL_TIMEOUT_MS;
-  const pollStart = Date.now();
+  const timedOut = () => new Error(
+    `${timeoutMs / 1000} 秒以内に完了しませんでした。Modal ダッシュボードでアプリの状態を確認してください`);
+  // 打ち切りは、サーバーが Modal へ送り出してからの経過（runningMs）で判定する。
+  // Worker の中で順番を待っている間は数えない（一度に大量に投げると、後ろのジョブは
+  // 待っているだけで上限を超え、生成は続いているのに画面ではエラーになっていた）。
+  // サーバーに届かない状態が続いたときだけは、こちらの時計で打ち切る
+  let unreachableSince = null;
   while (true) {
     await sleep(MODAL_POLL_INTERVAL_MS);
     if (job.cancelled) throw new Error('キャンセルされました');
 
     const res = await fetch(`/api/krea2/job/${jobId}`).catch(() => null);
     if (res && !isHtmlResponse(res)) {
+      unreachableSince = null;
       if (res.status === 404) {
         throw new Error('ジョブが見つかりませんでした（サーバー側で期限切れになった可能性があります）');
       }
@@ -2081,13 +2088,13 @@ async function modalAwaitJob(job, jobId, onStart) {
       if (job && job.started !== false && onStart) { onStart(job); onStart = null; }
       if (job?.status === 'done') return job;
       if (job?.status === 'error') throw modalErrors.fromJobError(job.error, '生成に失敗しました');
+      // 完了を確かめた後に判定する（タブ休止からの復帰時、完了済みなら結果を採用できる）
+      if (job?.runningMs != null && job.runningMs > timeoutMs) throw timedOut();
+      continue;
     }
 
-    // タイムアウト判定はポーリング結果を確認した後に行う（タブ休止からの復帰時、
-    // 完了済みならタイムアウトにせず結果を採用できる）
-    if (Date.now() - pollStart > timeoutMs) {
-      throw new Error(`${timeoutMs / 1000} 秒以内に完了しませんでした。Modal ダッシュボードでアプリの状態を確認してください`);
-    }
+    unreachableSince ??= Date.now();
+    if (Date.now() - unreachableSince > timeoutMs) throw timedOut();
   }
 }
 

@@ -72,6 +72,14 @@ test('Durable Object が残した job.error からステータスを読み取る
   assert.match(d.message, /時間内に/);
 });
 
+test('524（応答待ちの途中で接続が切れた）を、番号だけでなく何が起きたかで出す', () => {
+  const m = load();
+  const d = m.describeText('Modal API error 524: error code: 524');
+  assert.equal(d.status, 524);
+  assert.match(d.message, /接続が切れました/);
+  assert.match(d.detail, /error code: 524/); // 原文は残る
+});
+
 test('Worker が日本語で返しているものは、そのまま活かす', () => {
   const m = load();
   const d = m.describeText('入力画像が見つかりませんでした（アップロードからやり直してください）');
