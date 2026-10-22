@@ -30,8 +30,8 @@ const MODAL_QWEN21_ID = 'modal/qwen-image-2.1';
 // **本番の統合版とは別の Modal アプリ（krea2-qwen21-klein-api）**に載っていて、
 // 上の Krea 2 / Qwen 2.1 とはコンテナを共有しない（そちらはまだ旧アプリを向いている）
 const MODAL_FLUX3_KLEIN_ID = 'modal/flux-3-image-klein';
-// MOSS-Image（modal_comfy の krea2_qwen_app の moss_generate）。Klein と同じく
-// **本番の統合版とは別の Modal アプリ（krea2-qwen21-moss-api）**に載っている
+// MOSS-Image（modal_comfy の krea2_qwen_app の moss_generate）。Krea 2 / Qwen 2.1 と
+// 同じ統合版のコンテナ（krea2-qwen21-api）に載っている
 const MODAL_MOSS_IMAGE_ID = 'modal/moss-image';
 
 const MODELS = [
