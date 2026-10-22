@@ -76,9 +76,8 @@ const MODAL_WARM_MS_DEFAULT = 3 * 60 * 1000;
 
 // **同じコンテナを共有するエンドポイントの組**。片方を使えばもう片方も
 // ウォームになるので、最後に使った時刻はこの組ごとに 1 つ持つ
-// （統合版は Krea 2 の生成・Qwen 2.1 の生成・参照画像編集で 1 コンテナ）。
-// FLUX 3 Klein は別アプリ（krea2-qwen21-klein-api）なので、生成と編集の 2 本で別の組。
-// MOSS-Image もさらに別のアプリ（krea2-qwen21-moss-api）なので単独の組
+// （統合版は Krea 2 の生成・Qwen 2.1 の生成・参照画像編集・MOSS-Image の生成で 1 コンテナ）。
+// FLUX 3 Klein は別アプリ（krea2-qwen21-klein-api）なので、生成と編集の 2 本で別の組
 const MODAL_WARM_GROUPS = {
   exp: 'exp',
   gpusnap: 'gpusnap',
@@ -92,7 +91,7 @@ const MODAL_WARM_GROUPS = {
   'qwen21-edit': 'krea2-qwen21',
   klein: 'krea2-qwen21-klein',
   'klein-edit': 'krea2-qwen21-klein',
-  moss: 'krea2-qwen21-moss',
+  moss: 'krea2-qwen21',
 };
 const JOB_MAX_SUBMIT_ATTEMPTS = 2; // 送信自体の再試行上限（多重生成・多重課金の防止）
 
@@ -4393,10 +4392,11 @@ export default {
         // チェックポイント（蒸留版 / Base）でサーバーが決めるので、ここでは補わない
         klein: env.KLEIN_ENDPOINT_GENERATE
           || 'https://rabitteru--krea2-qwen21-klein-api-comfyapi-klein-generate.modal.run',
-        // MOSS-Image。これも**別の Modal アプリ（krea2-qwen21-moss-api）**。SFT / Base の
+        // MOSS-Image。Krea 2 / Qwen 2.1 と同じ統合版のコンテナに載っている
+        // （以前は別アプリ krea2-qwen21-moss-api だった）。SFT / Base の
         // どちらでも steps / cfg の既定はサーバーが本家の推奨（50 / 3）で決める
         moss: env.MOSS_ENDPOINT_GENERATE
-          || 'https://rabitteru--krea2-qwen21-moss-api-comfyapi-moss-generate.modal.run',
+          || 'https://rabitteru--krea2-qwen21-api-comfyapi-moss-generate.modal.run',
       };
       // Object.hasOwn で見る（'constructor' のような継承プロパティを
       // 許可リストの当たりと取り違えないため）

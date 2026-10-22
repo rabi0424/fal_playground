@@ -621,7 +621,7 @@ Modal 版を選んでいるあいだ、**生成ボタンの隣に小さなリン
 
 - 緑 → 残り 30 秒で黄 → 残り 10 秒で赤 → 冷えたら輪郭だけ
 - 生成中は満ちたまま静かに脈打ちます（コンテナが動いている状態）
-- 起点は Worker が持ちます（`/api/krea2/warm`）。生成・画像編集・比較アリーナのどの画面から、どの端末で投げたジョブでも Worker を通るので、**ほかの端末で温めた分もそのまま反映**されます。**同じコンテナを共有するエンドポイント**（統合版と Qwen 2.1、Wan の生成と編集、LanPaint の生成とインペイント、FLUX 3 Klein の生成と編集）には同じ時刻が配られます（MOSS-Image は単独の組です）
+- 起点は Worker が持ちます（`/api/krea2/warm`）。生成・画像編集・比較アリーナのどの画面から、どの端末で投げたジョブでも Worker を通るので、**ほかの端末で温めた分もそのまま反映**されます。**同じコンテナを共有するエンドポイント**（統合版と Qwen 2.1・MOSS-Image、Wan の生成と編集、LanPaint の生成とインペイント、FLUX 3 Klein の生成と編集）には同じ時刻が配られます
 - 残り時間の計算はブラウザ側で毎秒行うので、表示の更新でサーバーに問い合わせることはありません（読み直すのはモデルを選び直したとき・タブに戻ったとき・冷えた瞬間の 1 回だけ）
 
 ## モデルごとの設定の記憶
@@ -743,9 +743,9 @@ Qwen 2.1 と同じくマスクを使わない参照画像編集ですが、**指
 
 | 用途 | URL（既定） | 上書き |
 |---|---|---|
-| 生成 | `https://rabitteru--krea2-qwen21-moss-api-comfyapi-moss-generate.modal.run` | `MOSS_ENDPOINT_GENERATE` |
+| 生成 | `https://rabitteru--krea2-qwen21-api-comfyapi-moss-generate.modal.run` | `MOSS_ENDPOINT_GENERATE` |
 
-- **Modal のアプリ名がさらに別です（`krea2-qwen21-moss-api`）。** Klein のときと同じく、本番の `krea2-qwen21-api` にも Klein の `krea2-qwen21-klein-api` にも手を付けずに別名でデプロイしてあるので、**ほかのモデルとはコンテナを共有しません**（ウォーム表示も単独の組です）
+- **Krea 2 / Qwen 2.1 と同じ統合版のアプリ（`krea2-qwen21-api`）に載っています。** 3 モデルとも 1 つのコンテナで VRAM に載せたままにできるので、モデルを行き来してもコールドスタートになりません（ウォーム表示も共通です）。ただしコンテナは 1 台なので、MOSS-Image の 1 枚（ウォームで約 30 秒）を生成している間は Krea 2 / Qwen 2.1 のジョブがその後ろで待ちます
 - **チェックポイントは SFT（`moss_image_sft_bf16.safetensors`。既定）と Base（`moss_image_base_bf16.safetensors`）。** どちらもチェックポイント欄から登録なしで選べます。SFT は Base を厳選データで追加学習した「仕上げ版」で、**Klein の蒸留版のような高速版ではありません。** 普段は SFT、Base は LoRA 学習の土台・比較用です
 - **ステップ・ガイダンスの既定は SFT / Base 共通で 50 ステップ / cfg 3**（本家の推奨）。空欄なら送らずサーバーの既定に任せます。ガイダンスを掛ける前提なので、1 枚あたりは Krea 2 / Klein 蒸留版より大幅に重くなります
 - サンプラー・スケジューラの既定は `euler` / `sgm_uniform`（OpenMOSS 公式の ComfyUI ワークフローの値）です。サーバー側で shift 5 と「negative 側だけ 22 層目を飛ばす」設定（本家の `uncond_skip_layers=[22]`）も既定で入ります
