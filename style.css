@@ -2873,6 +2873,10 @@ a.dl-btn { display: inline-block; text-decoration: none; text-align: center; }
 /* 追加プロンプトは書き足し用なので、編集プロンプトより浅く見せる */
 .extra-prompt-field textarea { min-height: 56px; }
 
+/* ネガティブプロンプトも短く書くことが多いので浅く見せる */
+.negative-field textarea { min-height: 56px; }
+.negative-field .hint { font-size: 12px; color: var(--muted); }
+
 /* 名前欄の候補リスト（登録済みの名前を入力中に出す）。
    入力欄のすぐ下に浮かせる。項目数が多いときはこの中でスクロールさせる */
 .suggest-wrap { position: relative; }

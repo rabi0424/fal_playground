@@ -86,6 +86,13 @@
       <textarea id="prompt" rows="6" placeholder="生成したい画像を英語で記述..." spellcheck="false"></textarea>
     </label>
 
+    <!-- negative prompt を受け付けるモデル（Modal の Qwen 2.1 / FLUX 3 Klein / MOSS-Image）だけ出す。空欄は送らない -->
+    <label class="field prompt-field negative-field" id="negativeField" hidden>
+      <span class="label">ネガティブプロンプト</span>
+      <textarea id="negativePrompt" rows="2" placeholder="空欄で未指定" spellcheck="false"></textarea>
+      <span class="hint" id="negativeHint"></span>
+    </label>
+
     <details class="field lora-accordion" id="loraField" hidden open>
       <summary class="label" id="loraLabel">LoRA</summary>
       <div id="loraList" class="lora-list"></div>

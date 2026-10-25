@@ -37,6 +37,8 @@ const MODAL_MOSS_IMAGE_ID = 'modal/moss-image';
 const MODELS = [
   // safetyChecker: fal 側の安全チェッカー（enable_safety_checker）を持つモデル。常に切って送る
   // acceleration: fal 側の高速化（none / regular）。品質を採るので none を明示して送る
+  // negative: negative_prompt を受け付けるモデル。cfg > 1 のときだけ効くので、
+  //   negativeHint でそのモデルでの効き方を欄の下に出す
   { id: 'fal-ai/krea-2/turbo/lora', name: 'Krea 2 [turbo] LoRA', sizeParam: 'image_size', lora: true, loraBase: 'krea2', maxLoras: 3, safetyChecker: true, acceleration: 'none' },
   { id: MODAL_KREA2_EXP_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 実験版）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'exp' },
   { id: MODAL_KREA2_GPUSNAP_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal GPUスナップ版）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'gpusnap' },
@@ -55,17 +57,17 @@ const MODELS = [
   // チェックポイントに公式 Turbo を選ぶと、サーバーが 8 ステップの sigma 列で回す
   // unified: Qwen 2.1 と同居する統合版。Krea 2 側の API は wan / lanpaint と同じ
   { id: MODAL_KREA2_UNIFIED_ID, name: 'Krea 2 [turbo] 自前ホスト（Modal 統合版・Qwen 2.1 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'krea2', provider: 'modal', modalEndpoint: 'unified', ckpt: true, defaultCkpt: 'krea2_turbo_bf16.safetensors', sampler: true },
-  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版・Krea 2 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', defaultCkpt: 'qwen_image_2.1_bf16.safetensors', sampler: true, defaultSampler: 'euler', cfgMax: 10, stepsHint: '40（本家の既定。Turbo のチェックポイントなら 8）', turboStepsHint: '8（公式 Turbo の固定スケジュール。数値を入れると通常のスケジューラで回る）', cfgSteps: true },
+  { id: MODAL_QWEN21_ID, name: 'Qwen-Image 2.1 自前ホスト（Modal 統合版・Krea 2 と共有）', sizeParam: 'image_size', lora: true, loraBase: 'qwen21', provider: 'modal', modalEndpoint: 'qwen21', ckpt: true, ckptBase: 'qwen21', defaultCkpt: 'qwen_image_2.1_bf16.safetensors', sampler: true, defaultSampler: 'euler', cfgMax: 10, stepsHint: '40（本家の既定。Turbo のチェックポイントなら 8）', turboStepsHint: '8（公式 Turbo の固定スケジュール。数値を入れると通常のスケジューラで回る）', cfgSteps: true, negative: true, negativeHint: 'ガイダンスを 1 より上げたときだけ効きます（既定の 1 では評価されません）' },
   // klein: FLUX 3 Image Klein。Krea 2・Qwen 2.1・FLUX.2 klein のどれとも別モデルで、
   // **LoRA は FLUX 3 Klein 用のものしか効かない**（loraBase で分けている）。
   // steps / cfg の既定は**チェックポイントで変わる**（蒸留版 16 / 1、Base 50 / 3.5）。
   // 空欄ならキーごと落として送るので（buildModalInput）、サーバーがチェックポイントに
   // 合った既定を選ぶ。Krea 2 の 8 ステップのような既定値をこちらで埋めないこと
-  { id: MODAL_FLUX3_KLEIN_ID, name: 'FLUX 3 Image Klein 自前ホスト（Modal）', sizeParam: 'image_size', lora: true, loraBase: 'flux3klein', maxLoras: 16, provider: 'modal', modalEndpoint: 'klein', ckpt: true, ckptBase: 'flux3klein', defaultCkpt: 'flux3_image_klein_sd_bf16.safetensors', sampler: true, defaultSampler: 'euler', cfgMax: 10, stepsHint: '蒸留版 16 / Base 50（チェックポイントで既定が変わる）', cfgHint: '蒸留版 1 / Base 3.5（チェックポイントで既定が変わる）' },
+  { id: MODAL_FLUX3_KLEIN_ID, name: 'FLUX 3 Image Klein 自前ホスト（Modal）', sizeParam: 'image_size', lora: true, loraBase: 'flux3klein', maxLoras: 16, provider: 'modal', modalEndpoint: 'klein', ckpt: true, ckptBase: 'flux3klein', defaultCkpt: 'flux3_image_klein_sd_bf16.safetensors', sampler: true, defaultSampler: 'euler', cfgMax: 10, stepsHint: '蒸留版 16 / Base 50（チェックポイントで既定が変わる）', cfgHint: '蒸留版 1 / Base 3.5（チェックポイントで既定が変わる）', negative: true, negativeHint: 'ガイダンスが 1 より上のとき（Base の既定は 3.5）だけ効きます。蒸留版の既定（1）では評価されません' },
   // moss: MOSS-Image。**SFT と Base は蒸留版 / Base の関係ではない**（SFT は品質の
   // 追加学習）ので、steps / cfg の既定はどちらも 50 / 3（本家の推奨）。cfg を掛ける
   // 前提なので 1 枚が重い。スケジューラは公式ワークフローの sgm_uniform が既定
-  { id: MODAL_MOSS_IMAGE_ID, name: 'MOSS-Image 自前ホスト（Modal）', sizeParam: 'image_size', lora: true, loraBase: 'mossimage', maxLoras: 16, provider: 'modal', modalEndpoint: 'moss', ckpt: true, ckptBase: 'mossimage', defaultCkpt: 'moss_image_sft_bf16.safetensors', sampler: true, defaultSampler: 'euler', defaultScheduler: 'sgm_uniform', cfgMax: 10, stepsHint: '50（本家の推奨。SFT / Base 共通）', cfgHint: '3（本家の推奨。1 より上は約2倍遅い）' },
+  { id: MODAL_MOSS_IMAGE_ID, name: 'MOSS-Image 自前ホスト（Modal）', sizeParam: 'image_size', lora: true, loraBase: 'mossimage', maxLoras: 16, provider: 'modal', modalEndpoint: 'moss', ckpt: true, ckptBase: 'mossimage', defaultCkpt: 'moss_image_sft_bf16.safetensors', sampler: true, defaultSampler: 'euler', defaultScheduler: 'sgm_uniform', cfgMax: 10, stepsHint: '50（本家の推奨。SFT / Base 共通）', cfgHint: '3（本家の推奨。1 より上は約2倍遅い）', negative: true, negativeHint: 'ガイダンスが 1 より上のとき（既定の 3 なら効く）だけ評価されます' },
   { id: 'fal-ai/flux/schnell', name: 'FLUX.1 [schnell]（高速・安価）', sizeParam: 'image_size' },
   { id: 'fal-ai/flux/dev', name: 'FLUX.1 [dev]', sizeParam: 'image_size' },
   { id: 'fal-ai/flux-pro/v1.1', name: 'FLUX1.1 [pro]', sizeParam: 'image_size' },
@@ -168,6 +170,9 @@ const els = {
   ckptSummaryNote: $('#ckptSummaryNote'),
   warmRing: $('#warmRing'),
   prompt: $('#prompt'),
+  negativeField: $('#negativeField'),
+  negativePrompt: $('#negativePrompt'),
+  negativeHint: $('#negativeHint'),
   loraField: $('#loraField'),
   loraLabel: $('#loraLabel'),
   loraList: $('#loraList'),
@@ -576,6 +581,9 @@ function updateModelFields() {
   els.scheduler.options[0].textContent = `デフォルト（${model.defaultScheduler ?? 'simple'}）`;
   // 前半だけ cfg を掛ける 2 段サンプリング（Qwen-Image 2.1 の cfg_steps）
   els.q21CfgRow.hidden = !model.cfgSteps;
+  // negative prompt は受け付けるモデルだけ出す。中身はモデルを跨いで残す（プロンプトと同じ）
+  els.negativeField.hidden = !model.negative;
+  els.negativeHint.textContent = model.negativeHint ?? '';
 
   // aspect_ratio 系モデルはピクセル指定に非対応なのでカスタムを出さない
   const supportsCustom = model.sizeParam !== 'aspect_ratio';
@@ -2005,6 +2013,9 @@ const MODAL_POLL_INTERVAL_MS = 2000;
 
 function buildModalInput(prompt) {
   const input = { prompt };
+  // 受け付けないモデルでは欄が隠れているので送らない。空欄もキーごと落とす
+  const negative = els.negativePrompt.value.trim();
+  if (!els.negativeField.hidden && negative) input.negative_prompt = negative;
   if (els.sizeSelect.value === CUSTOM_SIZE) {
     input.width = snapDim(els.customWidth.value);
     input.height = snapDim(els.customHeight.value);
@@ -2592,6 +2603,13 @@ function renderDetail(record) {
   promptFull.textContent = record.prompt;
   meta.appendChild(promptFull);
 
+  if (record.input?.negative_prompt) {
+    const negativeLine = document.createElement('div');
+    negativeLine.className = 'meta-line';
+    negativeLine.textContent = `negative: ${record.input.negative_prompt}`;
+    meta.appendChild(negativeLine);
+  }
+
   const metaLine = document.createElement('div');
   metaLine.className = 'meta-line';
   const loraText = record.loras?.length
@@ -3052,6 +3070,11 @@ function revealGalleryItem(el) {
 // プロンプトだけを入れ替える（モデル・LoRA・シードなどの設定はそのまま）
 function reusePrompt(record) {
   els.prompt.value = record.prompt ?? '';
+  // negative prompt はそれを受け付けるモデルの記録のときだけ入れ替える
+  //（Krea 2 などの記録で、書きかけの negative を消さないため）
+  if (MODELS.find((m) => m.id === record.model)?.negative) {
+    els.negativePrompt.value = record.input?.negative_prompt ?? '';
+  }
   // 下書きの保存などはふだんの入力と同じ経路で拾わせる
   els.prompt.dispatchEvent(new Event('input', { bubbles: true }));
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -3059,6 +3082,7 @@ function reusePrompt(record) {
 
 function reuseRecord(record) {
   els.prompt.value = record.prompt;
+  els.negativePrompt.value = record.input?.negative_prompt ?? '';
   const known = MODELS.some((m) => m.id === record.model);
   // 履歴からの再利用でもモデルが変わりうる。**切り替える前に**今のモデルの
   // 状態を控えておかないと、この記録の内容が前のモデルの分として保存される
@@ -3223,6 +3247,7 @@ function saveFormState() {
     model: els.modelSelect.value,
     customModel: els.customModel.value,
     prompt: els.prompt.value,
+    negativePrompt: els.negativePrompt.value,
     numImages: els.numImages.value,
     seed: els.seed.value,
     seedLock: els.seedLock.checked,
@@ -3243,6 +3268,7 @@ function restoreFormState() {
   if (s.model) populateModelSelect(s.model);
   els.customModel.value = s.customModel || '';
   els.prompt.value = s.prompt || '';
+  els.negativePrompt.value = s.negativePrompt || '';
   els.numImages.value = s.numImages || '1';
   els.seed.value = s.seed || '';
   els.seedLock.checked = !!s.seedLock;
