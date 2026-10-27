@@ -639,6 +639,29 @@ test('image_id 列が無い既存の DB でも、一覧が落ちない', async (
   assert.ok(cols.includes('image_id'), `列が足されていません: ${cols.join(', ')}`);
 });
 
+test('スキーマ版が上がると、既存の DB にもアーカイブの生成日順の索引が足される', async () => {
+  const env = makeEnv(await loadWorker());
+  await call(await loadWorker(), env, '/api/history'); // 片付けまで済んだ状態にする
+  // 索引を足す前（版 4）の本番と同じ形に戻す
+  env.d1.db.exec('DROP INDEX history_archive_created');
+  env.d1.db.exec("UPDATE meta SET v = '4' WHERE k = 'schema_version'");
+
+  // isolate の覚え（historyCatalogReady）を持ち越さないよう、読み込み直す
+  const res = await call(await loadWorker(), env, '/api/history');
+  assert.equal(res.status, 200);
+  const names = rows(env, 'PRAGMA index_list(history)').map((r) => r.name);
+  assert.ok(names.includes('history_archive_created'), `索引がありません: ${names.join(', ')}`);
+
+  // image_viewer の一覧（docs/shared-contract.md）がこの索引で引けること。
+  // 引けないと 1 ページごとに全行を読み、D1 の読み取り枠を食い潰す
+  const plan = rows(env, `EXPLAIN QUERY PLAN
+    SELECT seq FROM history WHERE source <> 'playground'
+      AND (created < ? OR (created = ? AND seq < ?))
+      ORDER BY created DESC, seq DESC LIMIT 120`, 1, 1, 1).map((r) => r.detail).join(' | ');
+  assert.match(plan, /history_archive_created/, plan);
+  assert.doesNotMatch(plan, /TEMP B-TREE/, plan);
+});
+
 test('既存の画像参照に image_id が埋め戻され、一覧は全件たどれる', async () => {
   const mod = await loadWorker();
   const env = makeEnv(mod);
