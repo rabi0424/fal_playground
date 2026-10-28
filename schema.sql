@@ -44,6 +44,12 @@ CREATE TABLE IF NOT EXISTS history (
 
 CREATE INDEX IF NOT EXISTS history_source_seq ON history (source, seq DESC);
 
+-- アーカイブ側の生成日順の一覧（source <> 'playground' ORDER BY created DESC, seq DESC）。
+-- D1 の無料枠は読んだ行数で数えるので、これが無いと 1 ページごとに全行を読む。
+-- 部分索引なので playground の行は入らない（生成のたびの書き込みが増えない）
+CREATE INDEX IF NOT EXISTS history_archive_created
+  ON history (created DESC, seq DESC) WHERE source <> 'playground';
+
 -- 画像 → それを載せている履歴。1 枚が複数の記録に出ることがある
 -- （編集の入力に使い回したときなど）ので、参照の数え上げに使う。
 -- これが無いと、片方の記録を消しただけでもう片方の画像が消える。

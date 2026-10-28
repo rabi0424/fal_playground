@@ -1185,7 +1185,7 @@ const META_PARAMS = 'params_backfilled';
 const META_LINKS_CURSOR = 'image_links_cursor';
 const META_GC_CURSOR = 'image_gc_cursor';
 const META_GC_STATS = 'image_gc_stats';
-const SCHEMA_VERSION = '4';
+const SCHEMA_VERSION = '5';
 
 // 自分が配信している画像の id。64 桁は内容アドレス（中身の sha256）、
 // 32 桁はそうする前に置いた画像（ランダム UUID）。どちらもそのまま配信する
@@ -1252,6 +1252,13 @@ const HISTORY_ALTERS = [
 
 const HISTORY_INDEXES = [
   'CREATE INDEX IF NOT EXISTS history_source_seq ON history (source, seq DESC)',
+  // アーカイブ（image_viewer）の生成日順の一覧用。D1 の無料枠は「読んだ行数」
+  // （500 万行/日）で数えるので、索引の無い ORDER BY created は 1 ページごとに
+  // 表をまるごと読む ―― 実際に 1 回 3.7 万行、スクロールだけで枠を食い潰した。
+  // 部分索引にしたのは、向こうの一覧が必ず source <> 'playground' を付けるから。
+  // playground の行は索引に入らないので、生成のたびの書き込みも増えない
+  `CREATE INDEX IF NOT EXISTS history_archive_created
+     ON history (created DESC, seq DESC) WHERE source <> 'playground'`,
   'CREATE INDEX IF NOT EXISTS history_images_owner ON history_images (history_id)',
   'CREATE INDEX IF NOT EXISTS history_images_image ON history_images (image_id)',
 ];
