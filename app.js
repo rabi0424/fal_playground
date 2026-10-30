@@ -3381,13 +3381,17 @@ document.addEventListener('visibilitychange', () => {
 
 // 生成ボタンの長押し: クリップボードの中身でプロンプト欄を書き換えてから生成する。
 // 欄そのものが書き変わるので、以後ふつうに押してもそのプロンプトのまま。
-// クリップボードは**指を離したとき**（pointerup）に読む。iOS Safari は readText を
-// ユーザー操作の中でしか許さないので、押している間のタイマーからは読めない。
+// iOS Safari は readText をユーザー操作の中でしか許さない。押している間のタイマーは
+// もちろん、長押しを離したときの pointerup の中でも拒まれた（実機で確認）。
+// 長押しを離すと iOS はそのボタンの click を送ってくるので、**読むのは click の中**。
 // タイマーは「いま離せばクリップボードから生成」になった合図を出すだけ
 const LONG_PRESS_MS = 500;
+// 長押しのあと click が来ない環境（Android の長押しなど）の受け皿。iOS の click より
+// 先に走ると Safari では読めないので、十分あとにする
+const CLIPBOARD_CLICK_WAIT_MS = 1000;
 let pressTimer = null;
 let pressLabel = null; // 合図の間だけ差し替えている元のボタン表示
-let swallowClick = false;
+let clipboardPending = null; // 長押しを離してから click を待っている間のタイマー
 
 function cancelPress() {
   clearTimeout(pressTimer);
@@ -3399,12 +3403,20 @@ function cancelPress() {
   }
 }
 
+function takeClipboardPending() {
+  if (clipboardPending === null) return false;
+  clearTimeout(clipboardPending);
+  clipboardPending = null;
+  return true;
+}
+
 async function generateFromClipboard() {
   let text;
   try {
+    // await より前に呼ぶこと（間に await を挟むと Safari はユーザー操作と見なさない）
     text = (await navigator.clipboard.readText()).trim();
-  } catch {
-    setError('クリップボードを読めませんでした');
+  } catch (err) {
+    setError(`クリップボードを読めませんでした（${err?.name || err}）`);
     return;
   }
   if (!text) { setError('クリップボードが空です'); return; }
@@ -3416,8 +3428,7 @@ async function generateFromClipboard() {
 
 els.generateBtn.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
-  // 前回の長押しのあと click が来なかった場合に備えて、押し始めで必ず戻す
-  swallowClick = false;
+  takeClipboardPending();
   cancelPress();
   pressTimer = setTimeout(() => {
     pressTimer = null;
@@ -3430,8 +3441,11 @@ els.generateBtn.addEventListener('pointerup', () => {
   const armed = pressLabel !== null;
   cancelPress();
   if (!armed) return;
-  swallowClick = true; // 続いて来る click で、元のプロンプトでも生成してしまわないように
-  generateFromClipboard();
+  // ここでは読まず、続いて来る click に任せる
+  clipboardPending = setTimeout(() => {
+    clipboardPending = null;
+    generateFromClipboard();
+  }, CLIPBOARD_CLICK_WAIT_MS);
 });
 // 指がずれてスクロールになった・ボタンの外へ出たときは長押しをやめる
 els.generateBtn.addEventListener('pointercancel', cancelPress);
@@ -3439,8 +3453,8 @@ els.generateBtn.addEventListener('pointerleave', cancelPress);
 // Android やマウスの長押しで出るメニューを抑える
 els.generateBtn.addEventListener('contextmenu', (e) => e.preventDefault());
 els.generateBtn.addEventListener('click', () => {
-  if (swallowClick) { swallowClick = false; return; }
-  generate();
+  if (takeClipboardPending()) generateFromClipboard();
+  else generate();
 });
 // 生成完了時に出る「生成結果へ」。押されたときだけ結果まで送る
 els.jumpResult?.addEventListener('click', scrollToDetail);
