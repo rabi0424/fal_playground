@@ -86,7 +86,7 @@ const SIZES = [
   { value: 'portrait_3_4', label: '縦長 3:4（896×1152）', width: 896, height: 1152, ratio: '3:4' },
   { value: 'portrait_2_3', label: '縦長 2:3（1024×1536）', width: 1024, height: 1536, ratio: '2:3' },
   { value: 'portrait_9_16', label: '縦長 9:16（768×1344）', width: 768, height: 1344, ratio: '9:16' },
-  // 縦長の高解像度。縦を上限の 2048 にしたもの（約 2.4MP）
+  // 縦長の高解像度。縦を 2048 にしたもの（約 2.4MP）
   { value: 'portrait_9_16_2k', label: '縦長 9:16 高解像度（1152×2048）', width: 1152, height: 2048, ratio: '9:16' },
 ];
 
@@ -112,9 +112,11 @@ const SCHEDULER_NAMES = [
   'simple', 'sgm_uniform', 'karras', 'exponential', 'ddim_uniform', 'beta', 'normal',
   'linear_quadratic', 'kl_optimal',
 ];
+// 解像度の上限は設けない（モデルや Modal 側が受け付けなければ、そちらのエラーが出る）。
+// 大きすぎる指定は打ち間違いのことが多いので、LARGE_MP を超えたら生成前に確かめる
 const DIM_MIN = 256;
-const DIM_MAX = 2048;
 const DIM_STEP = 8;
+const LARGE_MP = 10;
 
 const LS_HISTORY = 'fal_history'; // サーバー履歴の表示用キャッシュ
 const LS_HISTORY_MIGRATED = 'fal_history_migrated';
@@ -599,7 +601,7 @@ function updateModelFields() {
 
 function snapDim(value) {
   const n = Math.round(Number(value) / DIM_STEP) * DIM_STEP;
-  return Math.min(DIM_MAX, Math.max(DIM_MIN, n || DIM_MIN));
+  return Math.max(DIM_MIN, n || DIM_MIN);
 }
 
 // 固定中のアスペクト比（幅 / 高さ）。固定していなければ null
@@ -611,16 +613,16 @@ function parseRatio(text) {
 }
 
 // 片方の辺（anchor: 'w' | 'h'）を value にして、もう一方を比率 r から決める。
-// もう一方が 256〜2048 を外れるときは、そちらを端に合わせて anchor 側を引き直す
-//（9:16 で幅 2048 と打たれたら、高さ 2048・幅 1152 にする）。
+// もう一方が 256 を下回るときは、そちらを 256 にして anchor 側を引き直す
+//（9:16 で高さ 300 と打たれたら、幅 256・高さ 456 にする）。
 // どちらも 8 の倍数に丸めるので、比率はわずかにずれることがある
 function fitToRatio(r, anchor, value) {
   const other = (x) => (anchor === 'w' ? x / r : x * r);
   const back = (y) => (anchor === 'w' ? y * r : y / r);
   let a = snapDim(value);
   let b = other(a);
-  if (b > DIM_MAX || b < DIM_MIN) {
-    b = Math.min(DIM_MAX, Math.max(DIM_MIN, b));
+  if (b < DIM_MIN) {
+    b = DIM_MIN;
     a = snapDim(back(b));
   }
   b = snapDim(b);
@@ -1936,12 +1938,23 @@ function pollStatusText(job, status, runningSince, prefix = '') {
   setJobStatus(job, `${prefix}生成中… ${elapsed}s`);
 }
 
+// カスタム解像度が LARGE_MP を超えていたら確かめる。プリセットはどれも小さいので見ない
+function confirmLargeSize() {
+  if (els.sizeSelect.value !== CUSTOM_SIZE) return true;
+  const w = snapDim(els.customWidth.value);
+  const h = snapDim(els.customHeight.value);
+  const mp = (w * h) / 1_000_000;
+  if (mp <= LARGE_MP) return true;
+  return confirm(`${w}×${h}（${mp.toFixed(1)} MP）で生成します。${LARGE_MP} MP を超えていますが、よろしいですか？`);
+}
+
 async function generate() {
   const model = MODELS.find((m) => m.id === els.modelSelect.value) || MODELS[0];
   const modelId = currentModelId();
   const prompt = els.prompt.value.trim();
 
   if (!prompt) { setError('プロンプトを入力してください'); return; }
+  if (!confirmLargeSize()) return;
 
   // Modal 自前ホスト版は fal ではなく Worker の専用ジョブ API で生成する
   if (model.provider === 'modal') { await generateModal(model, prompt); return; }
