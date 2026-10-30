@@ -1164,6 +1164,18 @@ button:focus-visible, a.ghost-btn:focus-visible, a.nav-item:focus-visible {
 
 .generate-row .primary-btn { flex: 1; min-width: 0; }
 
+/* 生成ボタンは長押しでクリップボードから生成する。iOS の長押しで文字選択や
+   メニューが出ないようにし、「離せば貼り付けて生成」になったら色で知らせる */
+#generateBtn {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#generateBtn.long-armed {
+  background: var(--accent-hover);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
 /* ウォームの残り時間。秒数は出さず、リングが減るだけ（急かさないため）。
    残り 30 秒で黄、10 秒で赤。冷えているときは輪郭だけ残す */
 .warm-ring {

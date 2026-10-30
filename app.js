@@ -3379,7 +3379,69 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-els.generateBtn.addEventListener('click', generate);
+// 生成ボタンの長押し: クリップボードの中身でプロンプト欄を書き換えてから生成する。
+// 欄そのものが書き変わるので、以後ふつうに押してもそのプロンプトのまま。
+// クリップボードは**指を離したとき**（pointerup）に読む。iOS Safari は readText を
+// ユーザー操作の中でしか許さないので、押している間のタイマーからは読めない。
+// タイマーは「いま離せばクリップボードから生成」になった合図を出すだけ
+const LONG_PRESS_MS = 500;
+let pressTimer = null;
+let pressLabel = null; // 合図の間だけ差し替えている元のボタン表示
+let swallowClick = false;
+
+function cancelPress() {
+  clearTimeout(pressTimer);
+  pressTimer = null;
+  if (pressLabel !== null) {
+    els.generateBtn.textContent = pressLabel;
+    els.generateBtn.classList.remove('long-armed');
+    pressLabel = null;
+  }
+}
+
+async function generateFromClipboard() {
+  let text;
+  try {
+    text = (await navigator.clipboard.readText()).trim();
+  } catch {
+    setError('クリップボードを読めませんでした');
+    return;
+  }
+  if (!text) { setError('クリップボードが空です'); return; }
+  els.prompt.value = text;
+  // 下書きの保存などはふだんの入力と同じ経路で拾わせる
+  els.prompt.dispatchEvent(new Event('input', { bubbles: true }));
+  generate();
+}
+
+els.generateBtn.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  // 前回の長押しのあと click が来なかった場合に備えて、押し始めで必ず戻す
+  swallowClick = false;
+  cancelPress();
+  pressTimer = setTimeout(() => {
+    pressTimer = null;
+    pressLabel = els.generateBtn.textContent;
+    els.generateBtn.textContent = 'クリップボードから生成';
+    els.generateBtn.classList.add('long-armed');
+  }, LONG_PRESS_MS);
+});
+els.generateBtn.addEventListener('pointerup', () => {
+  const armed = pressLabel !== null;
+  cancelPress();
+  if (!armed) return;
+  swallowClick = true; // 続いて来る click で、元のプロンプトでも生成してしまわないように
+  generateFromClipboard();
+});
+// 指がずれてスクロールになった・ボタンの外へ出たときは長押しをやめる
+els.generateBtn.addEventListener('pointercancel', cancelPress);
+els.generateBtn.addEventListener('pointerleave', cancelPress);
+// Android やマウスの長押しで出るメニューを抑える
+els.generateBtn.addEventListener('contextmenu', (e) => e.preventDefault());
+els.generateBtn.addEventListener('click', () => {
+  if (swallowClick) { swallowClick = false; return; }
+  generate();
+});
 // 生成完了時に出る「生成結果へ」。押されたときだけ結果まで送る
 els.jumpResult?.addEventListener('click', scrollToDetail);
 els.addLoraBtn.addEventListener('click', () => addLoraRow('', undefined, els.loraList, false, true));
